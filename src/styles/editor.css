@@ -1,0 +1,12 @@
+/*
+ * Layout of the CodeMirror host element.
+ * Colours and typography of the editor itself are configured in
+ * `src/editor/editorConfig.ts`.
+ */
+
+.editor-host {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}

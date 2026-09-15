@@ -1,0 +1,80 @@
+/*
+ * Global application styles: theme tokens, reset and the app shell.
+ * Replace the token values below to re-skin the application.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* Palette */
+  --color-bg: #16181d;
+  --color-bg-raised: #1c1f26;
+  --color-border: #2a2e37;
+  --color-text: #d7dae0;
+  --color-text-muted: #8b93a1;
+  --color-text-subtle: #5c6472;
+  --color-line-active: #1e222a;
+  --color-selection: #2b4a75;
+  --color-caret: #7cb0ff;
+
+  /* Typography */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+  --font-size-ui: 13px;
+  --font-size-editor: 14px;
+
+  /* Layout */
+  --app-header-height: 34px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app__header {
+  display: flex;
+  flex: 0 0 var(--app-header-height);
+  align-items: center;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-bg-raised);
+  user-select: none;
+}
+
+.app__wordmark {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Hosts the editor and hands it every pixel left over by the shell. */
+.app__content {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
