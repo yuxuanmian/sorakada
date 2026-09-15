@@ -1,6 +1,6 @@
 # Sorakada
 
-A modern, good-looking desktop text editor aimed at programmers — not an IDE.
+A modern, good-looking desktop text editor aimed at programmers
 
 > **Status: Early Development.** Only the application skeleton exists so far: a Tauri
 > window rendering an embedded CodeMirror 6 editor. There is no file handling, no
