@@ -62,10 +62,29 @@ const editorTheme = EditorView.theme(
  * `basicSetup` already provides line numbers, the undo/redo history with its
  * keymap (`Ctrl+Z` / `Ctrl+Y`), selection handling, bracket matching and the
  * default key bindings, so nothing has to be hand-assembled yet.
+ *
+ * `basicSetup` installs `historyKeymap`, which binds `Mod-z` to undo. That is
+ * deliberately left in place as the fallback for a browser-only `vite dev`
+ * session. In the desktop shell the application's own `keydown` dispatcher
+ * (`src/app/App.tsx`) matches the IDEA profile first and calls
+ * `stopPropagation`, so one `Ctrl+Z` reaches `editor.undo` exactly once and
+ * never also reaches this binding. Do not add a second shortcut route.
  */
 const editorExtensions: Extension = [basicSetup, editorTheme];
 
-/** Creates the initial state for an editor showing `doc` (empty by default). */
-export function createEditorState(doc = ""): EditorState {
-  return EditorState.create({ doc, extensions: editorExtensions });
+/**
+ * Creates the state for a document showing `doc` (empty by default).
+ *
+ * `extraExtensions` lets the `EditorHandle` add the extension it needs to hear
+ * about document changes; every state created for a handle — including the
+ * fresh state used to reset a document — must carry the same extension set.
+ */
+export function createEditorState(
+  doc = "",
+  extraExtensions: Extension = [],
+): EditorState {
+  return EditorState.create({
+    doc,
+    extensions: [editorExtensions, extraExtensions],
+  });
 }

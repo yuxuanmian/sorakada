@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -52,5 +53,13 @@ export default defineConfig({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+  },
+
+  // Vitest only picks up the pure TypeScript lifecycle/command tests. The
+  // production Vite pipeline above is untouched: browser/native behaviour is
+  // validated manually with `specs/001-single-file-editing/quickstart.md`.
+  test: {
+    environment: "node",
+    include: ["src/**/*.test.ts"],
   },
 });
