@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Local npm cache used when the global cache is not writable
+.npm-cache/
+
 # Frontend build output
 dist/
 dist-ssr/
@@ -39,3 +42,7 @@ lerna-debug.log*
 .DS_Store
 Thumbs.db
 desktop.ini
+.specify
+.agents
+.vscode
+specs
