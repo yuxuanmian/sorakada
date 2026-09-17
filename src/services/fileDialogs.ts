@@ -21,7 +21,13 @@ export interface FileDialogService {
   pickSavePath(currentPath: string | null): Promise<string | null>;
   /** Reports a failure the user needs to see. */
   showError(text: string): Promise<void>;
-  /** Three-way prompt shown before New/Open/Exit discards unsaved work. */
+  /**
+   * Three-way prompt shown before a dirty document is closed or before the
+   * application window exits.
+   *
+   * New and Open are multi-document operations in 002: they add or activate a
+   * document without discarding the current one, so they never run this guard.
+   */
   confirmUnsavedChanges(displayName: string): Promise<UnsavedChoice>;
 }
 
@@ -71,7 +77,8 @@ const APP_DIALOG_TITLE = "Sorakada";
  * The labels of the three-button unsaved-work prompt.
  *
  * Kept in one place because these exact strings are what the native dialog
- * hands back: see `toUnsavedChoice`.
+ * hands back: see `toUnsavedChoice`. The prompt is used only by Tab close and
+ * window exit.
  */
 export const UNSAVED_WORK_BUTTONS = {
   save: "Save",

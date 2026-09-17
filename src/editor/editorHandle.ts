@@ -1,84 +1,111 @@
-import type { Extension, Text } from "@codemirror/state";
+import type { EditorState, Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { redo, undo } from "@codemirror/commands";
 
-import { createEditorState } from "./editorConfig";
+import type {
+  DocumentId,
+  DocumentViewState,
+} from "../app/document/documentSession";
 
-/** Invoked whenever CodeMirror reports that the document text changed. */
-export type DocumentChangeListener = () => void;
+/**
+ * Invoked for every CodeMirror update.
+ *
+ * The document id is the identity the bridge had bound at the moment the update
+ * was produced, which is what lets the manager attribute a state change to the
+ * right document even when it happened during a Tab switch.
+ */
+export type StateUpdateListener = (
+  documentId: DocumentId,
+  state: EditorState,
+  docChanged: boolean,
+) => void;
 
 /**
  * The imperative operations the application layer needs from the editor.
  *
- * Everything here is addressed to the *active* CodeMirror view, so that no
+ * Everything here is addressed to the *single* live CodeMirror view, so that no
  * caller has to know about `EditorView` or mirror the document into React
- * state. `setDocument` deliberately does not raise a document-change
- * notification: the caller that replaces the document also owns the baseline
- * that replacement establishes.
+ * state. The bridge — not the manager — is the only object that understands
+ * which document is currently installed in that view.
  */
 export interface EditorHandle {
+  /**
+   * Extensions every state created for this handle must include, so the handle
+   * keeps receiving updates after a document state is swapped in.
+   */
+  readonly extensions: Extension;
+
   /** Whether a CodeMirror view is currently attached. */
   isReady(): boolean;
-  /** The current immutable logical document. */
-  getDocument(): Text;
+  /** Binds the one live view to the document it is currently showing. */
+  attach(view: EditorView, documentId: DocumentId): void;
+  /** Releases the view; a later update is no longer attributed to any document. */
+  detach(view: EditorView): void;
+
+  /** The state currently installed in the view. */
+  getState(): EditorState;
   /**
-   * Replaces the document with `text` using a brand new `EditorState`, so
-   * history and selection from the previous document cannot leak into this one.
+   * Installs `state` for `documentId`.
+   *
+   * The document identity is bound *before* the state is set, so any update the
+   * swap produces is attributed to the target document rather than the previous
+   * one.
    */
-  setDocument(text: string): void;
+  setState(documentId: DocumentId, state: EditorState): void;
+
+  /** Captures the reading position the shared view currently shows. */
+  captureViewState(): DocumentViewState;
+  /** Restores a document's reading position after its state was bound. */
+  restoreViewState(viewState: DocumentViewState): void;
+
   /** Moves keyboard focus into the editor. */
   focus(): void;
   /** Runs CodeMirror's own undo command against the active view. */
   undo(): void;
   /** Runs CodeMirror's own redo command against the active view. */
   redo(): void;
-  /** Registers the single receiver of `docChanged` notifications. */
-  setDocumentChangeListener(listener: DocumentChangeListener | null): void;
+
+  /** Registers the single receiver of state updates. */
+  setStateUpdateListener(listener: StateUpdateListener | null): void;
 }
 
 /**
- * The view-binding surface used only by the `Editor` component.
+ * The handle type the `Editor` component binds a view to.
  *
- * The component keeps owning the `EditorView` lifetime while the handle keeps
- * owning the document semantics, which is why the two are separate interfaces.
+ * Attachment is part of the handle surface in 002: the component owns the
+ * `EditorView` lifetime, while the handle owns which document it is showing.
  */
-export interface EditorAttachment {
-  /**
-   * Extensions every state created for this handle must include, so the handle
-   * keeps receiving document changes after a `setDocument` reset.
-   */
-  readonly extensions: Extension;
-  attach(view: EditorView): void;
-  detach(view: EditorView): void;
-}
-
-/** A handle that the `Editor` component can bind a view to. */
-export type AttachedEditorHandle = EditorHandle & EditorAttachment;
+export type AttachedEditorHandle = EditorHandle;
 
 const NOT_ATTACHED_MESSAGE =
   "The editor handle is not attached to a CodeMirror view.";
 
-class EditorHandleImpl implements EditorHandle, EditorAttachment {
+class EditorHandleImpl implements EditorHandle {
   private view: EditorView | null = null;
-  private changeListener: DocumentChangeListener | null = null;
+  private boundDocumentId: DocumentId | null = null;
+  private listener: StateUpdateListener | null = null;
 
   /**
-   * `EditorView.updateListener` reads `changeListener` at call time, so one
+   * `EditorView.updateListener` reads the current binding at call time, so one
    * extension instance can serve every state this handle ever creates.
    */
   readonly extensions: Extension = EditorView.updateListener.of((update) => {
-    if (update.docChanged) {
-      this.changeListener?.();
+    const documentId = this.boundDocumentId;
+    if (documentId === null) {
+      return;
     }
+    this.listener?.(documentId, update.state, update.docChanged);
   });
 
-  attach(view: EditorView): void {
+  attach(view: EditorView, documentId: DocumentId): void {
     this.view = view;
+    this.boundDocumentId = documentId;
   }
 
   detach(view: EditorView): void {
     if (this.view === view) {
       this.view = null;
+      this.boundDocumentId = null;
     }
   }
 
@@ -86,13 +113,30 @@ class EditorHandleImpl implements EditorHandle, EditorAttachment {
     return this.view !== null;
   }
 
-  getDocument(): Text {
-    return this.requireView().state.doc;
+  getState(): EditorState {
+    return this.requireView().state;
   }
 
-  setDocument(text: string): void {
+  setState(documentId: DocumentId, state: EditorState): void {
     const view = this.requireView();
-    view.setState(createEditorState(text, this.extensions));
+    // Identity first: the update this call produces must already belong to the
+    // target document.
+    this.boundDocumentId = documentId;
+    view.setState(state);
+  }
+
+  captureViewState(): DocumentViewState {
+    const view = this.requireView();
+    return {
+      scrollTop: view.scrollDOM.scrollTop,
+      scrollLeft: view.scrollDOM.scrollLeft,
+    };
+  }
+
+  restoreViewState(viewState: DocumentViewState): void {
+    const view = this.requireView();
+    view.scrollDOM.scrollTop = viewState.scrollTop;
+    view.scrollDOM.scrollLeft = viewState.scrollLeft;
   }
 
   focus(): void {
@@ -107,8 +151,8 @@ class EditorHandleImpl implements EditorHandle, EditorAttachment {
     redo(this.requireView());
   }
 
-  setDocumentChangeListener(listener: DocumentChangeListener | null): void {
-    this.changeListener = listener;
+  setStateUpdateListener(listener: StateUpdateListener | null): void {
+    this.listener = listener;
   }
 
   private requireView(): EditorView {

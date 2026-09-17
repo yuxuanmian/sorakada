@@ -60,6 +60,7 @@ export async function installAppMenu(
       await commandItem("file.open", "Open..."),
       await commandItem("file.save", "Save"),
       await commandItem("file.saveAs", "Save As..."),
+      await commandItem("file.close", "Close"),
       await PredefinedMenuItem.new({ item: "Separator" }),
       await commandItem("app.exit", "Exit"),
     ],

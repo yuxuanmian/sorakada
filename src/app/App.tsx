@@ -8,8 +8,15 @@ import { tauriFileService } from "../services/fileService";
 import { createCommandRegistry } from "./commands/commandRegistry";
 import type { CommandId } from "./commands/commandIds";
 import { commandForKeyboardEvent } from "./commands/ideaKeymap";
-import { DocumentController } from "./document/documentController";
+import { DocumentManager } from "./document/documentManager";
+import type { DocumentManagerSnapshot } from "./document/documentSession";
+import { processDroppedPaths } from "./dragdrop/fileDropController";
 import { installAppMenu } from "./menu/appMenu";
+import {
+  createActivationBenchmark,
+  installActivationBenchmark,
+} from "./performance/activationBenchmark";
+import { TabBar } from "./tabs/TabBar";
 import { installWindowLifecycle } from "./window/windowLifecycle";
 
 import "../styles/global.css";
@@ -32,46 +39,76 @@ function describeError(error: unknown): string {
 /**
  * Application shell.
  *
- * React owns the UI and the session *metadata*; CodeMirror owns the live
- * document; Rust owns the byte-level file format. This component only wires
- * those three together and registers the command handlers.
+ * React owns the UI and the lightweight Tab *metadata*; the `DocumentManager`
+ * owns the documents; CodeMirror owns the live text; Rust owns the byte-level
+ * file format. This component only wires those together and registers the
+ * command handlers.
  */
 export function App() {
   const [editorHandle] = useState(createEditorHandle);
   const [registry] = useState(createCommandRegistry);
-  const [controller] = useState(
+  const [benchmark] = useState(createActivationBenchmark);
+  const [manager] = useState(
     () =>
-      new DocumentController({
+      new DocumentManager({
         editor: editorHandle,
         fileService: tauriFileService,
         dialogs: nativeFileDialogService,
-        destroyWindow: () => getCurrentWindow().destroy(),
+        activationBenchmark: benchmark,
       }),
   );
+  const [snapshot, setSnapshot] = useState<DocumentManagerSnapshot>(() =>
+    manager.getSnapshot(),
+  );
+
+  // Purely visual: the manager owns what a drop actually does.
+  const [isFileDragActive, setIsFileDragActive] = useState(false);
+
+  // The document the shared view starts on. Captured once: every later switch
+  // goes through the manager, never through a new `EditorView`.
+  const [initialDocument] = useState(() => {
+    const session = manager.getActiveSession();
+    return { documentId: session.id, initialState: session.editorState };
+  });
 
   useEffect(() => {
-    editorHandle.setDocumentChangeListener(() => {
-      controller.handleDocumentChanged();
+    const unsubscribe = manager.subscribe(setSnapshot);
+
+    // Benchmark-only: publishes the SC-005 timing marks for the manual
+    // switching run described in `quickstart.md` §12.
+    installActivationBenchmark(benchmark);
+
+    // The bridge reports every state update with the document it was bound to,
+    // which is what keeps a Tab switch from being credited to the wrong Tab.
+    editorHandle.setStateUpdateListener((documentId, state, docChanged) => {
+      manager.handleEditorStateUpdate(documentId, state, docChanged);
     });
 
     // Commands carry no business logic of their own: they only forward to the
-    // controller or the editor, which keeps menu, accelerator and (later)
-    // custom keybinding surfaces equivalent by construction.
+    // manager or the editor, which keeps menu, accelerator and (later) custom
+    // keybinding surfaces equivalent by construction.
     const unregisterHandlers = [
-      registry.register("file.new", async () => {
-        await controller.newDocument();
+      registry.register("file.new", () => {
+        manager.createUntitled();
       }),
       registry.register("file.open", async () => {
-        await controller.openDocument();
+        await manager.openFromDialog();
       }),
       registry.register("file.save", async () => {
-        await controller.save();
+        await manager.saveDocument(manager.getActiveSession().id);
       }),
       registry.register("file.saveAs", async () => {
-        await controller.saveAs();
+        await manager.saveDocumentAs(manager.getActiveSession().id);
+      }),
+      registry.register("file.close", async () => {
+        await manager.closeDocument(manager.getActiveSession().id);
       }),
       registry.register("app.exit", async () => {
-        await controller.exit();
+        // Exit asks the manager once, then destroys directly: the normal
+        // last-Tab replacement rule must not run during application exit.
+        if (await manager.prepareCloseAll()) {
+          await getCurrentWindow().destroy();
+        }
       }),
       registry.register("editor.undo", () => {
         editorHandle.undo();
@@ -93,7 +130,7 @@ export function App() {
      *
      * The mapping comes from the same `IDEA_M1_KEYMAP` data the menu renders, so
      * the advertised shortcut and the dispatched command cannot drift apart, and
-     * each keypress resolves to at most one command (FR-032).
+     * each keypress resolves to at most one command.
      *
      * `stopPropagation` keeps CodeMirror's own `Mod-z` history binding from
      * undoing a second time for the same keypress.
@@ -116,6 +153,7 @@ export function App() {
     let disposed = false;
     let disposeMenu: (() => Promise<void>) | null = null;
     let disposeWindow: (() => void) | null = null;
+    let disposeDragDrop: (() => void) | null = null;
 
     const installNativeSurfaces = async (): Promise<void> => {
       if (!isTauriRuntime()) {
@@ -124,9 +162,30 @@ export function App() {
 
       const appWindow = getCurrentWindow();
       const stopWindowLifecycle = await installWindowLifecycle(
-        controller,
+        manager,
         appWindow,
       );
+
+      // Native drag/drop only exists in the desktop shell; a browser-only
+      // session must not attempt to install it at all.
+      const unlistenDragDrop = await appWindow.onDragDropEvent((event) => {
+        const payload = event.payload;
+
+        if (payload.type === "enter" || payload.type === "over") {
+          setIsFileDragActive(true);
+          return;
+        }
+        if (payload.type === "leave") {
+          setIsFileDragActive(false);
+          return;
+        }
+
+        setIsFileDragActive(false);
+        // The batch drives the same open pipeline as File > Open and reports
+        // its own failures, so nothing here needs to surface an error.
+        void processDroppedPaths(payload.paths, manager);
+      });
+
       const restoreMenu = await installAppMenu({
         executeCommand: (id: CommandId) => registry.execute(id),
         onCommandError: (error: unknown) => {
@@ -135,15 +194,17 @@ export function App() {
       });
 
       // React Strict Mode mounts, unmounts and mounts again; an installation
-      // that lost the race has to clean itself up rather than leak a menu or a
-      // duplicate close listener.
+      // that lost the race has to clean itself up rather than leak a menu, a
+      // close listener or a drag/drop listener.
       if (disposed) {
         stopWindowLifecycle();
+        unlistenDragDrop();
         await restoreMenu();
         return;
       }
 
       disposeWindow = stopWindowLifecycle;
+      disposeDragDrop = unlistenDragDrop;
       disposeMenu = restoreMenu;
     };
 
@@ -152,16 +213,18 @@ export function App() {
     return () => {
       disposed = true;
       window.removeEventListener("keydown", onKeyDown, true);
-      editorHandle.setDocumentChangeListener(null);
+      editorHandle.setStateUpdateListener(null);
+      unsubscribe();
 
       for (const unregister of unregisterHandlers) {
         unregister();
       }
 
+      disposeDragDrop?.();
       disposeWindow?.();
       void disposeMenu?.();
     };
-  }, [controller, editorHandle, registry]);
+  }, [benchmark, editorHandle, manager, registry]);
 
   return (
     <div className="app">
@@ -170,7 +233,26 @@ export function App() {
       </header>
 
       <main className="app__content">
-        <Editor handle={editorHandle} />
+        <TabBar
+          tabs={snapshot.tabs}
+          onSelect={(id) => {
+            manager.selectDocument(id);
+          }}
+          onClose={(id) => {
+            void manager.closeDocument(id);
+          }}
+        />
+
+        <div className="editor-area">
+          <Editor
+            handle={editorHandle}
+            documentId={initialDocument.documentId}
+            initialState={initialDocument.initialState}
+          />
+          {isFileDragActive ? (
+            <div className="drop-overlay" aria-hidden="true" />
+          ) : null}
+        </div>
       </main>
     </div>
   );

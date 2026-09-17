@@ -73,4 +73,25 @@ describe("CommandRegistry", () => {
     unregister();
     expect(registry.has("app.exit")).toBe(false);
   });
+
+  it("dispatches file.close through the same registry as every other command", async () => {
+    const registry = createCommandRegistry();
+    const handler = vi.fn();
+    registry.register("file.close", handler);
+
+    expect(registry.has("file.close")).toBe(true);
+    await registry.execute("file.close");
+    await registry.execute("file.close");
+
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a duplicate file.close registration", () => {
+    const registry = createCommandRegistry();
+    registry.register("file.close", () => {});
+
+    expect(() => registry.register("file.close", () => {})).toThrow(
+      /already registered/i,
+    );
+  });
 });

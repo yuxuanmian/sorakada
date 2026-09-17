@@ -6,6 +6,7 @@
 //! [`crate::file_codec`].
 
 use crate::file_codec::{self, FileCommandError, TextFormat, WriteRequest};
+use crate::file_identity::{self, InspectPathRequest, ResolvedPathIdentity};
 use serde::Serialize;
 
 /// Success payload of `read_text_file`.
@@ -32,6 +33,19 @@ pub fn read_text_file(path: String) -> Result<OpenTextFileResult, FileCommandErr
 #[tauri::command]
 pub fn write_text_file(request: WriteRequest) -> Result<(), FileCommandError> {
     file_codec::write_file(&request)
+}
+
+/// Inspects a path without touching its contents.
+///
+/// 002 uses the resolved comparison key to detect an already-open file before
+/// rereading it, to reject a Save As target another document owns, and to
+/// reserve a not-yet-existing destination. It never creates or modifies the
+/// target; only `write_text_file` writes bytes.
+#[tauri::command]
+pub fn inspect_file_path(
+    request: InspectPathRequest,
+) -> Result<ResolvedPathIdentity, FileCommandError> {
+    file_identity::resolve_path_identity(&request.path, request.allow_missing)
 }
 
 #[cfg(test)]
@@ -251,6 +265,128 @@ mod tests {
             std::fs::read(&trailing).expect("read back"),
             b"keep   \nme".to_vec(),
             "trailing spaces and the absent final newline must be preserved"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pins the camelCase request the frontend sends to `inspect_file_path`.
+    #[test]
+    fn inspect_path_request_accepts_the_camel_case_frontend_shape() {
+        let request: InspectPathRequest = serde_json::from_value(json!({
+            "path": "C:\\work\\notes.txt",
+            "allowMissing": true,
+        }))
+        .expect("deserialize the frontend request shape");
+
+        assert_eq!(request.path, "C:\\work\\notes.txt");
+        assert!(request.allow_missing);
+
+        // The frontend only ever spells the flag in camelCase, so a snake_case
+        // drift must fail loudly here rather than silently defaulting.
+        let snake_case =
+            serde_json::from_value::<InspectPathRequest>(json!({
+                "path": "C:\\work\\notes.txt",
+                "allow_missing": true,
+            }));
+        assert!(snake_case.is_err(), "InspectPathRequest is camelCase only");
+    }
+
+    /// Pins the JSON the frontend's `ResolvedPathIdentity` DTO reads.
+    #[test]
+    fn inspect_file_path_matches_the_ipc_contract_shape() {
+        let dir = work_dir("inspect-shape");
+        let path = write_bytes(&dir, "notes.txt", b"alpha\nbeta");
+
+        let value = to_json(
+            &inspect_file_path(InspectPathRequest {
+                path: path.clone(),
+                allow_missing: false,
+            })
+            .expect("inspect should succeed"),
+        );
+
+        assert_eq!(
+            value.as_object().expect("object").len(),
+            5,
+            "ResolvedPathIdentity must carry exactly five fields"
+        );
+        assert_eq!(value["requestedPath"], json!(path));
+        assert_eq!(value["kind"], json!("file"));
+        assert!(value["canonicalPath"].is_string());
+        assert!(value["comparisonKey"].is_string());
+
+        let revision = value["diskRevision"]
+            .as_object()
+            .expect("revision object");
+        assert_eq!(revision.len(), 2, "DiskRevision must carry exactly two fields");
+        assert_eq!(value["diskRevision"]["size"], json!(10));
+        assert!(value["diskRevision"]["modifiedTimeMillis"].is_i64());
+
+        // camelCase only: these spellings would be invisible to `cargo test`
+        // without an explicit assertion.
+        assert!(value.get("requested_path").is_none());
+        assert!(value.get("disk_revision").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Directories and not-yet-existing Save As candidates are both part of the
+    /// contract the manager reads.
+    #[test]
+    fn inspect_file_path_reports_directories_and_missing_candidates() {
+        let dir = work_dir("inspect-kinds");
+        let directory = dir.join("nested");
+        std::fs::create_dir_all(&directory).expect("create nested dir");
+        let missing = dir.join("brand-new.txt").to_string_lossy().to_string();
+
+        let directory_value = to_json(
+            &inspect_file_path(InspectPathRequest {
+                path: directory.to_string_lossy().to_string(),
+                allow_missing: false,
+            })
+            .expect("inspect a directory"),
+        );
+        assert_eq!(directory_value["kind"], json!("directory"));
+
+        let missing_value = to_json(
+            &inspect_file_path(InspectPathRequest {
+                path: missing,
+                allow_missing: true,
+            })
+            .expect("inspect a candidate target"),
+        );
+        assert_eq!(missing_value["kind"], json!("missing"));
+        assert_eq!(missing_value["diskRevision"], Value::Null);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pins the `path_resolution` error the frontend adds to `FileCommandCode`.
+    #[test]
+    fn inspect_file_path_errors_match_the_ipc_contract_shape() {
+        let dir = work_dir("inspect-errors");
+        let missing = dir.join("absent.txt").to_string_lossy().to_string();
+
+        let error = to_json(
+            &inspect_file_path(InspectPathRequest {
+                path: missing,
+                allow_missing: false,
+            })
+            .expect_err("a missing path must not resolve when allowMissing is false"),
+        );
+
+        assert_eq!(error["code"], json!("path_resolution"));
+        assert_eq!(
+            error.as_object().expect("object").len(),
+            2,
+            "FileCommandError must carry exactly code + message"
+        );
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "message must be non-empty for the native error dialog"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

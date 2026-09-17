@@ -33,19 +33,20 @@ function editorWindowsAccelerators(): Set<string> {
 }
 
 describe("IDEA M1 keymap profile", () => {
-  it("maps the six M1 shortcuts to exactly the required accelerators", () => {
+  it("maps the M1 shortcuts to exactly the required accelerators", () => {
     expect(IDEA_M1_KEYMAP).toEqual({
       "file.new": "Ctrl+N",
       "file.open": "Ctrl+O",
       "file.save": "Ctrl+S",
       "file.saveAs": "Ctrl+Shift+S",
+      "file.close": "Ctrl+W",
       "editor.undo": "Ctrl+Z",
       "editor.redo": "Ctrl+Shift+Z",
     });
   });
 
-  it("binds only six of the seven command IDs", () => {
-    expect(Object.keys(IDEA_M1_KEYMAP)).toHaveLength(6);
+  it("binds every command except Exit", () => {
+    expect(Object.keys(IDEA_M1_KEYMAP)).toHaveLength(COMMAND_IDS.length - 1);
     expect(Object.keys(IDEA_M1_KEYMAP).sort()).toEqual(
       COMMAND_IDS.filter((id) => id !== "app.exit")
         .slice()
@@ -62,6 +63,7 @@ describe("IDEA M1 keymap profile", () => {
     expect(acceleratorFor("file.open")).toBe("Ctrl+O");
     expect(acceleratorFor("file.save")).toBe("Ctrl+S");
     expect(acceleratorFor("file.saveAs")).toBe("Ctrl+Shift+S");
+    expect(acceleratorFor("file.close")).toBe("Ctrl+W");
     expect(acceleratorFor("editor.undo")).toBe("Ctrl+Z");
     expect(acceleratorFor("editor.redo")).toBe("Ctrl+Shift+Z");
   });
@@ -94,12 +96,13 @@ describe("IDEA M1 keymap profile", () => {
 });
 
 describe("CommandId catalogue", () => {
-  it("exposes exactly the seven M1 command identifiers", () => {
+  it("exposes exactly the M1 command identifiers", () => {
     expect(COMMAND_IDS).toEqual([
       "file.new",
       "file.open",
       "file.save",
       "file.saveAs",
+      "file.close",
       "app.exit",
       "editor.undo",
       "editor.redo",
@@ -132,10 +135,23 @@ describe("commandForKeyboardEvent", () => {
     expect(
       commandForKeyboardEvent(event("S", { ctrlKey: true, shiftKey: true })),
     ).toBe("file.saveAs");
+    expect(commandForKeyboardEvent(event("w", { ctrlKey: true }))).toBe(
+      "file.close",
+    );
     expect(commandForKeyboardEvent(event("z", { ctrlKey: true }))).toBe("editor.undo");
     expect(
       commandForKeyboardEvent(event("Z", { ctrlKey: true, shiftKey: true })),
     ).toBe("editor.redo");
+  });
+
+  it("closes the current Tab on Ctrl+W instead of exiting the application", () => {
+    expect(commandForKeyboardEvent(event("w", { ctrlKey: true }))).toBe(
+      "file.close",
+    );
+    expect(commandForKeyboardEvent(event("W", { ctrlKey: true }))).toBe(
+      "file.close",
+    );
+    expect(acceleratorFor("app.exit")).toBeUndefined();
   });
 
   it("does not intercept unbound keys or plain typing", () => {

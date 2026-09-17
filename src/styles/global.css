@@ -72,9 +72,11 @@ body {
   text-transform: uppercase;
 }
 
-/* Hosts the editor and hands it every pixel left over by the shell. */
+/* Stacks the Tab strip above the editor and hands them the remaining pixels. */
 .app__content {
   display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
   min-height: 0;
 }

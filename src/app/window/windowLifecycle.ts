@@ -1,4 +1,7 @@
-import type { ActiveDocumentSession } from "../document/documentSession";
+import type {
+  DocumentManagerSnapshot,
+  DocumentSession,
+} from "../document/documentSession";
 
 /** The application name shown in the window title. */
 export const APP_NAME = "Sorakada";
@@ -17,17 +20,26 @@ export interface AppWindowLike {
   ): Promise<() => void>;
 }
 
-/** Everything the window lifecycle needs from the document session. */
+/**
+ * Everything the window lifecycle needs from the document manager.
+ *
+ * The lifecycle never decides whether a Tab may close: it asks the manager for
+ * the close-all decision, which owns the unsaved-work prompts.
+ */
 export interface WindowLifecycleSource {
-  getSession(): ActiveDocumentSession;
-  subscribe(listener: (session: ActiveDocumentSession) => void): () => void;
-  /** The shared unsaved-work guard; `true` means the action may proceed. */
-  runUnsavedGuard(): Promise<boolean>;
+  /** The document whose name and dirty flag the title shows. */
+  getActiveSession(): DocumentSession;
+  /** Whether any open document differs from its saved baseline. */
+  hasDirtyDocuments(): boolean;
+  /** `true` only when every dirty document's decision permits destroying the window. */
+  prepareCloseAll(): Promise<boolean>;
+  /** Fires whenever Tab-visible metadata changes. */
+  subscribe(listener: (snapshot: DocumentManagerSnapshot) => void): () => void;
 }
 
 export interface CloseRequestDeps {
-  isDocumentDirty(): boolean;
-  runUnsavedGuard(): Promise<boolean>;
+  hasDirtyDocuments(): boolean;
+  prepareCloseAll(): Promise<boolean>;
   /**
    * Forced destroy. `destroy()` bypasses close-request interception, which is
    * what keeps an approved close from re-entering this handler.
@@ -35,8 +47,11 @@ export interface CloseRequestDeps {
   destroyWindow(): Promise<void>;
 }
 
-/** `Untitled - Sorakada`, `foo.txt - Sorakada` or `*foo.txt - Sorakada`. */
-export function formatWindowTitle(session: ActiveDocumentSession): string {
+/** `Untitled1 - Sorakada`, `foo.txt - Sorakada` or `*foo.txt - Sorakada`. */
+export function formatWindowTitle(session: {
+  displayName: string;
+  dirty: boolean;
+}): string {
   const dirtyMarker = session.dirty ? "*" : "";
   return `${dirtyMarker}${session.displayName} - ${APP_NAME}`;
 }
@@ -44,21 +59,22 @@ export function formatWindowTitle(session: ActiveDocumentSession): string {
 /**
  * Dirty-aware native close interception.
  *
- * A clean document closes untouched. A dirty one immediately blocks the native
- * close, then runs the same unsaved guard Exit uses, and force-destroys the
- * window only once that guard approves.
+ * A window with no unsaved work closes untouched. Otherwise the native close is
+ * blocked immediately, the manager's close-all guard runs exactly once, and the
+ * window is force-destroyed only when that guard approves. The normal "replace
+ * the last Tab" rule deliberately does not run here.
  */
 export async function handleCloseRequested(
   event: CloseRequestedLike,
   deps: CloseRequestDeps,
 ): Promise<void> {
-  if (!deps.isDocumentDirty()) {
+  if (!deps.hasDirtyDocuments()) {
     return;
   }
 
   event.preventDefault();
 
-  if (await deps.runUnsavedGuard()) {
+  if (await deps.prepareCloseAll()) {
     await deps.destroyWindow();
   }
 }
@@ -71,19 +87,21 @@ export async function installWindowLifecycle(
   source: WindowLifecycleSource,
   appWindow: AppWindowLike,
 ): Promise<() => void> {
-  const syncTitle = (session: ActiveDocumentSession): void => {
+  const syncTitle = (): void => {
     // Title feedback is cosmetic: a failure here must not break the lifecycle.
-    void appWindow.setTitle(formatWindowTitle(session)).catch(() => {});
+    void appWindow
+      .setTitle(formatWindowTitle(source.getActiveSession()))
+      .catch(() => {});
   };
 
-  await appWindow.setTitle(formatWindowTitle(source.getSession()));
+  await appWindow.setTitle(formatWindowTitle(source.getActiveSession()));
 
   const unsubscribe = source.subscribe(syncTitle);
 
   const unlisten = await appWindow.onCloseRequested((event) =>
     handleCloseRequested(event, {
-      isDocumentDirty: () => source.getSession().dirty,
-      runUnsavedGuard: () => source.runUnsavedGuard(),
+      hasDirtyDocuments: () => source.hasDirtyDocuments(),
+      prepareCloseAll: () => source.prepareCloseAll(),
       destroyWindow: () => appWindow.destroy(),
     }),
   );

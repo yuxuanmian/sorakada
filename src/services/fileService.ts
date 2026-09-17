@@ -8,7 +8,8 @@ export type FileCommandCode =
   | "io_write"
   | "unsupported_encoding"
   | "unsupported_binary"
-  | "unsupported_line_ending";
+  | "unsupported_line_ending"
+  | "path_resolution";
 
 /** Serializable error returned by the Rust file commands. */
 export interface FileCommandError {
@@ -30,16 +31,54 @@ export interface WriteTextFileRequest {
   lineEnding: LineEnding;
 }
 
+/** What a resolved path currently is. */
+export type ResolvedPathKind = "file" | "directory" | "missing";
+
+/**
+ * Lightweight metadata captured for a disk object.
+ *
+ * Stored with disk-backed sessions as the extension point for later
+ * external-change validation; 002 never polls or compares it continuously.
+ */
+export interface DiskRevision {
+  size: number;
+  modifiedTimeMillis: number | null;
+}
+
+/**
+ * Result of `inspect_file_path`.
+ *
+ * `canonicalPath` is internal resolution detail; the UI keeps showing the
+ * document's normal path. `comparisonKey` is the only key the multi-document
+ * model uses for open-session ownership and Save As target claims.
+ */
+export interface ResolvedPathIdentity {
+  requestedPath: string;
+  canonicalPath: string;
+  comparisonKey: string;
+  kind: ResolvedPathKind;
+  diskRevision: DiskRevision | null;
+}
+
 /**
  * The file operations the document lifecycle depends on.
  *
  * Keeping this an interface (rather than importing `invoke` directly in the
- * controller) is what makes the lifecycle logic testable without a desktop
- * shell.
+ * manager) is what makes the lifecycle logic testable without a desktop shell.
  */
 export interface FileService {
   readTextFile(path: string): Promise<OpenTextFileResult>;
   writeTextFile(request: WriteTextFileRequest): Promise<void>;
+  /**
+   * Resolves a path to its comparison identity without touching its contents.
+   *
+   * `allowMissing` lets Save As resolve a destination that does not exist yet
+   * through its nearest existing parent.
+   */
+  inspectFilePath(
+    path: string,
+    allowMissing: boolean,
+  ): Promise<ResolvedPathIdentity>;
 }
 
 /** Narrows an unknown rejection value to the contract's error shape. */
@@ -80,7 +119,7 @@ export function toFileCommandError(
   return { code: fallbackCode, message: String(error) };
 }
 
-/** The real file service, backed by the Rust `read_text_file`/`write_text_file` commands. */
+/** The real file service, backed by the Rust `read_text_file`/`write_text_file`/`inspect_file_path` commands. */
 export const tauriFileService: FileService = {
   readTextFile(path: string): Promise<OpenTextFileResult> {
     return invoke<OpenTextFileResult>("read_text_file", { path });
@@ -88,5 +127,14 @@ export const tauriFileService: FileService = {
 
   writeTextFile(request: WriteTextFileRequest): Promise<void> {
     return invoke<void>("write_text_file", { request });
+  },
+
+  inspectFilePath(
+    path: string,
+    allowMissing: boolean,
+  ): Promise<ResolvedPathIdentity> {
+    return invoke<ResolvedPathIdentity>("inspect_file_path", {
+      request: { path, allowMissing },
+    });
   },
 };

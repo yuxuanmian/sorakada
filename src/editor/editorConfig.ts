@@ -1,5 +1,5 @@
 import { basicSetup } from "codemirror";
-import { EditorState, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
 /**
@@ -57,7 +57,51 @@ const editorTheme = EditorView.theme(
 );
 
 /**
- * The extension set every editor instance starts from.
+ * The application-scoped appearance reconfiguration boundary.
+ *
+ * Appearance belongs to the application, not to a document: 002 adds no theme
+ * selector, but every document state installs its appearance through this one
+ * compartment so a later application-level change cannot require a per-document
+ * theme preference or an editor-view rebuild.
+ */
+const appearanceCompartment = new Compartment();
+
+/** The appearance currently applied to newly created document states. */
+let currentAppearance: Extension = editorTheme;
+
+/**
+ * The appearance extension for a newly created state.
+ *
+ * Evaluated per call rather than hoisted into a constant, so a state created
+ * after a reconfiguration picks up the new appearance.
+ */
+function appearanceBoundary(): Extension {
+  return appearanceCompartment.of(currentAppearance);
+}
+
+/**
+ * Replaces the application-wide editor appearance.
+ *
+ * The live view is reconfigured immediately; every state created afterwards
+ * starts from the new appearance as well.
+ */
+export function reconfigureAppearance(
+  view: EditorView,
+  appearance: Extension,
+): void {
+  currentAppearance = appearance;
+  view.dispatch({
+    effects: appearanceCompartment.reconfigure(appearance),
+  });
+}
+
+/**
+ * Creates the state for a document showing `doc` (empty by default).
+ *
+ * This is the only factory any document state is created through — the initial
+ * session in `DocumentManager` included — so every state carries `basicSetup`,
+ * the application appearance boundary, and the caller's runtime extensions in
+ * the same order.
  *
  * `basicSetup` already provides line numbers, the undo/redo history with its
  * keymap (`Ctrl+Z` / `Ctrl+Y`), selection handling, bracket matching and the
@@ -70,21 +114,12 @@ const editorTheme = EditorView.theme(
  * `stopPropagation`, so one `Ctrl+Z` reaches `editor.undo` exactly once and
  * never also reaches this binding. Do not add a second shortcut route.
  */
-const editorExtensions: Extension = [basicSetup, editorTheme];
-
-/**
- * Creates the state for a document showing `doc` (empty by default).
- *
- * `extraExtensions` lets the `EditorHandle` add the extension it needs to hear
- * about document changes; every state created for a handle — including the
- * fresh state used to reset a document — must carry the same extension set.
- */
 export function createEditorState(
   doc = "",
-  extraExtensions: Extension = [],
+  runtimeExtensions: Extension = [],
 ): EditorState {
   return EditorState.create({
     doc,
-    extensions: [editorExtensions, extraExtensions],
+    extensions: [basicSetup, appearanceBoundary(), runtimeExtensions],
   });
 }

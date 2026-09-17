@@ -1,10 +1,15 @@
 /**
- * Session metadata for the single document hosted by CodeMirror.
+ * Session metadata for the documents hosted by CodeMirror.
  *
  * The live text itself deliberately does not live here: CodeMirror owns it. This
- * module only describes *where* the document came from, *how* it must be written
- * back, and whether it currently differs from its last saved snapshot.
+ * module describes *which* documents are open, *where* each one came from, *how*
+ * it must be written back, and whether it currently differs from its last saved
+ * snapshot.
  */
+
+import type { EditorState, Text } from "@codemirror/state";
+
+import type { ResolvedPathIdentity } from "../../services/fileService";
 
 /** M1 supports UTF-8 only; the field stays enum-shaped for later expansion. */
 export type Encoding = "utf8";
@@ -26,19 +31,66 @@ export interface TextFormat {
   preferredLineEnding: LineEnding;
 }
 
-/** Metadata and saved relationship for the active document. */
-export interface ActiveDocumentSession {
+/**
+ * A stable opaque identifier assigned when a document session is created.
+ *
+ * It is never derived from the display name or the file path, and it does not
+ * change when the document is renamed through Save As. Asynchronous operations
+ * capture this id and use it to find their originating session on completion.
+ */
+export type DocumentId = string;
+
+/** Reading position that `EditorState` does not preserve on its own. */
+export interface DocumentViewState {
+  /** Vertical scroll offset of the shared view when this document left it. */
+  scrollTop: number;
+  /** Horizontal scroll offset of the shared view when this document left it. */
+  scrollLeft: number;
+}
+
+/** One open document. */
+export interface DocumentSession {
+  /** Stable identity; unchanged by Save As. */
+  id: DocumentId;
   /** Current disk destination; `null` while the document is untitled. */
   path: string | null;
-  /** Filename derived from `path`, or `Untitled`. */
+  /** Internal comparison/revision metadata; `null` while untitled. */
+  pathIdentity: ResolvedPathIdentity | null;
+  /** `UntitledN` or the basename derived from `path`. */
   displayName: string;
   /** Format used when this document has to be written to disk. */
   format: TextFormat;
   /** Derived from the live CodeMirror document versus the saved baseline. */
   dirty: boolean;
+  /** The exact `Text` represented by the latest relevant successful save. */
+  savedBaseline: Text;
+  /** The newest CodeMirror state reported for this document. */
+  editorState: EditorState;
+  /** Scroll/read position captured when this document left the shared view. */
+  viewState: DocumentViewState;
+  /**
+   * Incremented for every explicit save intent, so a completion that is no
+   * longer the newest intent cannot adopt a path or advance the baseline.
+   */
+  latestSaveGeneration: number;
 }
 
-/** Shown whenever the document has no disk destination yet. */
+/** Lightweight projection of one Tab. Contains no document text. */
+export interface TabSnapshot {
+  id: DocumentId;
+  displayName: string;
+  path: string | null;
+  dirty: boolean;
+  active: boolean;
+}
+
+/** Lightweight projection consumed by React. */
+export interface DocumentManagerSnapshot {
+  activeDocumentId: DocumentId;
+  tabs: readonly TabSnapshot[];
+}
+
+/** Shown whenever a document has no disk destination yet. */
 export const UNTITLED_DISPLAY_NAME = "Untitled";
 
 /**
@@ -51,6 +103,11 @@ export const NEW_DOCUMENT_FORMAT: TextFormat = {
   detectedLineEnding: "none",
   preferredLineEnding: "crlf",
 };
+
+/** A fresh reading position for a document the shared view has never shown. */
+export function createDefaultViewState(): DocumentViewState {
+  return { scrollTop: 0, scrollLeft: 0 };
+}
 
 /** Derives the window-title filename from a path, tolerating `\` and `/`. */
 export function displayNameForPath(path: string | null): string {
@@ -66,25 +123,25 @@ export function displayNameForPath(path: string | null): string {
   return name === "" ? UNTITLED_DISPLAY_NAME : name;
 }
 
-/** Creates the clean, pathless session an empty editor starts from. */
-export function createUntitledSession(): ActiveDocumentSession {
-  return {
-    path: null,
-    displayName: UNTITLED_DISPLAY_NAME,
-    format: { ...NEW_DOCUMENT_FORMAT },
-    dirty: false,
-  };
+/**
+ * The display name for the `sequence`-th untitled document.
+ *
+ * The counter that feeds this only ever increases, so a number is never reused
+ * after its document is saved or closed.
+ */
+export function untitledDisplayName(sequence: number): string {
+  return `Untitled${sequence}`;
 }
 
-/** Creates the clean session for a file that has just been read from disk. */
-export function createOpenedSession(
-  path: string,
-  format: TextFormat,
-): ActiveDocumentSession {
-  return {
-    path,
-    displayName: displayNameForPath(path),
-    format,
-    dirty: false,
-  };
+let documentIdSequence = 0;
+
+/**
+ * Allocates the next stable document identity.
+ *
+ * Process-local and monotonic: identities are unique among live sessions and
+ * never collide with a session that was created earlier.
+ */
+export function createDocumentId(): DocumentId {
+  documentIdSequence += 1;
+  return `doc-${documentIdSequence}`;
 }

@@ -53,29 +53,8 @@ $bytes = [System.IO.File]::ReadAllBytes($p)
 Then confirm the intended characters are still present and no stray CJK
 ideographs appeared (residual CJK in an English document is the tell-tale sign).
 
-## 2. Native desktop verification: ask the human, do not script window control
 
-Sorakada has native menus, file pickers, modal prompts and a WebView2 host.
-Automating those — `SendKeys`, `SendInput`, UI Automation, forcing windows to the
-foreground — has repeatedly disrupted the user's desktop and sent stray
-keystrokes into unrelated applications.
-
-**Rule:** implement and verify everything that can be automated (unit tests,
-`cargo test`, and CDP over the app's own IPC for the web layer). Then **hand the
-native-GUI cases to the user as a concrete checklist** and wait for their report.
-Do not drive windows, dialogs or keyboard input on their desktop unless they
-explicitly ask you to.
-
-Two notes that save time:
-
-- `window.__TAURI_INTERNALS__.invoke` is defined `writable: false,
-  configurable: false`, so the Tauri dialog layer **cannot** be stubbed from the
-  page. Do not attempt it.
-- Tauri's native menu accelerators are not translated into menu commands while
-  the WebView2 has focus; the application dispatches the shortcut profile itself
-  (see `src/app/App.tsx`). Do not "fix" this by adding a second shortcut route.
-
-## 3. Verification commands
+## 2. Verification commands
 
 All four must pass before reporting work as complete:
 

@@ -4,7 +4,10 @@ import {
   isFileCommandError,
   tauriFileService,
   toFileCommandError,
+  type FileCommandCode,
+  type FileCommandError,
   type OpenTextFileResult,
+  type ResolvedPathIdentity,
 } from "./fileService";
 import type { TextFormat } from "../app/document/documentSession";
 
@@ -66,6 +69,74 @@ describe("tauriFileService.writeTextFile", () => {
         bom: "utf8",
         lineEnding: "crlf",
       },
+    });
+  });
+});
+
+describe("tauriFileService.inspectFilePath", () => {
+  const FILE_IDENTITY: ResolvedPathIdentity = {
+    requestedPath: "C:\\work\\notes.txt",
+    canonicalPath: "\\\\?\\C:\\work\\notes.txt",
+    comparisonKey: "\\\\?\\c:\\work\\notes.txt",
+    kind: "file",
+    diskRevision: { size: 1234, modifiedTimeMillis: 1789600000000 },
+  };
+
+  it("invokes inspect_file_path with a nested camelCase request", async () => {
+    invokeMock.mockResolvedValue(FILE_IDENTITY);
+
+    await expect(
+      tauriFileService.inspectFilePath("C:\\work\\notes.txt", false),
+    ).resolves.toEqual(FILE_IDENTITY);
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    // `allowMissing` must stay camelCase: the Rust side deserializes
+    // `InspectPathRequest` with `rename_all = "camelCase"`.
+    expect(invokeMock).toHaveBeenCalledWith("inspect_file_path", {
+      request: { path: "C:\\work\\notes.txt", allowMissing: false },
+    });
+  });
+
+  it("passes the allowMissing flag through for a Save As candidate", async () => {
+    const candidate: ResolvedPathIdentity = {
+      requestedPath: "C:\\work\\brand-new.txt",
+      canonicalPath: "\\\\?\\C:\\work\\brand-new.txt",
+      comparisonKey: "\\\\?\\c:\\work\\brand-new.txt",
+      kind: "missing",
+      diskRevision: null,
+    };
+    invokeMock.mockResolvedValue(candidate);
+
+    await expect(
+      tauriFileService.inspectFilePath("C:\\work\\brand-new.txt", true),
+    ).resolves.toEqual(candidate);
+
+    expect(invokeMock).toHaveBeenCalledWith("inspect_file_path", {
+      request: { path: "C:\\work\\brand-new.txt", allowMissing: true },
+    });
+  });
+
+  it("surfaces the path_resolution error the manager reports to the user", async () => {
+    const error: FileCommandError = {
+      code: "path_resolution",
+      message: "Path does not exist: C:\\missing.txt",
+    };
+    invokeMock.mockRejectedValue(error);
+
+    await expect(
+      tauriFileService.inspectFilePath("C:\\missing.txt", false),
+    ).rejects.toEqual(error);
+  });
+});
+
+describe("FileCommandCode", () => {
+  it("carries the path_resolution code added by the inspection contract", () => {
+    const code: FileCommandCode = "path_resolution";
+
+    expect(isFileCommandError({ code, message: "boom" })).toBe(true);
+    expect(toFileCommandError(new Error("IPC transport unavailable"), code)).toEqual({
+      code: "path_resolution",
+      message: "IPC transport unavailable",
     });
   });
 });

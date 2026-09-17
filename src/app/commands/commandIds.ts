@@ -10,6 +10,7 @@ export const COMMAND_IDS = [
   "file.open",
   "file.save",
   "file.saveAs",
+  "file.close",
   "app.exit",
   "editor.undo",
   "editor.redo",

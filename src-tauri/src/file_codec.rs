@@ -91,7 +91,9 @@ pub struct FileCommandError {
 }
 
 impl FileCommandError {
-    fn new(code: &str, message: impl Into<String>) -> Self {
+    /// Builds a contract-shaped error. Visible crate-wide so that path identity
+    /// resolution can report `path_resolution` through the same error type.
+    pub(crate) fn new(code: &str, message: impl Into<String>) -> Self {
         Self {
             code: code.to_string(),
             message: message.into(),

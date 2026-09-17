@@ -1,0 +1,103 @@
+/*
+ * Tab strip layout.
+ *
+ * Colours come from the theme tokens declared in `global.css`; no palette value
+ * is hard-coded here, so re-skinning the application does not require touching
+ * the Tab strip.
+ */
+
+.tab-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-bg-raised);
+  user-select: none;
+  scrollbar-width: thin;
+}
+
+.tab {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  height: 30px;
+  padding: 0 4px 0 10px;
+  border-right: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-ui);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.tab:hover {
+  background-color: var(--color-line-active);
+  color: var(--color-text);
+}
+
+.tab--active {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  box-shadow: inset 0 2px 0 var(--color-caret);
+}
+
+.tab__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab__dirty {
+  color: var(--color-caret);
+  font-size: 10px;
+  line-height: 1;
+}
+
+.tab__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: default;
+}
+
+.tab__close:hover {
+  background-color: var(--color-border);
+  color: var(--color-text);
+}
+
+/*
+ * The editing area below the Tab strip. It is the positioning context for the
+ * drag/drop affordance, so the overlay can never cover the Tab strip.
+ */
+.editor-area {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/*
+ * Drag-over affordance. It is only rendered while a native drag is active and
+ * never receives pointer events, so it cannot block editor input.
+ */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 2px dashed var(--color-caret);
+}

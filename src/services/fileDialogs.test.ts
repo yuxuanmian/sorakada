@@ -51,7 +51,8 @@ describe("confirmUnsavedChanges", () => {
 
   // Regression: the plugin resolves with the custom *labels*, so comparing
   // against the "Yes"/"No" role names made the guard always answer "cancel",
-  // which silently blocked New/Open/Exit for every dirty document.
+  // which silently blocked every Tab close and window exit for a dirty
+  // document. New and Open never run this guard in 002.
   const labelCases: Array<[string, UnsavedChoice]> = [
     [UNSAVED_WORK_BUTTONS.save, "save"],
     [UNSAVED_WORK_BUTTONS.dontSave, "dontSave"],

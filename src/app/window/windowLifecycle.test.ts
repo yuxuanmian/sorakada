@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { EditorState, Text } from "@codemirror/state";
 
-import type { ActiveDocumentSession } from "../document/documentSession";
+import {
+  NEW_DOCUMENT_FORMAT,
+  type DocumentManagerSnapshot,
+  type DocumentSession,
+} from "../document/documentSession";
 import {
   formatWindowTitle,
   handleCloseRequested,
@@ -47,49 +52,64 @@ class FakeCloseEvent implements CloseRequestedLike {
 }
 
 function createSession(
-  overrides: Partial<ActiveDocumentSession> = {},
-): ActiveDocumentSession {
+  overrides: Partial<DocumentSession> = {},
+): DocumentSession {
   return {
+    id: "doc-1",
     path: null,
-    displayName: "Untitled",
-    format: {
-      encoding: "utf8",
-      bom: "none",
-      detectedLineEnding: "none",
-      preferredLineEnding: "crlf",
-    },
+    pathIdentity: null,
+    displayName: "Untitled1",
+    format: { ...NEW_DOCUMENT_FORMAT },
     dirty: false,
+    savedBaseline: Text.empty,
+    editorState: EditorState.create({ doc: "" }),
+    viewState: { scrollTop: 0, scrollLeft: 0 },
+    latestSaveGeneration: 0,
     ...overrides,
   };
 }
 
+/**
+ * Stands in for `DocumentManager`: title changes arrive as snapshots, and the
+ * close-all decision belongs to the manager, not to this module.
+ */
 class FakeSource implements WindowLifecycleSource {
-  guardResult = true;
-  guardCalls = 0;
-  private listeners = new Set<(session: ActiveDocumentSession) => void>();
+  dirtyDocuments: DocumentSession[] = [];
+  closeAllResult = true;
+  closeAllCalls = 0;
 
-  constructor(public session: ActiveDocumentSession) {}
+  private listeners = new Set<(snapshot: DocumentManagerSnapshot) => void>();
 
-  getSession(): ActiveDocumentSession {
-    return this.session;
+  constructor(public activeSession: DocumentSession) {}
+
+  getActiveSession(): DocumentSession {
+    return this.activeSession;
   }
 
-  subscribe(listener: (session: ActiveDocumentSession) => void): () => void {
+  hasDirtyDocuments(): boolean {
+    return this.dirtyDocuments.length > 0;
+  }
+
+  prepareCloseAll(): Promise<boolean> {
+    this.closeAllCalls += 1;
+    return Promise.resolve(this.closeAllResult);
+  }
+
+  subscribe(listener: (snapshot: DocumentManagerSnapshot) => void): () => void {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
     };
   }
 
-  async runUnsavedGuard(): Promise<boolean> {
-    this.guardCalls += 1;
-    return this.guardResult;
-  }
-
-  update(session: ActiveDocumentSession): void {
-    this.session = session;
+  update(session: DocumentSession): void {
+    this.activeSession = session;
+    const snapshot: DocumentManagerSnapshot = {
+      activeDocumentId: session.id,
+      tabs: [],
+    };
     for (const listener of this.listeners) {
-      listener(session);
+      listener(snapshot);
     }
   }
 }
@@ -100,7 +120,7 @@ class FakeSource implements WindowLifecycleSource {
 
 describe("formatWindowTitle", () => {
   it("marks only dirty documents and always names the application", () => {
-    expect(formatWindowTitle(createSession())).toBe("Untitled - Sorakada");
+    expect(formatWindowTitle(createSession())).toBe("Untitled1 - Sorakada");
     expect(
       formatWindowTitle(
         createSession({ path: "C:\\w\\foo.txt", displayName: "foo.txt" }),
@@ -116,7 +136,16 @@ describe("formatWindowTitle", () => {
       ),
     ).toBe("*foo.txt - Sorakada");
     expect(formatWindowTitle(createSession({ dirty: true }))).toBe(
-      "*Untitled - Sorakada",
+      "*Untitled1 - Sorakada",
+    );
+  });
+
+  it("never lets an inactive dirty document change the title", () => {
+    const source = new FakeSource(createSession({ displayName: "Untitled2" }));
+    source.dirtyDocuments = [createSession({ id: "doc-9", dirty: true })];
+
+    expect(formatWindowTitle(source.getActiveSession())).toBe(
+      "Untitled2 - Sorakada",
     );
   });
 });
@@ -126,13 +155,18 @@ describe("formatWindowTitle", () => {
 /* -------------------------------------------------------------------------- */
 
 describe("handleCloseRequested", () => {
-  function createDeps(dirty: boolean, guardResult: boolean) {
+  function createDeps(hasDirty: boolean, closeAllResult: boolean) {
     const destroyCalls: number[] = [];
+    let closeAllCalls = 0;
     return {
       destroyCalls,
+      closeAllCalls: () => closeAllCalls,
       deps: {
-        isDocumentDirty: () => dirty,
-        runUnsavedGuard: async () => guardResult,
+        hasDirtyDocuments: () => hasDirty,
+        prepareCloseAll: async () => {
+          closeAllCalls += 1;
+          return closeAllResult;
+        },
         destroyWindow: async () => {
           destroyCalls.push(1);
         },
@@ -140,33 +174,36 @@ describe("handleCloseRequested", () => {
     };
   }
 
-  it("lets a clean document close without a prompt or a forced destroy", async () => {
+  it("lets a clean window close untouched", async () => {
     const event = new FakeCloseEvent();
-    const { deps, destroyCalls } = createDeps(false, true);
+    const { deps, destroyCalls, closeAllCalls } = createDeps(false, true);
 
     await handleCloseRequested(event, deps);
 
     expect(event.preventDefaultCount).toBe(0);
+    expect(closeAllCalls()).toBe(0);
     expect(destroyCalls).toHaveLength(0);
   });
 
-  it("blocks a dirty close, then forces the destroy after an approved guard", async () => {
+  it("blocks the native close, runs the guard once, then destroys", async () => {
     const event = new FakeCloseEvent();
-    const { deps, destroyCalls } = createDeps(true, true);
+    const { deps, destroyCalls, closeAllCalls } = createDeps(true, true);
 
     await handleCloseRequested(event, deps);
 
     expect(event.preventDefaultCount).toBe(1);
+    expect(closeAllCalls()).toBe(1);
     expect(destroyCalls).toHaveLength(1);
   });
 
-  it("blocks a dirty close and keeps the window when the guard is cancelled", async () => {
+  it("keeps the window open when a document cancels the exit", async () => {
     const event = new FakeCloseEvent();
-    const { deps, destroyCalls } = createDeps(true, false);
+    const { deps, destroyCalls, closeAllCalls } = createDeps(true, false);
 
     await handleCloseRequested(event, deps);
 
     expect(event.preventDefaultCount).toBe(1);
+    expect(closeAllCalls()).toBe(1);
     expect(destroyCalls).toHaveLength(0);
   });
 });
@@ -176,7 +213,7 @@ describe("handleCloseRequested", () => {
 /* -------------------------------------------------------------------------- */
 
 describe("installWindowLifecycle", () => {
-  it("publishes the current title on install and on every session change", async () => {
+  it("publishes the active document's title on install and on every snapshot", async () => {
     const source = new FakeSource(
       createSession({ path: "C:\\w\\foo.txt", displayName: "foo.txt" }),
     );
@@ -198,15 +235,15 @@ describe("installWindowLifecycle", () => {
     ]);
 
     dispose();
-    source.update(createSession());
+    source.update(createSession({ displayName: "Untitled2" }));
     expect(appWindow.titles).toHaveLength(2);
     expect(appWindow.unlistenCount).toBe(1);
   });
 
-  it("routes a dirty close through the shared unsaved guard and destroys once", async () => {
+  it("routes a dirty close through prepareCloseAll and destroys once", async () => {
     const source = new FakeSource(createSession({ dirty: true }));
+    source.dirtyDocuments = [source.getActiveSession()];
     const appWindow = new FakeWindow();
-    source.guardResult = true;
 
     await installWindowLifecycle(source, appWindow);
 
@@ -214,14 +251,15 @@ describe("installWindowLifecycle", () => {
     await appWindow.handler?.(event);
 
     expect(event.preventDefaultCount).toBe(1);
-    expect(source.guardCalls).toBe(1);
+    expect(source.closeAllCalls).toBe(1);
     expect(appWindow.destroyCount).toBe(1);
   });
 
-  it("does not destroy the window when the guard cancels the exit", async () => {
+  it("does not destroy the window when the manager refuses the close", async () => {
     const source = new FakeSource(createSession({ dirty: true }));
+    source.dirtyDocuments = [source.getActiveSession()];
+    source.closeAllResult = false;
     const appWindow = new FakeWindow();
-    source.guardResult = false;
 
     await installWindowLifecycle(source, appWindow);
 
@@ -229,6 +267,22 @@ describe("installWindowLifecycle", () => {
     await appWindow.handler?.(event);
 
     expect(event.preventDefaultCount).toBe(1);
+    expect(source.closeAllCalls).toBe(1);
     expect(appWindow.destroyCount).toBe(0);
+  });
+
+  it("does not create a replacement Tab for an approved window close", async () => {
+    const source = new FakeSource(createSession({ dirty: true }));
+    source.dirtyDocuments = [source.getActiveSession()];
+    const appWindow = new FakeWindow();
+
+    await installWindowLifecycle(source, appWindow);
+
+    const before = source.getActiveSession().id;
+    await appWindow.handler?.(new FakeCloseEvent());
+
+    // The lifecycle itself never closes a Tab; it only destroys the window.
+    expect(source.getActiveSession().id).toBe(before);
+    expect(appWindow.destroyCount).toBe(1);
   });
 });

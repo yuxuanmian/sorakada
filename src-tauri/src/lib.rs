@@ -6,6 +6,7 @@
 
 mod commands;
 mod file_codec;
+mod file_identity;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -13,7 +14,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::file::read_text_file,
-            commands::file::write_text_file
+            commands::file::write_text_file,
+            commands::file::inspect_file_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
