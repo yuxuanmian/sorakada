@@ -31,6 +31,10 @@ const CODE_UNSUPPORTED_ENCODING: &str = "unsupported_encoding";
 const CODE_UNSUPPORTED_BINARY: &str = "unsupported_binary";
 /// Error code reported when a bare CR byte is present.
 const CODE_UNSUPPORTED_LINE_ENDING: &str = "unsupported_line_ending";
+// Structural 003 codes (`io_directory`, `io_create`, `io_rename`, `io_trash`)
+// live next to the primitives that raise them, in `crate::workspace_fs`; the
+// `path_resolution` code lives in `crate::file_identity`. All of them are
+// carried by the same `FileCommandError` shape below.
 
 /// Byte order mark presence for a text file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

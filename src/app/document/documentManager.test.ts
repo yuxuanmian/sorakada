@@ -19,6 +19,7 @@ import {
   NEW_DOCUMENT_FORMAT,
   type DocumentId,
   type DocumentManagerSnapshot,
+  type DocumentSession,
   type DocumentViewState,
   type TextFormat,
 } from "./documentSession";
@@ -171,6 +172,16 @@ class FakeFileService implements FileService {
   /** Alternative spellings that must resolve to another path's identity. */
   private readonly aliases = new Map<string, string>();
 
+  /**
+   * Makes the *post-write* re-inspection of a path report another object's
+   * comparison key.
+   *
+   * It models a destination whose canonical identity turned out to belong to a
+   * different live session while the write was in flight, which is the case
+   * FR-102 requires not to advance the saved baseline.
+   */
+  readonly adoptAsKey = new Map<string, string>();
+
   /** 1-based write indices that must fail, to place a save failure precisely. */
   readonly failWriteIndexes = new Set<number>();
   writeCallCount = 0;
@@ -207,6 +218,11 @@ class FakeFileService implements FileService {
     this.directories.add(this.keyFor(path));
   }
 
+  /** Removes a registered file, modelling a rename/delete that moved it away. */
+  removeFile(path: string): void {
+    this.files.delete(this.keyFor(path));
+  }
+
   /** Makes `alias` resolve to `canonical`'s identity, as a link or `..` would. */
   alias(alias: string, canonical: string): void {
     this.aliases.set(alias, canonical);
@@ -224,7 +240,12 @@ class FakeFileService implements FileService {
       return Promise.reject(this.inspectError);
     }
 
-    const key = this.keyFor(path);
+    const requestedKey = this.keyFor(path);
+    // The Save As pre-check resolves with `allowMissing`, the post-write
+    // re-inspection does not, so only the latter is remapped.
+    const key = allowMissing
+      ? requestedKey
+      : (this.adoptAsKey.get(requestedKey) ?? requestedKey);
 
     if (this.directories.has(key)) {
       return Promise.resolve(this.identityFor(path, key, "directory"));
@@ -425,7 +446,37 @@ interface Harness {
   emissions(): number;
 }
 
+/** The active session, asserting the harness really has one. */
+function activeSession(manager: DocumentManager): DocumentSession {
+  const session = manager.getActiveSession();
+  if (session === null) {
+    throw new Error("Expected an active document.");
+  }
+  return session;
+}
+
+/** The active document id, asserting the harness really has one. */
+function activeId(manager: DocumentManager): DocumentId {
+  return activeSession(manager).id;
+}
+
+/**
+ * A harness with one clean `Untitled1`.
+ *
+ * 003 makes "one document at launch" explicit rather than automatic, so the
+ * harness performs the New the user would; `createBareHarness` covers the
+ * zero-document state itself.
+ */
 function createHarness(): Harness {
+  return createHarnessWithDocument(true);
+}
+
+/** A harness with no document at all, which is what a bare launch gives. */
+function createBareHarness(): Harness {
+  return createHarnessWithDocument(false);
+}
+
+function createHarnessWithDocument(openInitialDocument: boolean): Harness {
   const editor = new FakeEditor();
   const files = new FakeFileService();
   const dialogs = new FakeDialogs();
@@ -436,6 +487,13 @@ function createHarness(): Harness {
   });
 
   const snapshots: DocumentManagerSnapshot[] = [];
+
+  if (openInitialDocument) {
+    // Created before subscribing so the harness observes only the changes a
+    // test makes, exactly as the 002 constructor did.
+    manager.createUntitled();
+  }
+
   manager.subscribe((snapshot) => {
     snapshots.push(snapshot);
   });
@@ -444,7 +502,9 @@ function createHarness(): Harness {
   // document into the shared view, then the bridge reports every state update
   // with the document id currently bound.
   const initial = manager.getActiveSession();
-  editor.setState(initial.id, initial.editorState);
+  if (initial !== null) {
+    editor.setState(initial.id, initial.editorState);
+  }
   editor.setStateUpdateListener((documentId, state, docChanged) => {
     manager.handleEditorStateUpdate(documentId, state, docChanged);
   });
@@ -480,7 +540,7 @@ describe("DocumentManager creation and tab order (US1)", () => {
     expect(snapshot.activeDocumentId).toBe(snapshot.tabs[0].id);
 
     expect(manager.listSessions()).toHaveLength(1);
-    expect(manager.getActiveSession().id).toBe(snapshot.tabs[0].id);
+    expect(activeId(manager)).toBe(snapshot.tabs[0].id);
     expect(manager.getSession(snapshot.tabs[0].id)?.displayName).toBe(
       "Untitled1",
     );
@@ -488,7 +548,7 @@ describe("DocumentManager creation and tab order (US1)", () => {
 
   it("appends and activates new untitled documents without disturbing earlier ones", () => {
     const { manager } = createHarness();
-    const first = manager.getActiveSession().id;
+    const first = activeId(manager);
 
     const second = manager.createUntitled();
     const third = manager.createUntitled();
@@ -510,7 +570,7 @@ describe("DocumentManager creation and tab order (US1)", () => {
 
   it("keeps tab order stable when an earlier document is activated again", () => {
     const { manager } = createHarness();
-    const first = manager.getActiveSession().id;
+    const first = activeId(manager);
     const second = manager.createUntitled();
     const third = manager.createUntitled();
 
@@ -539,7 +599,7 @@ describe("DocumentManager creation and tab order (US1)", () => {
   it("gives every session a distinct stable identity", () => {
     const { manager } = createHarness();
     const ids = [
-      manager.getActiveSession().id,
+      activeId(manager),
       manager.createUntitled(),
       manager.createUntitled(),
     ];
@@ -555,7 +615,7 @@ describe("DocumentManager creation and tab order (US1)", () => {
 describe("DocumentManager editor update routing (US1)", () => {
   it("updates only the session named by the callback document id", () => {
     const { manager, editor } = createHarness();
-    const first = manager.getActiveSession().id;
+    const first = activeId(manager);
     const second = manager.createUntitled();
 
     const stateA2 = EditorState.create({ doc: toText("alpha") });
@@ -571,7 +631,7 @@ describe("DocumentManager editor update routing (US1)", () => {
 
   it("stores the newest state on a cursor-only update without emitting a snapshot", () => {
     const { manager, editor, emissions } = createHarness();
-    const id = manager.getActiveSession().id;
+    const id = activeId(manager);
 
     editor.type("alpha");
     const afterTyping = manager.getSession(id)!.editorState;
@@ -587,7 +647,7 @@ describe("DocumentManager editor update routing (US1)", () => {
 
   it("emits one snapshot when a document becomes dirty and none while it stays dirty", () => {
     const { manager, editor, emissions } = createHarness();
-    const id = manager.getActiveSession().id;
+    const id = activeId(manager);
 
     expect(manager.getSession(id)!.dirty).toBe(false);
     const before = emissions();
@@ -604,7 +664,7 @@ describe("DocumentManager editor update routing (US1)", () => {
 
   it("returns a document to clean when its state matches the saved baseline again", () => {
     const { manager, editor, emissions } = createHarness();
-    const id = manager.getActiveSession().id;
+    const id = activeId(manager);
     const baselineEmissions = emissions();
 
     editor.type("alpha");
@@ -619,7 +679,7 @@ describe("DocumentManager editor update routing (US1)", () => {
 
   it("ignores an update for a document id that is not open", () => {
     const { manager, emissions } = createHarness();
-    const active = manager.getActiveSession().id;
+    const active = activeId(manager);
     const before = manager.getSession(active)!.editorState;
     const emissionsBefore = emissions();
 
@@ -654,7 +714,7 @@ describe("DocumentManager editor update routing (US1)", () => {
 describe("DocumentManager activation and view state (US1)", () => {
   it("captures the outgoing view state and restores the target's", () => {
     const { manager, editor } = createHarness();
-    const first = manager.getActiveSession().id;
+    const first = activeId(manager);
     const second = manager.createUntitled();
 
     editor.scroll = { scrollTop: 120, scrollLeft: 8 };
@@ -677,7 +737,7 @@ describe("DocumentManager activation and view state (US1)", () => {
 
   it("installs the target session's state into the shared view", () => {
     const { manager, editor } = createHarness();
-    const first = manager.getActiveSession().id;
+    const first = activeId(manager);
     const second = manager.createUntitled();
 
     const firstState = manager.getSession(first)!.editorState;
@@ -701,7 +761,7 @@ describe("DocumentManager activation and view state (US1)", () => {
 
   it("focuses the editor when a document is activated or re-selected", () => {
     const { manager, editor } = createHarness();
-    const first = manager.getActiveSession().id;
+    const first = activeId(manager);
     const second = manager.createUntitled();
 
     manager.activateDocument(second);
@@ -716,7 +776,7 @@ describe("DocumentManager activation and view state (US1)", () => {
 
   it("does not touch an editor that is not attached yet", () => {
     const { manager, editor } = createHarness();
-    const first = manager.getActiveSession().id;
+    const first = activeId(manager);
     editor.ready = false;
     editor.setStateUpdateListener(null);
     const setStatesBefore = editor.setStateCalls.length;
@@ -735,7 +795,7 @@ describe("DocumentManager activation and view state (US1)", () => {
 
   it("does not emit a snapshot when the requested document is already active", () => {
     const { manager, emissions } = createHarness();
-    const active = manager.getActiveSession().id;
+    const active = activeId(manager);
     const before = emissions();
 
     manager.activateDocument(active);
@@ -756,7 +816,7 @@ describe("DocumentManager open (US2)", () => {
     const { manager, files } = createHarness();
     files.addFile(SMALL_A, "alpha");
 
-    const first = manager.getActiveSession().id;
+    const first = activeId(manager);
     const result = await manager.openPath(SMALL_A);
 
     expect(result.status).toBe("opened");
@@ -912,7 +972,7 @@ describe("DocumentManager open (US2)", () => {
     const harness = createHarness();
     harness.files.addFile(SMALL_A, "alpha");
     harness.editor.type("dirty work");
-    expect(harness.manager.getActiveSession().dirty).toBe(true);
+    expect(activeSession(harness.manager).dirty).toBe(true);
 
     harness.manager.createUntitled();
     await harness.manager.openPath(SMALL_A);
@@ -1261,7 +1321,7 @@ describe("DocumentManager save (US3)", () => {
 describe("DocumentManager save as (US3)", () => {
   it("delegates Save on an untitled document to Save As", async () => {
     const harness = createHarness();
-    const id = harness.manager.getActiveSession().id;
+    const id = activeId(harness.manager);
     harness.editor.type("draft");
     harness.dialogs.savePath = "C:\\work\\draft.txt";
 
@@ -1280,7 +1340,7 @@ describe("DocumentManager save as (US3)", () => {
 
   it("reports a cancelled Save As without changing the document", async () => {
     const harness = createHarness();
-    const id = harness.manager.getActiveSession().id;
+    const id = activeId(harness.manager);
     harness.editor.type("draft");
     harness.dialogs.savePath = null;
 
@@ -1327,7 +1387,7 @@ describe("DocumentManager save as (US3)", () => {
 
   it("rejects a target that is only claimed by an in-flight Save As", async () => {
     const harness = createHarness();
-    const idA = harness.manager.getActiveSession().id;
+    const idA = activeId(harness.manager);
     harness.editor.type("draft A");
     const idB = harness.manager.createUntitled();
     harness.editor.type("draft B");
@@ -1356,7 +1416,7 @@ describe("DocumentManager save as (US3)", () => {
 
   it("does not let a stale Save As completion replace a newer target", async () => {
     const harness = createHarness();
-    const id = harness.manager.getActiveSession().id;
+    const id = activeId(harness.manager);
     harness.editor.type("draft");
 
     harness.files.holdWrites = true;
@@ -1384,7 +1444,7 @@ describe("DocumentManager save as (US3)", () => {
 
   it("releases the target claim when the write fails", async () => {
     const harness = createHarness();
-    const idA = harness.manager.getActiveSession().id;
+    const idA = activeId(harness.manager);
     harness.editor.type("draft A");
 
     harness.dialogs.savePath = "C:\\work\\target.txt";
@@ -1479,7 +1539,7 @@ describe("DocumentManager save as (US3)", () => {
 
   it("keeps a renewed reservation when an older completion arrives stale", async () => {
     const harness = createHarness();
-    const idA = harness.manager.getActiveSession().id;
+    const idA = activeId(harness.manager);
     harness.editor.type("draft A");
     const idB = harness.manager.createUntitled();
     harness.editor.type("draft B");
@@ -1555,7 +1615,7 @@ describe("DocumentManager save as (US3)", () => {
 describe("DocumentManager close (US3)", () => {
   it("closes a clean Tab without prompting", async () => {
     const harness = createHarness();
-    const keep = harness.manager.getActiveSession().id;
+    const keep = activeId(harness.manager);
     const id = harness.manager.createUntitled();
 
     await expect(harness.manager.closeDocument(id)).resolves.toEqual({
@@ -1569,7 +1629,7 @@ describe("DocumentManager close (US3)", () => {
 
   it("keeps a dirty Tab open when the guard is cancelled", async () => {
     const harness = createHarness();
-    const id = harness.manager.getActiveSession().id;
+    const id = activeId(harness.manager);
     harness.editor.type("dirty");
     harness.dialogs.unsavedChoice = "cancel";
 
@@ -1585,7 +1645,7 @@ describe("DocumentManager close (US3)", () => {
 
   it("closes a dirty Tab without writing when the user declines", async () => {
     const harness = createHarness();
-    const id = harness.manager.getActiveSession().id;
+    const id = activeId(harness.manager);
     harness.editor.type("dirty");
     harness.dialogs.unsavedChoice = "dontSave";
 
@@ -1595,8 +1655,9 @@ describe("DocumentManager close (US3)", () => {
 
     expect(harness.manager.getSession(id)).toBeUndefined();
     expect(harness.files.writes).toHaveLength(0);
-    // Normal last-Tab close replaces the document.
-    expect(tabNames(harness.manager.getSnapshot())).toEqual(["Untitled2"]);
+    // SR-001: the final Tab is not replaced by a fresh Untitled document.
+    expect(tabNames(harness.manager.getSnapshot())).toEqual([]);
+    expect(harness.manager.getSnapshot().activeDocumentId).toBeNull();
   });
 
   it("saves before closing when the user chooses Save", async () => {
@@ -1633,7 +1694,7 @@ describe("DocumentManager close (US3)", () => {
 
   it("keeps the Tab open when Save As is cancelled during close", async () => {
     const harness = createHarness();
-    const id = harness.manager.getActiveSession().id;
+    const id = activeId(harness.manager);
     harness.editor.type("dirty");
     harness.dialogs.unsavedChoice = "save";
     harness.dialogs.savePath = null;
@@ -1648,7 +1709,7 @@ describe("DocumentManager close (US3)", () => {
 
   it("closes an inactive dirty Tab without activating it", async () => {
     const harness = createHarness();
-    const first = harness.manager.getActiveSession().id;
+    const first = activeId(harness.manager);
     harness.editor.type("dirty first");
     const second = harness.manager.createUntitled();
     harness.dialogs.unsavedChoice = "dontSave";
@@ -1664,7 +1725,7 @@ describe("DocumentManager close (US3)", () => {
 
   it("keeps the active Tab unchanged when an inactive close is cancelled", async () => {
     const harness = createHarness();
-    const first = harness.manager.getActiveSession().id;
+    const first = activeId(harness.manager);
     harness.editor.type("dirty first");
     const second = harness.manager.createUntitled();
     harness.dialogs.unsavedChoice = "cancel";
@@ -1679,7 +1740,7 @@ describe("DocumentManager close (US3)", () => {
 
   it("activates the left neighbour after closing the active Tab", async () => {
     const harness = createHarness();
-    const first = harness.manager.getActiveSession().id;
+    const first = activeId(harness.manager);
     const second = harness.manager.createUntitled();
     const third = harness.manager.createUntitled();
 
@@ -1695,7 +1756,7 @@ describe("DocumentManager close (US3)", () => {
 
   it("activates the new first Tab after closing the first Tab", async () => {
     const harness = createHarness();
-    const first = harness.manager.getActiveSession().id;
+    const first = activeId(harness.manager);
     const second = harness.manager.createUntitled();
     harness.manager.createUntitled();
 
@@ -1709,22 +1770,27 @@ describe("DocumentManager close (US3)", () => {
     ]);
   });
 
-  it("creates the next UntitledN after the final Tab closes", async () => {
+  it("leaves zero documents when the final Tab closes", async () => {
     const harness = createHarness();
-    const only = harness.manager.getActiveSession().id;
+    const only = activeId(harness.manager);
 
     await expect(harness.manager.closeDocument(only)).resolves.toEqual({
       status: "closed",
     });
 
-    expect(tabNames(harness.manager.getSnapshot())).toEqual(["Untitled2"]);
+    expect(tabNames(harness.manager.getSnapshot())).toEqual([]);
     expect(harness.manager.getSession(only)).toBeUndefined();
-    expect(harness.manager.getActiveSession().dirty).toBe(false);
+    expect(harness.manager.getActiveSession()).toBeNull();
+    expect(harness.manager.getSnapshot().activeDocumentId).toBeNull();
+
+    // The Untitled counter still only ever increases (no number reuse).
+    const fresh = harness.manager.createUntitled();
+    expect(harness.manager.getSession(fresh)!.displayName).toBe("Untitled2");
   });
 
   it("never reuses an Untitled number after Save As and close", async () => {
     const harness = createHarness();
-    const first = harness.manager.getActiveSession().id;
+    const first = activeId(harness.manager);
     harness.manager.createUntitled();
     harness.dialogs.savePath = "C:\\work\\a.txt";
     await harness.manager.saveDocumentAs(first);
@@ -1788,7 +1854,7 @@ function abortingSequences(): AbortCase[] {
 /** Three dirty documents, in Tab order. */
 function createDirtyHarness(): Harness & { ids: DocumentId[] } {
   const harness = createHarness();
-  const ids: DocumentId[] = [harness.manager.getActiveSession().id];
+  const ids: DocumentId[] = [activeId(harness.manager)];
   harness.editor.type("draft 0");
   for (let index = 1; index < 3; index += 1) {
     ids.push(harness.manager.createUntitled());
@@ -1895,7 +1961,7 @@ describe("DocumentManager prepareCloseAll (US3)", () => {
 describe("DocumentManager 20-session stress", () => {
   it("keeps 20 documents isolated, ordered and uncapped", () => {
     const harness = createHarness();
-    const ids: DocumentId[] = [harness.manager.getActiveSession().id];
+    const ids: DocumentId[] = [activeId(harness.manager)];
     for (let index = 1; index < 20; index += 1) {
       ids.push(harness.manager.createUntitled());
     }
@@ -1932,7 +1998,7 @@ describe("DocumentManager 20-session stress", () => {
 
   it("closes a mid-list document in a 20-session session without disturbing the rest", async () => {
     const harness = createHarness();
-    const ids: DocumentId[] = [harness.manager.getActiveSession().id];
+    const ids: DocumentId[] = [activeId(harness.manager)];
     for (let index = 1; index < 20; index += 1) {
       ids.push(harness.manager.createUntitled());
     }
@@ -1952,3 +2018,754 @@ describe("DocumentManager 20-session stress", () => {
     ).toEqual(ids.filter((id) => id !== target));
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/* US4 — zero-document lifecycle (FR-012..FR-018, SR-001, SR-002)              */
+/* -------------------------------------------------------------------------- */
+
+describe("DocumentManager zero-document lifecycle (US4)", () => {
+  it("starts with no document, no session and no editor binding", () => {
+    const harness = createBareHarness();
+
+    expect(harness.manager.getSnapshot()).toEqual({
+      activeDocumentId: null,
+      tabs: [],
+    });
+    expect(harness.manager.listSessions()).toEqual([]);
+    expect(harness.manager.getActiveSession()).toBeNull();
+    expect(harness.manager.getActiveDocumentId()).toBeNull();
+    expect(harness.manager.hasDirtyDocuments()).toBe(false);
+    // A bare launch must not install a synthetic document in the shared view.
+    expect(harness.editor.setStateCalls).toHaveLength(0);
+    expect(harness.editor.boundDocumentId).toBeNull();
+    expect(harness.emissions()).toBe(0);
+  });
+
+  it("creates exactly one active Untitled document when New is explicit", () => {
+    const harness = createBareHarness();
+    const id = harness.manager.createUntitled();
+
+    expect(harness.manager.getSnapshot().activeDocumentId).toBe(id);
+    expect(tabNames(harness.manager.getSnapshot())).toEqual(["Untitled1"]);
+    expect(harness.manager.getSession(id)!.path).toBeNull();
+    expect(harness.manager.getSession(id)!.dirty).toBe(false);
+    // The zero -> one transition is what binds the shared view.
+    expect(harness.editor.boundDocumentId).toBe(id);
+  });
+
+  it("uses a nullable active identity without inventing a fake session", () => {
+    const harness = createBareHarness();
+
+    // Commands address a nullable active identity rather than a placeholder.
+    expect(harness.manager.getActiveDocumentId()).toBeNull();
+
+    harness.manager.activateDocument("doc-does-not-exist");
+    expect(harness.manager.getActiveDocumentId()).toBeNull();
+    expect(harness.manager.listSessions()).toHaveLength(0);
+
+    // An update for a document that is not open is still ignored.
+    harness.manager.handleEditorStateUpdate(
+      "doc-not-open",
+      EditorState.create({ doc: toText("orphan") }),
+      true,
+    );
+    expect(harness.manager.listSessions()).toHaveLength(0);
+    expect(harness.emissions()).toBe(0);
+  });
+
+  it("returns to zero documents after the final clean Tab closes", async () => {
+    const harness = createHarness();
+    const only = activeId(harness.manager);
+
+    await expect(harness.manager.closeDocument(only)).resolves.toEqual({
+      status: "closed",
+    });
+
+    expect(harness.manager.getSnapshot()).toEqual({
+      activeDocumentId: null,
+      tabs: [],
+    });
+    expect(harness.dialogs.unsavedPromptCount).toBe(0);
+    expect(harness.manager.getActiveSession()).toBeNull();
+  });
+
+  it("creates no replacement document from zero and still numbers forward", () => {
+    const harness = createBareHarness();
+
+    const first = harness.manager.createUntitled();
+    harness.manager.createUntitled();
+    expect(tabNames(harness.manager.getSnapshot())).toEqual([
+      "Untitled1",
+      "Untitled2",
+    ]);
+
+    harness.manager.closeDocument(first);
+    expect(tabNames(harness.manager.getSnapshot())).toEqual(["Untitled2"]);
+
+    // Numbers are never reused, even after zero documents have existed.
+    const fresh = harness.manager.createUntitled();
+    expect(harness.manager.getSession(fresh)!.displayName).toBe("Untitled3");
+  });
+
+  it("keeps the shared view untouched when the last document closes", async () => {
+    const harness = createHarness();
+    const only = activeId(harness.manager);
+
+    await harness.manager.closeDocument(only);
+
+    // A one -> zero transition detaches from the application's point of view;
+    // the manager itself never installs a new state.
+    const setStatesAfterClose = harness.editor.setStateCalls.length;
+    expect(harness.manager.getSession(only)).toBeUndefined();
+    expect(setStatesAfterClose).toBe(harness.editor.setStateCalls.length);
+    expect(harness.manager.getSnapshot().activeDocumentId).toBeNull();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* US3 — 003 path-ownership repairs (FR-099, FR-100, FR-102)                   */
+/* -------------------------------------------------------------------------- */
+
+const DRAFT_TARGET = "C:\\work\\draft.txt";
+
+describe("DocumentManager destination ownership (003)", () => {
+  it("refuses a Save As to a destination an Open is already resolving", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    harness.files.holdReads = true;
+
+    const opening = harness.manager.openPath(SMALL_A);
+    await flush();
+
+    const idB = harness.manager.createUntitled();
+    harness.editor.type("draft B");
+    harness.dialogs.savePath = SMALL_A;
+
+    await expect(harness.manager.saveDocumentAs(idB)).resolves.toEqual({
+      status: "failed",
+      error: expect.objectContaining({ code: "path_resolution" }),
+    });
+
+    // The reservation is respected before anything is written.
+    expect(harness.files.writes).toHaveLength(0);
+    expect(harness.manager.getSession(idB)!.path).toBeNull();
+    expect(harness.manager.getSession(idB)!.dirty).toBe(true);
+
+    harness.files.releaseReads();
+    await expect(opening).resolves.toEqual(
+      expect.objectContaining({ status: "opened" }),
+    );
+    expect(tabNames(harness.manager.getSnapshot())).toEqual([
+      "Untitled1",
+      "Untitled2",
+      "a.txt",
+    ]);
+  });
+
+  it("waits for an in-flight Save As instead of registering a duplicate session", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_B, "original");
+    const idA = await openSmallA(harness);
+    harness.editor.type("edited A");
+    const readsBefore = harness.files.reads.length;
+
+    harness.files.holdWrites = true;
+    harness.dialogs.savePath = SMALL_B;
+    const saving = harness.manager.saveDocumentAs(idA);
+    await flush();
+    expect(harness.files.pendingWriteCount()).toBe(1);
+
+    const opening = harness.manager.openPath(SMALL_B);
+    await flush();
+    // The Open is blocked on the reservation rather than reading the file and
+    // registering a second owner for the same canonical destination.
+    expect(harness.files.reads).toHaveLength(readsBefore);
+
+    harness.files.releaseWrites();
+    await saving;
+
+    await expect(opening).resolves.toEqual({
+      status: "activated-existing",
+      documentId: idA,
+    });
+    expect(harness.manager.listSessions()).toHaveLength(2);
+    expect(harness.manager.getSession(idA)!.path).toBe(SMALL_B);
+  });
+
+  it("does not advance the baseline when a Save As cannot adopt its destination", async () => {
+    const harness = createHarness();
+    const idB = await openSmallA(harness);
+    const idA = harness.manager.createUntitled();
+    harness.editor.type("draft A");
+
+    harness.dialogs.savePath = DRAFT_TARGET;
+    // The destination turns out to resolve to a path another session already
+    // owns, so this Save As must not claim it.
+    harness.files.adoptAsKey.set(
+      harness.files.comparisonKeyFor(DRAFT_TARGET),
+      harness.files.comparisonKeyFor(SMALL_A),
+    );
+
+    await expect(harness.manager.saveDocumentAs(idA)).resolves.toEqual({
+      status: "failed",
+      error: expect.objectContaining({ code: "path_resolution" }),
+    });
+
+    // The bytes were written because the user asked for them, but the document
+    // may not be reported clean or moved onto an unowned destination.
+    expect(harness.files.writes).toHaveLength(1);
+    const sessionA = harness.manager.getSession(idA)!;
+    expect(sessionA.path).toBeNull();
+    expect(sessionA.displayName).toBe("Untitled2");
+    expect(sessionA.dirty).toBe(true);
+    expect(sessionA.savedBaseline.toString()).toBe("");
+    expect(harness.dialogs.errors).toHaveLength(1);
+
+    // The existing owner is untouched.
+    const sessionB = harness.manager.getSession(idB)!;
+    expect(sessionB.path).toBe(SMALL_A);
+    expect(sessionB.displayName).toBe("a.txt");
+  });
+
+  it("keeps one live owner per canonical destination across an Open/Save As race", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    harness.files.addFile(SMALL_B, "bravo");
+    const idA = await openSmallA(harness);
+
+    // Both documents want the same destination; only one may end up owning it.
+    harness.dialogs.savePath = SMALL_B;
+    harness.manager.createUntitled();
+    harness.editor.type("draft");
+    const idDraft = activeId(harness.manager);
+
+    const owner = await harness.manager.saveDocumentAs(idA);
+    harness.dialogs.savePath = SMALL_B;
+    const rival = await harness.manager.saveDocumentAs(idDraft);
+
+    expect(owner.status).toBe("success");
+    expect(rival.status).toBe("failed");
+
+    const owners = harness.manager
+      .listSessions()
+      .filter(
+        (session) =>
+          session.pathIdentity?.comparisonKey ===
+          harness.files.comparisonKeyFor(SMALL_B),
+      );
+    expect(owners).toHaveLength(1);
+    expect(owners[0].id).toBe(idA);
+    expect(harness.manager.getSession(idDraft)!.path).toBeNull();
+    expect(harness.manager.getSession(idDraft)!.dirty).toBe(true);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* US3 — 003 close/exit save re-check (FR-101)                                 */
+/* -------------------------------------------------------------------------- */
+
+describe("DocumentManager close save re-check (003)", () => {
+  it("saves edits that arrived during a close-triggered save instead of discarding them", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("first edit");
+    harness.dialogs.unsavedChoice = "save";
+    harness.files.holdWrites = true;
+
+    const closing = harness.manager.closeDocument(id);
+    await flush();
+
+    // The user keeps typing while the save is in flight.
+    harness.editor.type("first edit plus more");
+    harness.files.holdWrites = false;
+    harness.files.releaseWrites();
+
+    await expect(closing).resolves.toEqual({ status: "closed" });
+
+    // The guard asked again rather than discarding the newer edits, and the
+    // second write carried them.
+    expect(harness.dialogs.unsavedPromptCount).toBe(2);
+    expect(harness.files.writes.map((write) => write.text)).toEqual([
+      "first edit",
+      "first edit plus more",
+    ]);
+    expect(harness.manager.getSession(id)).toBeUndefined();
+  });
+
+  it("keeps the Tab open when the user cancels the repeated close prompt", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("first edit");
+    harness.dialogs.choices = ["save", "cancel"];
+    harness.files.holdWrites = true;
+
+    const closing = harness.manager.closeDocument(id);
+    await flush();
+
+    harness.editor.type("first edit plus more");
+    harness.files.holdWrites = false;
+    harness.files.releaseWrites();
+
+    await expect(closing).resolves.toEqual({ status: "cancelled" });
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.dirty).toBe(true);
+    expect(session.editorState.doc.toString()).toBe("first edit plus more");
+    expect(session.savedBaseline.toString()).toBe("first edit");
+  });
+
+  it("aborts the window close when an edit arrives during an exit-triggered save", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("first edit");
+    harness.dialogs.choices = ["save", "cancel"];
+    harness.files.holdWrites = true;
+
+    const closing = harness.manager.prepareCloseAll();
+    await flush();
+
+    harness.editor.type("first edit plus more");
+    harness.files.holdWrites = false;
+    harness.files.releaseWrites();
+
+    await expect(closing).resolves.toBe(false);
+
+    // The exit decision had to be asked again, and the document is intact.
+    expect(harness.dialogs.unsavedPromptCount).toBe(2);
+    expect(harness.manager.getSession(id)!.dirty).toBe(true);
+    expect(harness.manager.getSession(id)!.editorState.doc.toString()).toBe(
+      "first edit plus more",
+    );
+  });
+
+  it("completes the window close when the repeated save captures the newer edits", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("first edit");
+    harness.dialogs.unsavedChoice = "save";
+    harness.files.holdWrites = true;
+
+    const closing = harness.manager.prepareCloseAll();
+    await flush();
+
+    harness.editor.type("first edit plus more");
+    harness.files.holdWrites = false;
+    harness.files.releaseWrites();
+
+    await expect(closing).resolves.toBe(true);
+    expect(harness.dialogs.unsavedPromptCount).toBe(2);
+    expect(harness.files.writes.map((write) => write.text)).toEqual([
+      "first edit",
+      "first edit plus more",
+    ]);
+    // Exit never removes Tabs; the window is destroyed instead.
+    expect(harness.manager.getSession(id)).toBeDefined();
+    expect(harness.manager.getSession(id)!.dirty).toBe(false);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* US6/US7 — path-mutation coordination (FR-103) and commit APIs               */
+/* -------------------------------------------------------------------------- */
+
+/** Resolves a fixture identity the way the application does. */
+async function identityOf(
+  harness: Harness,
+  path: string,
+  allowMissing = false,
+): Promise<ResolvedPathIdentity> {
+  return harness.files.inspectFilePath(path, allowMissing);
+}
+
+/** A synthetic identity for a path the fake service does not register. */
+function syntheticIdentity(
+  harness: Harness,
+  path: string,
+  kind: ResolvedPathIdentity["kind"] = "file",
+): ResolvedPathIdentity {
+  return {
+    requestedPath: path,
+    canonicalPath: path,
+    comparisonKey: harness.files.comparisonKeyFor(path),
+    kind,
+    diskRevision: kind === "missing" ? null : { size: 0, modifiedTimeMillis: 0 },
+  };
+}
+
+describe("DocumentManager path-mutation reservation (003)", () => {
+  it("refuses a destination another live session owns", async () => {
+    const harness = createHarness();
+    await openSmallA(harness);
+
+    const result = await harness.manager.reservePathMutation({
+      sourceKey: harness.files.comparisonKeyFor("C:\\work\\other.txt"),
+      destinationKey: harness.files.comparisonKeyFor(SMALL_A),
+    });
+
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.error.code).toBe("path_resolution");
+      expect(result.error.message).not.toBe("");
+    }
+  });
+
+  it("refuses a destination another mutation already reserved", async () => {
+    const harness = createHarness();
+    const destination = "C:\\work\\taken.txt";
+
+    const first = await harness.manager.reservePathMutation({
+      sourceKey: harness.files.comparisonKeyFor("C:\\work\\one.txt"),
+      destinationKey: harness.files.comparisonKeyFor(destination),
+    });
+    expect(first.status).toBe("reserved");
+
+    const second = await harness.manager.reservePathMutation({
+      sourceKey: harness.files.comparisonKeyFor("C:\\work\\two.txt"),
+      destinationKey: harness.files.comparisonKeyFor(destination),
+    });
+    expect(second.status).toBe("failed");
+
+    if (first.status === "reserved") {
+      first.reservation.release();
+    }
+
+    // Once released, the destination is available again.
+    const third = await harness.manager.reservePathMutation({
+      sourceKey: harness.files.comparisonKeyFor("C:\\work\\two.txt"),
+      destinationKey: harness.files.comparisonKeyFor(destination),
+    });
+    expect(third.status).toBe("reserved");
+    if (third.status === "reserved") {
+      third.reservation.release();
+    }
+  });
+
+  it("waits for an in-flight write on the mutated source", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("edited");
+
+    harness.files.holdWrites = true;
+    const saving = harness.manager.saveDocument(id);
+    await flush();
+    expect(harness.files.pendingWriteCount()).toBe(1);
+
+    let reserved = false;
+    const reserving = harness.manager
+      .reservePathMutation({
+        sourceKey: harness.files.comparisonKeyFor(SMALL_A),
+      })
+      .then((result) => {
+        reserved = true;
+        return result;
+      });
+    await flush();
+
+    // The mutation must not commit while a save is still writing that path.
+    expect(reserved).toBe(false);
+
+    harness.files.releaseWrites();
+    await saving;
+
+    const result = await reserving;
+    expect(result.status).toBe("reserved");
+    expect(reserved).toBe(true);
+    if (result.status === "reserved") {
+      result.reservation.release();
+    }
+  });
+
+  it("waits for a pending Open below a directory being mutated", async () => {    const harness = createHarness();
+    const directory = "C:\\work\\src";
+    harness.files.addDirectory(directory);
+    harness.files.addFile("C:\\work\\src\\a.ts", "alpha");
+    harness.files.holdReads = true;
+
+    const opening = harness.manager.openPath("C:\\work\\src\\a.ts");
+    await flush();
+    expect(harness.files.pendingReadCount()).toBe(1);
+
+    let settled = false;
+    const reserving = harness.manager
+      .reservePathMutation({
+        sourceKey: harness.files.comparisonKeyFor(directory),
+      })
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+    await flush();
+    expect(settled).toBe(false);
+
+    harness.files.releaseReads();
+    await opening;
+
+    const result = await reserving;
+    expect(result.status).toBe("reserved");
+    if (result.status === "reserved") {
+      result.reservation.release();
+    }
+  });
+
+  it("blocks an Open that targets a path a pending mutation is moving", async () => {    const harness = createHarness();
+    const directory = "C:\\work\\src";
+    harness.files.addDirectory(directory);
+    harness.files.addFile("C:\\work\\src\\a.ts", "alpha");
+
+    const sourceIdentity = await identityOf(harness, directory);
+    const reservation = await harness.manager.reservePathMutation({
+      sourceKey: sourceIdentity.comparisonKey,
+    });
+    expect(reservation.status).toBe("reserved");
+
+    const opening = harness.manager.openPath("C:\\work\\src\\a.ts");
+    await flush();
+    // Waiting on the mutation rather than resolving the about-to-move path.
+    expect(harness.files.reads).toHaveLength(0);
+
+    // The rename commits and the old path is gone.
+    harness.manager.commitRenamedPath({
+      sourceIdentity: {
+        canonicalPath: sourceIdentity.canonicalPath,
+        comparisonKey: sourceIdentity.comparisonKey,
+      },
+      newPath: "C:\\work\\lib",
+      newIdentity: syntheticIdentity(harness, "C:\\work\\lib", "directory"),
+    });
+    harness.files.removeFile("C:\\work\\src\\a.ts");
+    harness.files.addFile("C:\\work\\lib\\a.ts", "alpha");
+
+    if (reservation.status === "reserved") {
+      reservation.reservation.release();
+    }
+
+    const opened = await opening;
+    expect(opened.status).toBe("failed");
+    // No session was registered for a path that no longer exists.
+    expect(harness.manager.listSessions()).toHaveLength(1);
+    expect(tabNames(harness.manager.getSnapshot())).toEqual(["Untitled1"]);
+  });
+
+  it("holds a same-path save while a reservation covers that path", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("edited");
+
+    const reservation = await harness.manager.reservePathMutation({
+      sourceKey: harness.files.comparisonKeyFor(SMALL_A),
+    });
+    expect(reservation.status).toBe("reserved");
+
+    let settled = false;
+    const saving = harness.manager.saveDocument(id).then((result) => {
+      settled = true;
+      return result;
+    });
+    await flush();
+
+    // The write has not been issued: the document's path is being changed, so
+    // writing to the old spelling would contradict the disk operation (FR-103).
+    expect(settled).toBe(false);
+    expect(harness.files.writes).toHaveLength(0);
+
+    if (reservation.status === "reserved") {
+      reservation.reservation.release();
+    }
+
+    await expect(saving).resolves.toEqual({ status: "success" });
+    expect(harness.files.writes).toHaveLength(1);
+    expect(harness.manager.getSession(id)!.dirty).toBe(false);
+  });
+});
+
+describe("DocumentManager commitRenamedPath (003)", () => {
+  it("moves an open file's path without replacing its id, state or dirty flag", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("unsaved change");
+    const before = harness.manager.getSession(id)!;
+    const stateBefore = before.editorState;
+    const sourceIdentity = await identityOf(harness, SMALL_A);
+
+    const affected = harness.manager.commitRenamedPath({
+      sourceIdentity: {
+        canonicalPath: sourceIdentity.canonicalPath,
+        comparisonKey: sourceIdentity.comparisonKey,
+      },
+      newPath: "C:\\work\\renamed.txt",
+      newIdentity: syntheticIdentity(harness, "C:\\work\\renamed.txt"),
+    });
+
+    expect(affected).toEqual([id]);
+
+    const after = harness.manager.getSession(id)!;
+    // Same object, same identity: only path-related metadata moved.
+    expect(after).toBe(before);
+    expect(after.editorState).toBe(stateBefore);
+    expect(after.savedBaseline.toString()).toBe("alpha");
+    expect(after.dirty).toBe(true);
+    expect(after.path).toBe("C:\\work\\renamed.txt");
+    expect(after.displayName).toBe("renamed.txt");
+    expect(harness.manager.getSnapshot().tabs[1].displayName).toBe(
+      "renamed.txt",
+    );
+
+    // Ownership moved with the path: the old key is free, the new one is owned.
+    expect(
+      harness.manager.findSessionsUnder(sourceIdentity.comparisonKey),
+    ).toHaveLength(0);
+    expect(
+      harness.manager.findSessionsUnder(after.pathIdentity!.comparisonKey),
+    ).toEqual([after]);
+
+    // The old path can be opened again as a fresh session.
+    harness.files.addFile(SMALL_A, "alpha");
+    const reopened = await harness.manager.openPath(SMALL_A);
+    expect(reopened.status).toBe("opened");
+  });
+
+  it("updates every open document below a renamed directory without touching siblings", async () => {
+    const harness = createHarness();
+    const directory = "C:\\work\\src";
+    harness.files.addDirectory(directory);
+    harness.files.addFile("C:\\work\\src\\a.ts", "alpha");
+    harness.files.addFile("C:\\work\\src\\nested\\b.ts", "beta");
+    harness.files.addFile("C:\\work\\src-old\\c.ts", "charlie");
+
+    const openedA = await harness.manager.openPath("C:\\work\\src\\a.ts");
+    const openedB = await harness.manager.openPath("C:\\work\\src\\nested\\b.ts");
+    const openedSibling = await harness.manager.openPath(
+      "C:\\work\\src-old\\c.ts",
+    );
+    if (
+      openedA.status !== "opened" ||
+      openedB.status !== "opened" ||
+      openedSibling.status !== "opened"
+    ) {
+      throw new Error("Fixtures must open.");
+    }
+
+    const sourceIdentity = await identityOf(harness, directory);
+    const affected = harness.manager.commitRenamedPath({
+      sourceIdentity: {
+        canonicalPath: sourceIdentity.canonicalPath,
+        comparisonKey: sourceIdentity.comparisonKey,
+      },
+      newPath: "C:\\work\\lib",
+      newIdentity: syntheticIdentity(harness, "C:\\work\\lib", "directory"),
+    });
+
+    expect(affected).toHaveLength(2);
+    expect(harness.manager.getSession(openedA.documentId)!.path).toBe(
+      "C:\\work\\lib\\a.ts",
+    );
+    expect(harness.manager.getSession(openedB.documentId)!.path).toBe(
+      "C:\\work\\lib\\nested\\b.ts",
+    );
+    // A component-aware check keeps a sibling with a shared prefix out of it.
+    expect(harness.manager.getSession(openedSibling.documentId)!.path).toBe(
+      "C:\\work\\src-old\\c.ts",
+    );
+    expect(harness.manager.listSessions()).toHaveLength(4);
+  });
+
+  it("leaves untouched documents and untouched keys alone", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    const sourceIdentity = await identityOf(harness, SMALL_A);
+
+    const affected = harness.manager.commitRenamedPath({
+      sourceIdentity: {
+        canonicalPath: sourceIdentity.canonicalPath,
+        comparisonKey: sourceIdentity.comparisonKey,
+      },
+      newPath: "C:\\work\\renamed.txt",
+      newIdentity: syntheticIdentity(harness, "C:\\work\\renamed.txt"),
+    });
+
+    expect(affected).toEqual([id]);
+    expect(harness.manager.listSessions()).toHaveLength(2);
+    expect(harness.manager.getSession(id)!.dirty).toBe(false);
+  });
+});
+
+describe("DocumentManager deleted-session APIs (003)", () => {
+  it("finds open sessions under a canonical path without scanning disk", async () => {
+    const harness = createHarness();
+    const directory = "C:\\work\\src";
+    harness.files.addDirectory(directory);
+    harness.files.addFile("C:\\work\\src\\a.ts", "alpha");
+    harness.files.addFile("C:\\work\\src\\nested\\b.ts", "beta");
+    harness.files.addFile("C:\\work\\src-old\\c.ts", "charlie");
+
+    await harness.manager.openPath("C:\\work\\src\\a.ts");
+    await harness.manager.openPath("C:\\work\\src\\nested\\b.ts");
+    await harness.manager.openPath("C:\\work\\src-old\\c.ts");
+
+    const key = (await identityOf(harness, directory)).comparisonKey;
+    const affected = harness.manager.findSessionsUnder(key);
+
+    expect(affected.map((session) => session.displayName)).toEqual([
+      "a.ts",
+      "b.ts",
+    ]);
+
+    // A file target reports exactly its own session.
+    const fileKey = (await identityOf(harness, "C:\\work\\src\\a.ts"))
+      .comparisonKey;
+    expect(
+      harness.manager
+        .findSessionsUnder(fileKey)
+        .map((session) => session.displayName),
+    ).toEqual(["a.ts"]);
+  });
+
+  it("ignores untitled documents because they have no disk path", () => {
+    const harness = createHarness();
+    harness.editor.type("dirty draft");
+
+    expect(
+      harness.manager.findSessionsUnder(harness.files.comparisonKeyFor("C:\\")),
+    ).toEqual([]);
+  });
+
+  it("removes confirmed-deleted sessions without a second prompt", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("dirty, about to be trashed");
+
+    const removed = harness.manager.removeDeletedSessions([id]);
+
+    expect(removed).toEqual([id]);
+    expect(harness.dialogs.unsavedPromptCount).toBe(0);
+    expect(harness.files.writes).toHaveLength(0);
+    expect(harness.manager.getSession(id)).toBeUndefined();
+    expect(tabNames(harness.manager.getSnapshot())).toEqual(["Untitled1"]);
+  });
+
+  it("returns to zero documents when the deleted sessions were the only ones", async () => {
+    const harness = createBareHarness();
+    const id = harness.manager.createUntitled();
+    harness.manager.handleEditorStateUpdate(
+      id,
+      EditorState.create({ doc: toText("dirty") }),
+      true,
+    );
+
+    harness.manager.removeDeletedSessions([id]);
+
+    expect(harness.manager.getSnapshot()).toEqual({
+      activeDocumentId: null,
+      tabs: [],
+    });
+    expect(harness.dialogs.unsavedPromptCount).toBe(0);
+  });
+
+  it("ignores ids that are no longer open", () => {
+    const harness = createHarness();
+
+    expect(harness.manager.removeDeletedSessions(["doc-gone"])).toEqual([]);
+    expect(harness.manager.listSessions()).toHaveLength(1);
+  });
+});
+

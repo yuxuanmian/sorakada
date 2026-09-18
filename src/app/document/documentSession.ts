@@ -86,7 +86,14 @@ export interface TabSnapshot {
 
 /** Lightweight projection consumed by React. */
 export interface DocumentManagerSnapshot {
-  activeDocumentId: DocumentId;
+  /**
+   * The active document, or `null` when no document is open.
+   *
+   * 003 supersedes the 002 rule that a document always exists: `null` holds if
+   * and only if `tabs` is empty, and the Empty State is UI only — it is never
+   * represented by a session.
+   */
+  activeDocumentId: DocumentId | null;
   tabs: readonly TabSnapshot[];
 }
 

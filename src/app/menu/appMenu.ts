@@ -8,10 +8,31 @@ export interface AppMenuDeps {
   executeCommand(id: CommandId): Promise<void>;
   /** Reports a failure that escaped a command handler. */
   onCommandError?(error: unknown): void;
+  /**
+   * The shared availability decision for a command.
+   *
+   * The menu asks the same registry every other surface asks, so a native menu
+   * item can never be enabled for a command the registry would refuse (FR-019,
+   * FR-020).
+   */
+  isCommandEnabled(id: CommandId): boolean;
+}
+
+/** A live installation of the application menu. */
+export interface AppMenuInstallation {
+  /**
+   * Pushes the current availability of every command item to the native menu.
+   *
+   * The application calls this whenever document, Workspace or Explorer
+   * operation state changes.
+   */
+  syncAvailability(): Promise<void>;
+  /** Restores the previous application menu. */
+  restore(): Promise<void>;
 }
 
 /**
- * Builds and installs the native File/Edit menu.
+ * Builds and installs the native File/Edit/View menu.
  *
  * Every menu click dispatches a stable command ID through the registry, so a
  * menu click and a keyboard shortcut reach exactly the same handler.
@@ -22,12 +43,11 @@ export interface AppMenuDeps {
  * focus — the keystroke is delivered to the page instead — so registering them
  * would advertise shortcuts that never fire. The single working dispatcher is
  * the application-level `keydown` handler in `App.tsx`, which resolves the same
- * IDEA profile data and executes it through this same registry. Returns the
- * function that restores the previous application menu.
+ * IDEA profile data and executes it through this same registry.
  */
 export async function installAppMenu(
   deps: AppMenuDeps,
-): Promise<() => Promise<void>> {
+): Promise<AppMenuInstallation> {
   const dispatch = (id: CommandId): void => {
     // Menu actions are synchronous callbacks, so the asynchronous command runs
     // detached — but never unobserved.
@@ -40,9 +60,12 @@ export async function installAppMenu(
     });
   };
 
-  const commandItem = (id: CommandId, label: string): Promise<MenuItem> => {
+  /** Every command item, so availability can be re-applied after any change. */
+  const commandItems = new Map<CommandId, MenuItem>();
+
+  const commandItem = async (id: CommandId, label: string): Promise<MenuItem> => {
     const accelerator = acceleratorFor(id);
-    return MenuItem.new({
+    const item = await MenuItem.new({
       id,
       // Win32 menus render whatever follows a tab as right-aligned accelerator
       // text, which keeps the profile visible without binding it.
@@ -51,6 +74,8 @@ export async function installAppMenu(
         dispatch(id);
       },
     });
+    commandItems.set(id, item);
+    return item;
   };
 
   const fileMenu = await Submenu.new({
@@ -58,6 +83,10 @@ export async function installAppMenu(
     items: [
       await commandItem("file.new", "New"),
       await commandItem("file.open", "Open..."),
+      await PredefinedMenuItem.new({ item: "Separator" }),
+      await commandItem("workspace.openFolder", "Open Folder..."),
+      await commandItem("workspace.closeFolder", "Close Folder"),
+      await PredefinedMenuItem.new({ item: "Separator" }),
       await commandItem("file.save", "Save"),
       await commandItem("file.saveAs", "Save As..."),
       await commandItem("file.close", "Close"),
@@ -74,12 +103,31 @@ export async function installAppMenu(
     ],
   });
 
-  const menu = await Menu.new({ items: [fileMenu, editMenu] });
+  const viewMenu = await Submenu.new({
+    text: "View",
+    items: [await commandItem("view.toggleExplorer", "Explorer")],
+  });
+
+  const menu = await Menu.new({ items: [fileMenu, editMenu, viewMenu] });
   const previousMenu = await menu.setAsAppMenu();
 
-  return async () => {
-    if (previousMenu !== null) {
-      await previousMenu.setAsAppMenu();
+  const syncAvailability = async (): Promise<void> => {
+    for (const [id, item] of commandItems) {
+      await item.setEnabled(deps.isCommandEnabled(id));
     }
+  };
+
+  // The menu must never appear with stale enabled state on a launch where the
+  // registry was already populated.
+  await syncAvailability();
+
+  return {
+    syncAvailability,
+    restore: async () => {
+      commandItems.clear();
+      if (previousMenu !== null) {
+        await previousMenu.setAsAppMenu();
+      }
+    },
   };
 }

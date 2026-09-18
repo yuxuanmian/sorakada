@@ -71,6 +71,34 @@ pub struct InspectPathRequest {
     pub allow_missing: bool,
 }
 
+/// Request payload of the `resolve_workspace_relation` command.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveWorkspaceRelationRequest {
+    /// The active Workspace root.
+    pub root_path: String,
+    /// The disk-backed path whose relation is being derived.
+    pub target_path: String,
+}
+
+/// How a disk path relates to the active Workspace root.
+///
+/// This is a *derived* value in 003: it is never stored on a document session,
+/// so saving or renaming a document inside or outside the Workspace changes the
+/// answer immediately without reopening the document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum WorkspaceRelation {
+    /// The target is the root itself or one of its descendants.
+    Inside {
+        /// Path of the target relative to the root, using the platform separator.
+        #[serde(rename = "relativePath")]
+        relative_path: String,
+    },
+    /// The target lives outside the root, or on a different volume.
+    Outside,
+}
+
 /// Resolves `requested_path` into a comparison identity.
 ///
 /// An existing path resolves through the filesystem, so equivalent spellings
@@ -149,12 +177,112 @@ fn resolution_error(requested_path: &str, error: std::io::Error) -> FileCommandE
     )
 }
 
+/// Derives the Workspace relation of `target_path` to `root_path`.
+///
+/// Both sides are canonicalized first, so equivalent spellings, `..` detours,
+/// symlinks and junctions all compare through the object they actually name.
+/// Containment is decided component by component rather than by string prefix,
+/// so a sibling such as `D:\project-old` is never treated as inside
+/// `D:\project`.
+pub fn resolve_workspace_relation(
+    root_path: &str,
+    target_path: &str,
+) -> Result<WorkspaceRelation, FileCommandError> {
+    let root = canonical_directory(root_path)?;
+    let target = fs::canonicalize(target_path).map_err(|error| {
+        FileCommandError::new(
+            CODE_PATH_RESOLUTION,
+            format!("Cannot resolve {target_path}: {error}"),
+        )
+    })?;
+
+    match relative_within(&root, &target) {
+        Some(relative_path) => Ok(WorkspaceRelation::Inside { relative_path }),
+        None => Ok(WorkspaceRelation::Outside),
+    }
+}
+
+/// Resolves a path that must name an existing directory.
+fn canonical_directory(path: &str) -> Result<std::path::PathBuf, FileCommandError> {
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        FileCommandError::new(
+            CODE_PATH_RESOLUTION,
+            format!("Cannot resolve {path}: {error}"),
+        )
+    })?;
+    let metadata = fs::metadata(&canonical).map_err(|error| {
+        FileCommandError::new(
+            CODE_PATH_RESOLUTION,
+            format!("Cannot resolve {path}: {error}"),
+        )
+    })?;
+
+    if !metadata.is_dir() {
+        return Err(FileCommandError::new(
+            CODE_PATH_RESOLUTION,
+            format!("Not a directory: {path}"),
+        ));
+    }
+
+    Ok(canonical)
+}
+
+/// The path of `target` relative to `root`, or `None` when it is not contained.
+///
+/// Comparison is per path component with the platform's own case rules, which is
+/// why this replaces any `starts_with`-style text check. `Some("")` means the
+/// two paths name the same object.
+pub(crate) fn relative_within(root: &Path, target: &Path) -> Option<String> {
+    let root_components: Vec<_> = root.components().collect();
+    let target_components: Vec<_> = target.components().collect();
+
+    if target_components.len() < root_components.len() {
+        return None;
+    }
+
+    for (root_component, target_component) in
+        root_components.iter().zip(target_components.iter())
+    {
+        if !same_component(root_component, target_component) {
+            return None;
+        }
+    }
+
+    let remainder = &target_components[root_components.len()..];
+    if remainder.is_empty() {
+        return Some(String::new());
+    }
+
+    let mut relative = std::path::PathBuf::new();
+    for component in remainder {
+        relative.push(component.as_os_str());
+    }
+
+    Some(relative.to_string_lossy().to_string())
+}
+
+/// Whether two path components name the same segment under platform rules.
+fn same_component(left: &std::path::Component<'_>, right: &std::path::Component<'_>) -> bool {
+    let left = left.as_os_str().to_string_lossy();
+    let right = right.as_os_str().to_string_lossy();
+
+    #[cfg(windows)]
+    {
+        left.eq_ignore_ascii_case(&right)
+    }
+
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
 /// The platform's own path-equality semantics.
 ///
 /// Windows compares paths case-insensitively, so the key is case-folded there.
 /// Distinct hard-link paths are deliberately *not* folded together: 002 keys on
 /// the canonical path, not on a native file id.
-fn comparison_key(canonical: &Path) -> String {
+pub(crate) fn comparison_key(canonical: &Path) -> String {
     let text = canonical.to_string_lossy().to_string();
 
     #[cfg(windows)]
@@ -387,5 +515,228 @@ mod tests {
         assert!(value.get("modified_time_millis").is_none());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Workspace relation (003)                                          */
+    /* ---------------------------------------------------------------- */
+
+    /// The JSON the frontend's `ResolveWorkspaceRelationResult` DTO reads.
+    #[test]
+    fn workspace_relation_serializes_the_tagged_wire_shape() {
+        let inside = serde_json::to_value(WorkspaceRelation::Inside {
+            relative_path: "src\\a.ts".to_string(),
+        })
+        .expect("serialize inside");
+
+        assert_eq!(inside.as_object().expect("object").len(), 2);
+        assert_eq!(inside["type"], json!("inside"));
+        assert_eq!(inside["relativePath"], json!("src\\a.ts"));
+        assert!(inside.get("relative_path").is_none());
+
+        let outside = serde_json::to_value(WorkspaceRelation::Outside).expect("serialize outside");
+        assert_eq!(outside.as_object().expect("object").len(), 1);
+        assert_eq!(outside["type"], json!("outside"));
+    }
+
+    #[test]
+    fn relation_reports_inside_with_a_relative_path() {
+        let root = work_dir("relation-inside");
+        fs::create_dir_all(root.join("src").join("nested")).expect("create nested dirs");
+        let target = root.join("src").join("nested").join("a.ts");
+        fs::write(&target, b"x").expect("write fixture");
+
+        let relation =
+            resolve_workspace_relation(&display(&root), &display(&target)).expect("derive relation");
+
+        assert_eq!(
+            relation,
+            WorkspaceRelation::Inside {
+                relative_path: std::path::PathBuf::from("src")
+                    .join("nested")
+                    .join("a.ts")
+                    .to_string_lossy()
+                    .to_string(),
+            }
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn relation_reports_the_root_itself_as_inside() {
+        let root = work_dir("relation-root");
+
+        let relation =
+            resolve_workspace_relation(&display(&root), &display(&root)).expect("derive relation");
+
+        assert_eq!(
+            relation,
+            WorkspaceRelation::Inside {
+                relative_path: String::new(),
+            }
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn relation_rejects_a_sibling_with_a_shared_name_prefix() {
+        let parent = work_dir("relation-sibling");
+        let root = parent.join("project");
+        let sibling = parent.join("project-old");
+        fs::create_dir_all(&root).expect("create root");
+        fs::create_dir_all(&sibling).expect("create sibling");
+        let target = sibling.join("a.ts");
+        fs::write(&target, b"x").expect("write fixture");
+
+        // Naive string prefix comparison would wrongly accept this target.
+        assert!(display(&target).starts_with(&display(&root)));
+
+        let relation =
+            resolve_workspace_relation(&display(&root), &display(&target)).expect("derive relation");
+
+        assert_eq!(relation, WorkspaceRelation::Outside);
+
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn relation_reports_a_disjoint_path_as_outside() {
+        let root = work_dir("relation-outside");
+        let other = work_dir("relation-elsewhere");
+        let target = other.join("a.ts");
+        fs::write(&target, b"x").expect("write fixture");
+
+        let relation =
+            resolve_workspace_relation(&display(&root), &display(&target)).expect("derive relation");
+
+        assert_eq!(relation, WorkspaceRelation::Outside);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    fn relation_resolves_equivalent_spellings_and_parent_detours() {
+        let root = work_dir("relation-spellings");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        let target = root.join("src").join("a.ts");
+        fs::write(&target, b"x").expect("write fixture");
+
+        let detour = root.join("src").join("..").join("src").join("a.ts");
+        let dotted = root.join(".").join("src").join("a.ts");
+
+        for spelling in [detour, dotted] {
+            let relation = resolve_workspace_relation(&display(&root), &display(&spelling))
+                .expect("derive relation");
+            assert_eq!(
+                relation,
+                WorkspaceRelation::Inside {
+                    relative_path: std::path::PathBuf::from("src")
+                        .join("a.ts")
+                        .to_string_lossy()
+                        .to_string(),
+                },
+                "equivalent spelling {} must stay inside",
+                display(&spelling)
+            );
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn relation_follows_windows_case_rules() {
+        let root = work_dir("relation-case");
+        fs::create_dir_all(root.join("SRC")).expect("create SRC");
+        let target = root.join("SRC").join("A.TS");
+        fs::write(&target, b"x").expect("write fixture");
+
+        let flipped = root.join("src").join("a.ts");
+        let relation =
+            resolve_workspace_relation(&display(&root), &display(&flipped)).expect("derive relation");
+
+        assert_eq!(
+            relation,
+            WorkspaceRelation::Inside {
+                relative_path: std::path::PathBuf::from("SRC")
+                    .join("A.TS")
+                    .to_string_lossy()
+                    .to_string(),
+            },
+            "canonicalization must report the on-disk spelling"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn relation_errors_when_the_root_is_missing_or_not_a_directory() {
+        let dir = work_dir("relation-root-errors");
+        let file = write_file(&dir, "notes.txt", b"x");
+        let missing = dir.join("absent");
+
+        let missing_error = resolve_workspace_relation(&display(&missing), &display(&file))
+            .expect_err("a missing root cannot resolve");
+        assert_eq!(missing_error.code, CODE_PATH_RESOLUTION);
+
+        let file_error = resolve_workspace_relation(&display(&file), &display(&file))
+            .expect_err("a file root is not a Workspace");
+        assert_eq!(file_error.code, CODE_PATH_RESOLUTION);
+        assert!(!file_error.message.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relation_errors_when_the_target_is_missing() {
+        let root = work_dir("relation-target-errors");
+        let missing = root.join("absent.ts");
+
+        let error = resolve_workspace_relation(&display(&root), &display(&missing))
+            .expect_err("a missing target cannot resolve");
+        assert_eq!(error.code, CODE_PATH_RESOLUTION);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A directory link is followed, so the relation describes the canonical
+    /// target rather than the link's own location.
+    #[test]
+    fn relation_follows_a_directory_link_to_its_target() {
+        let root = work_dir("relation-link-root");
+        let outside = work_dir("relation-link-target");
+        let link = root.join("linked");
+
+        if !crate::test_support::create_directory_link(&outside, &link) {
+            return;
+        }
+
+        let target = outside.join("a.ts");
+        fs::write(&target, b"x").expect("write fixture");
+
+        let relation =
+            resolve_workspace_relation(&display(&root), &display(&link.join("a.ts")))
+                .expect("derive relation");
+
+        assert_eq!(
+            relation,
+            WorkspaceRelation::Outside,
+            "a link out of the root must resolve outside it"
+        );
+
+        let inside_relation = resolve_workspace_relation(&display(&outside), &display(&link.join("a.ts")))
+            .expect("derive relation through the target root");
+        assert_eq!(
+            inside_relation,
+            WorkspaceRelation::Inside {
+                relative_path: "a.ts".to_string(),
+            }
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
     }
 }

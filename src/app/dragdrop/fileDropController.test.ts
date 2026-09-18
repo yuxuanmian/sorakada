@@ -314,10 +314,15 @@ class InMemoryFileService implements FileService {
   readonly writes: WriteTextFileRequest[] = [];
 
   private readonly files = new Map<string, string>();
+  private readonly directories = new Set<string>();
   private readonly aliases = new Map<string, string>();
 
   add(path: string, text = "content"): void {
     this.files.set(this.keyFor(path), text);
+  }
+
+  addDirectory(path: string): void {
+    this.directories.add(this.keyFor(path));
   }
 
   /** Registers an equivalent spelling that resolves to `canonical`. */
@@ -335,6 +340,17 @@ class InMemoryFileService implements FileService {
     allowMissing: boolean,
   ): Promise<ResolvedPathIdentity> {
     const comparisonKey = this.keyFor(path);
+
+    if (this.directories.has(comparisonKey)) {
+      return Promise.resolve({
+        requestedPath: path,
+        canonicalPath: path,
+        comparisonKey,
+        kind: "directory",
+        diskRevision: { size: 0, modifiedTimeMillis: 0 },
+      });
+    }
+
     const text = this.files.get(comparisonKey);
 
     if (text === undefined) {
@@ -441,9 +457,84 @@ describe("duplicate reuse across opening surfaces (SC-002)", () => {
     }
 
     // Exactly one document was created, and the file was read only once.
-    expect(manager.listSessions()).toHaveLength(2);
+    // 003 starts from zero documents, so the drop batch produced the only Tab.
+    expect(manager.listSessions()).toHaveLength(1);
     expect(files.reads).toHaveLength(1);
-    expect(tabNames(manager)).toEqual(["Untitled1", "a.txt"]);
+    expect(tabNames(manager)).toEqual(["a.txt"]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* US3 — mixed batches and Workspace independence (FR-044..FR-048)             */
+/* -------------------------------------------------------------------------- */
+
+describe("dropped batches and the Workspace (US3)", () => {
+  it("ignores directories while continuing to open the files around them", async () => {
+    const files = new InMemoryFileService();
+    files.add(VALID_A, "alpha");
+    files.add(VALID_B, "bravo");
+    files.addDirectory(DIRECTORY);
+
+    const dialogs = new RecordingDialogs();
+    const manager = new DocumentManager({
+      editor: new MinimalEditor(),
+      fileService: files,
+      dialogs,
+    });
+
+    // A mixed batch: the directory is skipped without a prompt, and the files
+    // on either side still open in drop order.
+    const lastHandled = await processDroppedPaths(
+      [VALID_A, DIRECTORY, VALID_B],
+      manager,
+    );
+
+    expect(files.reads).toEqual([VALID_A, VALID_B]);
+    expect(tabNames(manager)).toEqual(["a.txt", "b.txt"]);
+    expect(dialogs.errors).toHaveLength(0);
+    expect(lastHandled).toBe(manager.getSnapshot().activeDocumentId);
+  });
+
+  it("opens an inside- and an outside-Workspace file the same way", async () => {
+    const files = new InMemoryFileService();
+    const INSIDE = "C:\\work\\src\\a.ts";
+    const OUTSIDE = "D:\\elsewhere\\b.ts";
+    files.add(INSIDE, "inside");
+    files.add(OUTSIDE, "outside");
+
+    const manager = new DocumentManager({
+      editor: new MinimalEditor(),
+      fileService: files,
+      dialogs: new RecordingDialogs(),
+    });
+
+    // Drop order decides Tab order; both are ordinary documents because the
+    // Workspace is a navigation context, not a document owner (FR-045, FR-047).
+    await processDroppedPaths([INSIDE, OUTSIDE], manager);
+
+    expect(tabNames(manager)).toEqual(["a.ts", "b.ts"]);
+    expect(manager.listSessions()).toHaveLength(2);
+  });
+
+  it("activates the existing session when a dropped file is already open", async () => {
+    const files = new InMemoryFileService();
+    files.add(VALID_A, "alpha");
+    files.addAlias(DUPLICATE_A, VALID_A);
+
+    const dialogs = new RecordingDialogs();
+    const manager = new DocumentManager({
+      editor: new MinimalEditor(),
+      fileService: files,
+      dialogs,
+    });
+
+    const first = await processDroppedPaths([VALID_A], manager);
+    const second = await processDroppedPaths([DUPLICATE_A], manager);
+
+    // One canonical destination, one session, whichever spelling was dropped.
+    expect(second).toBe(first);
+    expect(manager.listSessions()).toHaveLength(1);
+    expect(files.reads).toHaveLength(1);
   });
 });
 

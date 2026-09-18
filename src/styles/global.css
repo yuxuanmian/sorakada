@@ -17,6 +17,11 @@
   --color-selection: #2b4a75;
   --color-caret: #7cb0ff;
 
+  /* Interaction states shared by every 003 surface */
+  --color-hover: #23262e;
+  --color-active: #2b303b;
+  --color-focus-ring: #3b6ea8;
+
   /* Typography */
   --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
@@ -25,6 +30,18 @@
 
   /* Layout */
   --app-header-height: 34px;
+  --sidebar-resizer-width: 4px;
+  --sidebar-default-width: 260px;
+
+  /* Spacing and shape */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --control-height: 24px;
+  /* Popup elevation, shared by every floating surface. */
+  --shadow-popup: 0 6px 18px rgb(0 0 0 / 45%);
 }
 
 *,
@@ -72,11 +89,21 @@ body {
   text-transform: uppercase;
 }
 
-/* Stacks the Tab strip above the editor and hands them the remaining pixels. */
-.app__content {
+/*
+ * Sidebar and Editor Area side by side. The Body is the horizontal axis of the
+ * shell; each side owns its own vertical layout.
+ */
+.app__body {
   display: flex;
   flex: 1 1 auto;
-  flex-direction: column;
+  align-items: stretch;
   min-width: 0;
   min-height: 0;
+}
+
+/* Shared glyph sizing; colours always come from `currentColor`. */
+.app-icon {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
 }

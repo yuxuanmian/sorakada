@@ -9,7 +9,13 @@ export type FileCommandCode =
   | "unsupported_encoding"
   | "unsupported_binary"
   | "unsupported_line_ending"
-  | "path_resolution";
+  | "path_resolution"
+  // 003 structural Workspace codes. They are carried by the same error shape as
+  // the 002 codes, so every existing consumer keeps working.
+  | "io_directory"
+  | "io_create"
+  | "io_rename"
+  | "io_trash";
 
 /** Serializable error returned by the Rust file commands. */
 export interface FileCommandError {

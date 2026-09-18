@@ -45,13 +45,21 @@ describe("IDEA M1 keymap profile", () => {
     });
   });
 
-  it("binds every command except Exit", () => {
-    expect(Object.keys(IDEA_M1_KEYMAP)).toHaveLength(COMMAND_IDS.length - 1);
-    expect(Object.keys(IDEA_M1_KEYMAP).sort()).toEqual(
-      COMMAND_IDS.filter((id) => id !== "app.exit")
-        .slice()
-        .sort(),
-    );
+  it("binds exactly the document and editor commands", () => {
+    // 003 adds Workspace and Explorer commands that deliberately carry no global
+    // accelerator: F2/Delete are Explorer-local triggers, and Open/Close Folder
+    // and View > Explorer are reachable from the native menu.
+    expect(Object.keys(IDEA_M1_KEYMAP).sort()).toEqual([
+      "editor.redo",
+      "editor.undo",
+      "file.close",
+      "file.new",
+      "file.open",
+      "file.save",
+      "file.saveAs",
+    ]);
+    expect(Object.keys(IDEA_M1_KEYMAP)).not.toContain("app.exit");
+    expect(COMMAND_IDS.length).toBeGreaterThan(Object.keys(IDEA_M1_KEYMAP).length);
   });
 
   it("gives Exit no M1 accelerator", () => {
@@ -96,7 +104,7 @@ describe("IDEA M1 keymap profile", () => {
 });
 
 describe("CommandId catalogue", () => {
-  it("exposes exactly the M1 command identifiers", () => {
+  it("exposes the M1 document commands and the 003 Workspace commands", () => {
     expect(COMMAND_IDS).toEqual([
       "file.new",
       "file.open",
@@ -106,7 +114,54 @@ describe("CommandId catalogue", () => {
       "app.exit",
       "editor.undo",
       "editor.redo",
+      "workspace.openFolder",
+      "workspace.closeFolder",
+      "explorer.newFile",
+      "explorer.newFolder",
+      "explorer.rename",
+      "explorer.delete",
+      "explorer.refresh",
+      "view.toggleExplorer",
     ]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Explorer-local triggers (FR-079, FR-080)                                    */
+/* -------------------------------------------------------------------------- */
+
+describe("Explorer keyboard scope (US8)", () => {
+  const plainKey = (key: string) => ({
+    key,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    altKey: false,
+  });
+
+  it("keeps plain F2 and Delete out of the global keymap", () => {
+    // These are Explorer-local triggers: putting them in the global profile
+    // would recognize Delete while CodeMirror has focus and swallow normal text
+    // deletion.
+    for (const id of COMMAND_IDS) {
+      expect(acceleratorFor(id)).not.toBe("F2");
+      expect(acceleratorFor(id)).not.toBe("Delete");
+    }
+
+    expect(commandForKeyboardEvent(plainKey("F2"))).toBeUndefined();
+    expect(commandForKeyboardEvent(plainKey("Delete"))).toBeUndefined();
+  });
+
+  it("never binds a Workspace or Explorer command to a global accelerator", () => {
+    // Only the document/editor commands carry IDE accelerators in 003.
+    expect(acceleratorFor("explorer.rename")).toBeUndefined();
+    expect(acceleratorFor("explorer.delete")).toBeUndefined();
+    expect(acceleratorFor("explorer.refresh")).toBeUndefined();
+    expect(acceleratorFor("explorer.newFile")).toBeUndefined();
+    expect(acceleratorFor("explorer.newFolder")).toBeUndefined();
+    expect(acceleratorFor("workspace.openFolder")).toBeUndefined();
+    expect(acceleratorFor("workspace.closeFolder")).toBeUndefined();
+    expect(acceleratorFor("view.toggleExplorer")).toBeUndefined();
   });
 });
 

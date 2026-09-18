@@ -72,6 +72,9 @@ function createSession(
 /**
  * Stands in for `DocumentManager`: title changes arrive as snapshots, and the
  * close-all decision belongs to the manager, not to this module.
+ *
+ * The active session is nullable, because 003 makes zero documents a valid
+ * steady state (SR-002).
  */
 class FakeSource implements WindowLifecycleSource {
   dirtyDocuments: DocumentSession[] = [];
@@ -80,9 +83,9 @@ class FakeSource implements WindowLifecycleSource {
 
   private listeners = new Set<(snapshot: DocumentManagerSnapshot) => void>();
 
-  constructor(public activeSession: DocumentSession) {}
+  constructor(public activeSession: DocumentSession | null) {}
 
-  getActiveSession(): DocumentSession {
+  getActiveSession(): DocumentSession | null {
     return this.activeSession;
   }
 
@@ -102,10 +105,10 @@ class FakeSource implements WindowLifecycleSource {
     };
   }
 
-  update(session: DocumentSession): void {
+  update(session: DocumentSession | null): void {
     this.activeSession = session;
     const snapshot: DocumentManagerSnapshot = {
-      activeDocumentId: session.id,
+      activeDocumentId: session === null ? null : session.id,
       tabs: [],
     };
     for (const listener of this.listeners) {
@@ -147,6 +150,59 @@ describe("formatWindowTitle", () => {
     expect(formatWindowTitle(source.getActiveSession())).toBe(
       "Untitled2 - Sorakada",
     );
+  });
+
+  it("names only the application while no document is open", () => {
+    // FR-015/FR-016: zero documents is a real state, so the title has to
+    // describe the application instead of a document that does not exist.
+    expect(formatWindowTitle(null)).toBe("Sorakada");
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Zero-document title synchronisation (US4)                                   */
+/* -------------------------------------------------------------------------- */
+
+describe("installWindowLifecycle with zero documents (US4)", () => {
+  it("publishes the application title on install and after the last Tab closes", async () => {
+    const source = new FakeSource(
+      createSession({ displayName: "Untitled1", dirty: false }),
+    );
+    const appWindow = new FakeWindow();
+
+    await installWindowLifecycle(source, appWindow);
+    expect(appWindow.titles).toEqual(["Untitled1 - Sorakada"]);
+
+    // Closing the final Tab drops the active session without creating another.
+    source.update(null);
+    expect(appWindow.titles).toEqual([
+      "Untitled1 - Sorakada",
+      "Sorakada",
+    ]);
+  });
+
+  it("returns to a document title when New creates the first document", async () => {
+    const source = new FakeSource(null);
+    const appWindow = new FakeWindow();
+
+    await installWindowLifecycle(source, appWindow);
+    expect(appWindow.titles).toEqual(["Sorakada"]);
+
+    source.update(createSession({ displayName: "Untitled1" }));
+    expect(appWindow.titles).toEqual(["Sorakada", "Untitled1 - Sorakada"]);
+  });
+
+  it("closes a zero-document window without running the unsaved guard", async () => {
+    const source = new FakeSource(null);
+    const appWindow = new FakeWindow();
+
+    await installWindowLifecycle(source, appWindow);
+    const event = new FakeCloseEvent();
+    await appWindow.handler?.(event);
+
+    expect(event.preventDefaultCount).toBe(0);
+    expect(source.closeAllCalls).toBe(0);
+    expect(appWindow.destroyCount).toBe(0);
   });
 });
 
@@ -241,8 +297,9 @@ describe("installWindowLifecycle", () => {
   });
 
   it("routes a dirty close through prepareCloseAll and destroys once", async () => {
-    const source = new FakeSource(createSession({ dirty: true }));
-    source.dirtyDocuments = [source.getActiveSession()];
+    const dirty = createSession({ dirty: true });
+    const source = new FakeSource(dirty);
+    source.dirtyDocuments = [dirty];
     const appWindow = new FakeWindow();
 
     await installWindowLifecycle(source, appWindow);
@@ -256,8 +313,9 @@ describe("installWindowLifecycle", () => {
   });
 
   it("does not destroy the window when the manager refuses the close", async () => {
-    const source = new FakeSource(createSession({ dirty: true }));
-    source.dirtyDocuments = [source.getActiveSession()];
+    const dirty = createSession({ dirty: true });
+    const source = new FakeSource(dirty);
+    source.dirtyDocuments = [dirty];
     source.closeAllResult = false;
     const appWindow = new FakeWindow();
 
@@ -272,17 +330,18 @@ describe("installWindowLifecycle", () => {
   });
 
   it("does not create a replacement Tab for an approved window close", async () => {
-    const source = new FakeSource(createSession({ dirty: true }));
-    source.dirtyDocuments = [source.getActiveSession()];
+    const dirty = createSession({ dirty: true });
+    const source = new FakeSource(dirty);
+    source.dirtyDocuments = [dirty];
     const appWindow = new FakeWindow();
 
     await installWindowLifecycle(source, appWindow);
 
-    const before = source.getActiveSession().id;
+    const before = dirty.id;
     await appWindow.handler?.(new FakeCloseEvent());
 
     // The lifecycle itself never closes a Tab; it only destroys the window.
-    expect(source.getActiveSession().id).toBe(before);
+    expect(source.getActiveSession()?.id).toBe(before);
     expect(appWindow.destroyCount).toBe(1);
   });
 });

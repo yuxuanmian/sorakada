@@ -4,3 +4,4 @@
 //! the Rust file layer.
 
 pub mod file;
+pub mod workspace;

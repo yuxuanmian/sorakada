@@ -4,57 +4,8 @@ Guidance for automated agents working in this repository. Read this before makin
 changes — the first rule exists because breaking it has already corrupted files
 in this project more than once.
 
-## 1. Never edit text files with Windows PowerShell 5.1 cmdlets
 
-**This is the most damaging trap in this repository.**
-
-The `pwsh` command on this machine resolves to **Windows PowerShell 5.1**
-(`$PSVersionTable.PSEdition -eq 'Desktop'`), whose ANSI codepage is `gb2312`.
-`Get-Content` / `Set-Content` therefore decode a UTF-8 file with the wrong
-codepage and write back mojibake — sometimes as **invalid UTF-8**.
-
-Observed damage: `→` became `鈫?`, `—` and `–` became `鈥?` / `鈥揟`, and `⚠️` / `🎯`
-became `鈿狅笍` / `馃幆`. The file can still pass a "is it valid UTF-8?" check while
-being silently wrong, so the corruption is easy to miss.
-
-> These mojibake sequences are deliberate examples. This file is the one place
-> where residual CJK is expected — do not "repair" them.
-
-### Rules
-
-1. **Prefer the editor tools** (`edit` / `write`) for any file change. They are
-   always UTF-8 safe.
-2. **If a script must touch a text file, run it under PowerShell 7+.**
-   On this machine: `D:\Program Files\PowerShell\7\pwsh.exe` (note: on `D:`, not
-   under `C:\Program Files` — `Get-Command pwsh` finds it, hardcoded `C:` paths
-   do not). PowerShell 7 is UTF-8 native and round-trips safely.
-3. **Check which shell you are in first:**
-   ```powershell
-   $PSVersionTable.PSEdition   # 'Desktop' = 5.1 (dangerous), 'Core' = 7+
-   ```
-4. **If you are stuck on 5.1, be explicit about encoding** — never let the
-   cmdlets guess:
-   ```powershell
-   $p = 'path\to\file.md'
-   $t = [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8)
-   # ...modify $t...
-   [System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding($false)))
-   ```
-5. **Never** use bare `Set-Content`, `Out-File`, `>` or `>>` on a text file
-   without an explicit encoding.
-
-### After any scripted text edit, verify
-
-```powershell
-$bytes = [System.IO.File]::ReadAllBytes($p)
-[void](New-Object System.Text.UTF8Encoding($false, $true)).GetString($bytes)  # throws if invalid
-```
-
-Then confirm the intended characters are still present and no stray CJK
-ideographs appeared (residual CJK in an English document is the tell-tale sign).
-
-
-## 2. Verification commands
+## 1. Verification commands
 
 All four must pass before reporting work as complete:
 

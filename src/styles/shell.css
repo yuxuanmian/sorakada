@@ -1,0 +1,128 @@
+/*
+ * Shell layout: Sidebar, Editor Area, Empty State and shared controls.
+ *
+ * Every colour, radius and spacing value comes from the theme tokens in
+ * `global.css`, so the shell introduces no palette of its own (FR-095).
+ */
+
+.sidebar {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--color-border);
+  background-color: var(--color-bg-raised);
+}
+
+.sidebar__content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar__resizer {
+  position: absolute;
+  top: 0;
+  right: calc(var(--sidebar-resizer-width) / -2);
+  z-index: 2;
+  width: var(--sidebar-resizer-width);
+  height: 100%;
+  cursor: col-resize;
+}
+
+.sidebar__resizer:hover,
+.sidebar__resizer--active {
+  background-color: var(--color-focus-ring);
+}
+
+/*
+ * The Editor Area keeps the Tab strip above the editor host. It is the
+ * positioning context for the drag/drop affordance, so the overlay can never
+ * cover the Tab strip.
+ */
+.editor-area {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.editor-host-area {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/*
+ * Drag-over affordance. It is only rendered while a native drag is active and
+ * never receives pointer events, so it cannot block editor input.
+ */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 2px dashed var(--color-caret);
+}
+
+/* The zero-document Editor Area state (FR-016). */
+.empty-state {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  text-align: center;
+}
+
+.empty-state__title {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 14px;
+}
+
+.empty-state__hint {
+  max-width: 420px;
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.empty-state__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+/* Shared shell button, used by the Empty State and the Explorer. */
+.shell-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--control-height);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  cursor: default;
+}
+
+.shell-button:hover:not(:disabled) {
+  background-color: var(--color-hover);
+}
+
+.shell-button:disabled {
+  color: var(--color-text-subtle);
+  cursor: default;
+}

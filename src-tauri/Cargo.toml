@@ -21,6 +21,18 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
+# Structural filesystem operations for the Workspace Explorer (003). `trash`
+# moves an entry to the OS recycle/trash facility and has no permanent-delete
+# fallback, which is what FR-066/FR-067 require. `chrono` is only used for the
+# crate's optional `TrashItem` timestamps, so the default feature is dropped and
+# the Windows COM apartment is pinned explicitly.
+trash = { version = "5", default-features = false, features = ["coinit_apartmentthreaded"] }
+
+# The final disk rename must not replace a destination that appeared after
+# validation. `std::fs::rename` always replaces on Windows, so the no-replace
+# move is issued through `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 # Used by the command-layer tests to assert the exact IPC wire shapes.

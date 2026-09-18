@@ -1,0 +1,234 @@
+/*
+ * Explorer tree, inline editor and context menu.
+ *
+ * Colours, spacing and shape come from the theme tokens in `global.css`
+ * (FR-095); the Explorer never declares its own palette.
+ */
+
+.explorer {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  outline: none;
+}
+
+.explorer:focus-visible {
+  outline: 1px solid var(--color-focus-ring);
+  outline-offset: -1px;
+}
+
+.explorer--empty {
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+
+.explorer__hint {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.explorer__header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-2);
+  height: 28px;
+  padding: 0 var(--space-1) 0 var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  user-select: none;
+}
+
+.explorer__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.explorer__actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.explorer__action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: default;
+}
+
+.explorer__action:hover:not(:disabled) {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+.explorer__action:disabled {
+  color: var(--color-text-subtle);
+}
+
+.explorer__error {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+}
+
+/*
+ * The Body is the one scrollable region and always fills the remaining Sidebar
+ * height, so the area below the last rendered row belongs to it rather than to
+ * the tree. That is what the blank-space context menu relies on: rows stop
+ * propagation, and everything that reaches the Body is genuinely blank space
+ * and therefore Workspace-root context (FR-077).
+ */
+.explorer__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+
+.explorer-tree {
+  padding: var(--space-1) 0;
+  user-select: none;
+}
+
+/* One visible row: chevron, glyph, label. */
+.explorer-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 22px;
+  padding-right: var(--space-2);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  cursor: default;
+  outline: none;
+}
+
+.explorer-row:hover {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+.explorer-row--selected,
+.explorer-row--selected:hover {
+  background-color: var(--color-selection);
+  color: var(--color-text);
+}
+
+.explorer-row--notice {
+  color: var(--color-text-subtle);
+  font-style: italic;
+  white-space: normal;
+}
+
+.explorer-row__chevron {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+}
+
+.explorer-row__chevron--empty {
+  display: inline-block;
+}
+
+.explorer-row__icon {
+  color: var(--color-text-muted);
+}
+
+.explorer-row--selected .explorer-row__icon,
+.explorer-row:hover .explorer-row__icon {
+  color: inherit;
+}
+
+/* FR-033: long names truncate instead of widening the Sidebar. */
+.explorer-row__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explorer-row__badge {
+  flex: 0 0 auto;
+  color: var(--color-text-subtle);
+}
+
+.explorer-inline-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 18px;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-focus-ring);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  outline: none;
+}
+
+/* The functional, non-extensible context menu (FR-081). */
+.explorer-menu {
+  position: fixed;
+  z-index: 10;
+  min-width: 160px;
+  padding: var(--space-1) 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-raised);
+  box-shadow: var(--shadow-popup);
+}
+
+.explorer-menu__separator {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background-color: var(--color-border);
+}
+
+.explorer-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-1) var(--space-3);
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  text-align: left;
+  cursor: default;
+}
+
+.explorer-menu__item:hover {
+  background-color: var(--color-active);
+}
+
+.explorer-menu__icon {
+  color: var(--color-text-muted);
+}

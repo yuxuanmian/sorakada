@@ -27,8 +27,8 @@ export interface AppWindowLike {
  * the close-all decision, which owns the unsaved-work prompts.
  */
 export interface WindowLifecycleSource {
-  /** The document whose name and dirty flag the title shows. */
-  getActiveSession(): DocumentSession;
+  /** The document whose name and dirty flag the title shows; `null` when none. */
+  getActiveSession(): DocumentSession | null;
   /** Whether any open document differs from its saved baseline. */
   hasDirtyDocuments(): boolean;
   /** `true` only when every dirty document's decision permits destroying the window. */
@@ -47,11 +47,20 @@ export interface CloseRequestDeps {
   destroyWindow(): Promise<void>;
 }
 
-/** `Untitled1 - Sorakada`, `foo.txt - Sorakada` or `*foo.txt - Sorakada`. */
-export function formatWindowTitle(session: {
-  displayName: string;
-  dirty: boolean;
-}): string {
+/**
+ * `Untitled1 - Sorakada`, `foo.txt - Sorakada`, `*foo.txt - Sorakada`, or plain
+ * `Sorakada` while no document is open.
+ *
+ * Zero documents is a valid state in 003, so the title has to describe the
+ * application itself rather than a document that does not exist.
+ */
+export function formatWindowTitle(
+  session: { displayName: string; dirty: boolean } | null,
+): string {
+  if (session === null) {
+    return APP_NAME;
+  }
+
   const dirtyMarker = session.dirty ? "*" : "";
   return `${dirtyMarker}${session.displayName} - ${APP_NAME}`;
 }
@@ -93,7 +102,6 @@ export async function installWindowLifecycle(
       .setTitle(formatWindowTitle(source.getActiveSession()))
       .catch(() => {});
   };
-
   await appWindow.setTitle(formatWindowTitle(source.getActiveSession()));
 
   const unsubscribe = source.subscribe(syncTitle);
