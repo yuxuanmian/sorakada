@@ -4,8 +4,9 @@
 //! it. This module owns that capability and nothing else: it knows about
 //! directories, subscriptions, refcounts and normalized hints, but it does not
 //! know what a document, a session, an editor or a Workspace is. The 005
-//! consumer lives in the React layer and 006 will reuse this manager for a
-//! recursive Workspace watch.
+//! consumer lives in the React layer, and 006's Workspace consumer reuses this
+//! same manager — which is why the shared backend watch tracks per-scope demand
+//! instead of letting the first subscriber pick one mode for everybody.
 //!
 //! The module is split into three layers on purpose:
 //!
@@ -262,15 +263,107 @@ struct SubscriptionRecord {
 }
 
 /// One backend watch shared by every subscription of the same directory.
+///
+/// 005 (non-recursive, opened-document interest) and 006 (recursive, Workspace
+/// interest) can legitimately want the *same* directory watched with different
+/// scopes — a Workspace root is also the parent directory of a document opened
+/// from it. The record therefore tracks the logical demand per scope next to the
+/// coverage the backend currently has, instead of letting the first subscriber
+/// choose one mode for everybody (FR-009).
 struct WatchRecord {
     /// `comparison_key` of `directory`; the sharing key.
     directory_key: String,
     /// The canonical directory passed to the backend.
     directory: PathBuf,
-    /// The backend mode chosen by the first subscription of this directory.
-    scope: WatchScope,
-    /// How many subscriptions currently depend on this backend watch.
-    refcount: usize,
+    /// The scope the backend is currently watching this directory with.
+    ///
+    /// Updated only after the backend transition really succeeded, so a refused
+    /// upgrade is never recorded as live coverage (FR-009, FR-011).
+    backend_scope: WatchScope,
+    /// How many live non-recursive subscriptions depend on this watch.
+    non_recursive: usize,
+    /// How many live recursive subscriptions depend on this watch.
+    recursive: usize,
+}
+
+impl WatchRecord {
+    /// The coverage the live subscriptions require right now.
+    ///
+    /// Recursive wins whenever any recursive subscriber exists, which is what
+    /// keeps a non-recursive first subscriber from silently downgrading 006's
+    /// Workspace coverage.
+    fn required_scope(&self) -> WatchScope {
+        if self.recursive > 0 {
+            WatchScope::Recursive
+        } else {
+            WatchScope::NonRecursive
+        }
+    }
+
+    /// Every live subscription of this directory, whatever its scope.
+    fn refcount(&self) -> usize {
+        self.non_recursive + self.recursive
+    }
+
+    /// Registers one subscription of `scope`.
+    fn add(&mut self, scope: WatchScope) {
+        match scope {
+            WatchScope::NonRecursive => self.non_recursive += 1,
+            WatchScope::Recursive => self.recursive += 1,
+        }
+    }
+
+    /// Releases one subscription of `scope`.
+    fn remove(&mut self, scope: WatchScope) {
+        match scope {
+            WatchScope::NonRecursive => self.non_recursive = self.non_recursive.saturating_sub(1),
+            WatchScope::Recursive => self.recursive = self.recursive.saturating_sub(1),
+        }
+    }
+}
+
+/// A backend coverage change the core has decided on but not performed yet.
+///
+/// It is a value rather than an immediate call so the caller can run the native
+/// watch/unwatch without holding the core mutex (the deadlock-avoidance rule),
+/// and so a refusal can be rolled back knowingly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendChange {
+    /// The directory is not watched yet and must be watched with `scope`.
+    Watch {
+        /// The canonical directory to watch.
+        directory: PathBuf,
+        /// The scope to watch it with.
+        scope: WatchScope,
+    },
+    /// The directory is watched, but its coverage must change.
+    ///
+    /// Coverage is replaced explicitly (unwrapatch + watch) because the backend
+    /// offers no way to prove a mode change is gap-free. Any such transition
+    /// therefore invalidates the consumers that still rely on the directory
+    /// (FR-010, FR-011).
+    Reconfigure {
+        /// The canonical directory whose coverage changes.
+        directory: PathBuf,
+        /// The coverage it must have afterwards.
+        scope: WatchScope,
+    },
+    /// Nothing depends on the directory any more.
+    Unwatch {
+        /// The canonical directory to stop watching.
+        directory: PathBuf,
+    },
+}
+
+impl BackendChange {
+    /// The directory this change is about.
+    fn directory(&self) -> &Path {
+        match self {
+            BackendChange::Watch { directory, .. }
+            | BackendChange::Reconfigure { directory, .. }
+            | BackendChange::Unwatch { directory } => directory,
+        }
+    }
 }
 
 /// What [`WatcherCore::begin_subscribe`] decided the backend must do.
@@ -283,17 +376,25 @@ pub struct SubscribePlan {
     pub subscription_id: u64,
     /// The canonical directory to watch.
     pub directory: PathBuf,
-    /// The scope to watch it with.
+    /// The scope the new subscription asked for.
     pub scope: WatchScope,
-    /// Whether this plan is the first interest in `directory` and therefore
-    /// requires a backend `watch` call.
-    pub needs_backend_watch: bool,
+    /// Backend work required before this subscription may be reported live.
+    pub backend: Option<BackendChange>,
+    /// Logical `(scope, watchedPath)` pairs whose completeness the transition
+    /// may interrupt, so their consumers can revalidate instead of trusting
+    /// continuity.
+    pub invalidations: Vec<(WatchScope, String)>,
 }
 
-/// The result of detaching a subscription from the core.
-struct DetachedSubscription {
-    /// The directory to unwatch when the last interest in it was released.
-    unwatch_directory: Option<PathBuf>,
+/// What [`WatcherCore::detach_subscription`] decided the backend must do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachPlan {
+    /// Backend work required to keep coverage honest; `None` when the remaining
+    /// subscriptions are already covered by the current watch.
+    pub backend: Option<BackendChange>,
+    /// Logical `(scope, watchedPath)` pairs still relying on the directory whose
+    /// completeness the transition may interrupt.
+    pub invalidations: Vec<(WatchScope, String)>,
 }
 
 /// Deterministic watcher bookkeeping: subscriptions, refcounts and routing.
@@ -388,38 +489,87 @@ impl WatcherCore {
 
         // Sharing is keyed on the canonical directory, never on the requested
         // spelling, so `C:\work\notes.txt` and `C:\work\todos.txt` share one
-        // watch. The first subscription of a directory chooses the backend
-        // mode; 005 and 006 never mix scopes on one directory.
-        let needs_backend_watch = match self
+        // watch. The *effective* coverage is the strongest scope any live
+        // subscription needs, so a recursive 006 Workspace interest is never
+        // downgraded by a non-recursive 005 document interest that arrived first
+        // (FR-009).
+        let backend = match self
             .watches
             .iter_mut()
             .find(|watch| watch.directory_key == directory_key)
         {
             Some(watch) => {
-                watch.refcount += 1;
-                false
+                watch.add(scope);
+                let required = watch.required_scope();
+                if required == watch.backend_scope {
+                    None
+                } else {
+                    // The recorded coverage is deliberately left untouched until
+                    // the backend really changed: a refused upgrade must not be
+                    // remembered as live.
+                    Some(BackendChange::Reconfigure {
+                        directory: watch.directory.clone(),
+                        scope: required,
+                    })
+                }
             }
             None => {
-                self.watches.push(WatchRecord {
-                    directory_key,
+                let mut watch = WatchRecord {
+                    directory_key: directory_key.clone(),
                     directory: canonical.clone(),
-                    scope,
-                    refcount: 1,
-                });
-                true
+                    backend_scope: scope,
+                    non_recursive: 0,
+                    recursive: 0,
+                };
+                // Demand is rebuilt from the live logical subscriptions rather
+                // than from the newcomer alone: a directory whose coverage was
+                // forgotten after a failed transition still has consumers, and
+                // the repaired watch has to count every one of them.
+                for existing in &self.subscriptions {
+                    if existing.directory_key == directory_key {
+                        watch.add(existing.scope);
+                    }
+                }
+                let directory = watch.directory.clone();
+                self.watches.push(watch);
+                Some(BackendChange::Watch { directory, scope })
             }
+        };
+
+        // A transition that replaces the backend watch can lose events, so every
+        // logical consumer of this directory is told to revalidate rather than
+        // trust continuity across the gap (FR-010, FR-011).
+        let invalidations = match &backend {
+            Some(BackendChange::Watch { .. }) | None => Vec::new(),
+            Some(change) => self.logical_pairs_for(change.directory()),
         };
 
         Ok(SubscribePlan {
             subscription_id,
             directory: canonical,
             scope,
-            needs_backend_watch,
+            backend,
+            invalidations,
         })
     }
 
-    /// Finalizes a plan whose backend watch succeeded.
-    pub fn confirm_subscribe(&mut self, plan: SubscribePlan) -> WatchSubscription {
+    /// Finalizes a plan whose backend work succeeded.
+    ///
+    /// The backend coverage is only recorded as live here, after the native call
+    /// returned successfully.
+    pub fn confirm_subscribe(&mut self, plan: &SubscribePlan) -> WatchSubscription {
+        // A widened/narrowed coverage is recorded as live only now, so a refused
+        // transition is never remembered as installed bookkeeping.
+        if let Some(BackendChange::Reconfigure { directory, scope }) = &plan.backend {
+            if let Some(watch) = self
+                .watches
+                .iter_mut()
+                .find(|watch| watch.directory == *directory)
+            {
+                watch.backend_scope = *scope;
+            }
+        }
+
         let path = self
             .subscriptions
             .iter()
@@ -435,15 +585,28 @@ impl WatcherCore {
         }
     }
 
-    /// Rolls a plan back after its backend watch failed.
+    /// Rolls a plan back after its backend work failed.
     ///
-    /// No backend `unwatch` is issued because the caller only cancels a plan
-    /// whose watch never succeeded; the core only drops its own bookkeeping.
-    pub fn cancel_subscribe(&mut self, plan: SubscribePlan) {
+    /// The new subscription is dropped, and a failed coverage *change* leaves the
+    /// directory's backend watch unusable rather than silently claiming coverage
+    /// that no longer exists: the watch record is forgotten, so the surviving
+    /// subscriptions are degraded (they keep their logical interest and are told
+    /// to revalidate) and the next subscribe attempt repairs the directory with a
+    /// fresh watch. No backend `unwatch` is issued here, because the caller only
+    /// cancels a plan whose own call failed.
+    pub fn cancel_subscribe(&mut self, plan: SubscribePlan) -> Vec<(WatchScope, String)> {
         let _ = self.detach_subscription(plan.subscription_id);
+
+        match plan.backend {
+            Some(BackendChange::Reconfigure { directory, .. }) => {
+                self.abandon_watch(&directory);
+                self.logical_pairs_for(&directory)
+            }
+            _ => Vec::new(),
+        }
     }
 
-    /// Convenience single-threaded composition (begin -> backend.watch ->
+    /// Convenience single-threaded composition (begin -> backend change ->
     /// confirm/cancel).
     ///
     /// Used by tests and any caller that owns both halves.
@@ -458,31 +621,54 @@ impl WatcherCore {
     ) -> Result<WatchSubscription, FileCommandError> {
         let plan = self.begin_subscribe(path, scope)?;
 
-        if plan.needs_backend_watch {
-            if let Err(message) = backend.watch(&plan.directory, plan.scope) {
+        if let Some(change) = plan.backend.clone() {
+            if let Err(message) = apply_backend_change(backend, &change) {
                 let message = format!("Cannot watch {}: {message}", plan.directory.display());
                 self.cancel_subscribe(plan);
                 return Err(FileCommandError::new(CODE_PATH_RESOLUTION, message));
             }
         }
 
-        Ok(self.confirm_subscribe(plan))
+        Ok(self.confirm_subscribe(&plan))
     }
 
-    /// Removes a subscription; releases the shared parent watch when its
-    /// refcount hits zero.
+    /// Removes a subscription; releases or narrows the shared backend watch when
+    /// the remaining demand allows it.
     ///
     /// Returns false for an unknown id, so stopping twice is harmless.
     #[allow(dead_code)]
     pub fn unsubscribe(&mut self, subscription_id: u64, backend: &mut dyn WatchBackend) -> bool {
         match self.detach_subscription(subscription_id) {
-            Some(detached) => {
-                if let Some(directory) = detached.unwatch_directory {
-                    let _ = backend.unwatch(&directory);
-                }
+            Some(plan) => {
+                self.finish_detach(plan, backend);
                 true
             }
             None => false,
+        }
+    }
+
+    /// Performs a detach plan's backend work and records its outcome.
+    ///
+    /// On failure the directory's backend watch is forgotten: the surviving
+    /// subscriptions stay live logically and are revalidated, and a later
+    /// subscribe repairs the coverage instead of the core pretending a watch it
+    /// could not re-establish is still there.
+    #[allow(dead_code)]
+    pub fn finish_detach(&mut self, plan: DetachPlan, backend: &mut dyn WatchBackend) {
+        let Some(change) = plan.backend.clone() else {
+            return;
+        };
+
+        if apply_backend_change(backend, &change).is_err() {
+            self.abandon_watch(change.directory());
+        } else if let BackendChange::Reconfigure { directory, scope } = change {
+            if let Some(watch) = self
+                .watches
+                .iter_mut()
+                .find(|watch| watch.directory == directory)
+            {
+                watch.backend_scope = scope;
+            }
         }
     }
 
@@ -526,16 +712,76 @@ impl WatcherCore {
         self.watches
             .iter()
             .find(|watch| watch.directory_key == key)
-            .map(|watch| watch.refcount)
+            .map(|watch| watch.refcount())
             .unwrap_or(0)
     }
 
-    /// Removes a subscription's bookkeeping and reports what to unwatch.
+    /// Every live logical `(scope, watchedPath)` pair, deduplicated.
+    ///
+    /// With `paths`, only the pairs whose watched directory is affected by one of
+    /// them are reported. Without it, every live pair is — which is what a
+    /// backend-global loss notice has to become, because a global notice carries
+    /// no path to intersect with and both consumers still have to revalidate
+    /// their own interest (FR-010).
+    fn logical_pairs_for(&self, directory: &Path) -> Vec<(WatchScope, String)> {
+        self.logical_pairs(Some(std::slice::from_ref(&directory.to_path_buf())))
+    }
+
+    /// Every live logical pair, optionally filtered by affected paths.
+    fn logical_pairs(&self, paths: Option<&[PathBuf]>) -> Vec<(WatchScope, String)> {
+        let mut pairs: Vec<(WatchScope, String)> = Vec::new();
+
+        for record in &self.subscriptions {
+            if let Some(paths) = paths {
+                if !paths
+                    .iter()
+                    .any(|path| path_affects_directory(path, &record.watched_path))
+                {
+                    continue;
+                }
+            }
+
+            let pair = (
+                record.scope,
+                record.watched_path.to_string_lossy().to_string(),
+            );
+            if !pairs.contains(&pair) {
+                pairs.push(pair);
+            }
+        }
+
+        pairs
+    }
+
+    /// Records the coverage a backend transition really established.
+    fn set_backend_scope(&mut self, directory: &Path, scope: WatchScope) {
+        if let Some(watch) = self
+            .watches
+            .iter_mut()
+            .find(|watch| watch.directory == directory)
+        {
+            watch.backend_scope = scope;
+        }
+    }
+
+    /// Forgets a directory's backend watch after a failed transition.
+    ///
+    /// The surviving subscriptions keep their logical interest — they are the
+    /// consumers' own facts — but the core no longer claims backend coverage for
+    /// that directory, so the next subscribe installs a fresh watch instead of
+    /// joining one that is no longer known to exist.
+    fn abandon_watch(&mut self, directory: &Path) {
+        let key = file_identity::comparison_key(directory);
+        self.watches.retain(|watch| watch.directory_key != key);
+    }
+
+    /// Removes a subscription's bookkeeping and reports the backend work that
+    /// keeps coverage honest.
     ///
     /// Shared by [`WatcherCore::unsubscribe`] and [`FilesystemWatcher::stop`],
     /// so the manager can perform the backend call without holding the core
     /// lock at the same time as the backend lock.
-    fn detach_subscription(&mut self, subscription_id: u64) -> Option<DetachedSubscription> {
+    fn detach_subscription(&mut self, subscription_id: u64) -> Option<DetachPlan> {
         // Both lookups happen before anything is mutated, so an unknown
         // identifier leaves the bookkeeping exactly as it was.
         let index = self
@@ -543,28 +789,53 @@ impl WatcherCore {
             .iter()
             .position(|record| record.subscription_id == subscription_id)?;
         let directory_key = self.subscriptions[index].directory_key.clone();
-        let watch_index = self
-            .watches
-            .iter()
-            .position(|watch| watch.directory_key == directory_key)?;
+        let scope = self.subscriptions[index].scope;
 
         self.subscriptions.remove(index);
 
-        let refcount = {
-            let watch = &mut self.watches[watch_index];
-            watch.refcount = watch.refcount.saturating_sub(1);
-            watch.refcount
+        let Some(watch_index) = self
+            .watches
+            .iter()
+            .position(|watch| watch.directory_key == directory_key)
+        else {
+            // The directory is already degraded (a failed transition forgot its
+            // watch), so there is nothing to release and nothing to invalidate.
+            return Some(DetachPlan {
+                backend: None,
+                invalidations: Vec::new(),
+            });
         };
 
-        if refcount > 0 {
-            return Some(DetachedSubscription {
-                unwatch_directory: None,
+        let watch = &mut self.watches[watch_index];
+        watch.remove(scope);
+
+        if watch.refcount() == 0 {
+            let directory = self.watches.remove(watch_index).directory;
+            return Some(DetachPlan {
+                backend: Some(BackendChange::Unwatch { directory }),
+                invalidations: Vec::new(),
             });
         }
 
-        let watch = self.watches.remove(watch_index);
-        Some(DetachedSubscription {
-            unwatch_directory: Some(watch.directory),
+        let required = watch.required_scope();
+        if required == watch.backend_scope {
+            return Some(DetachPlan {
+                backend: None,
+                invalidations: Vec::new(),
+            });
+        }
+
+        // The last recursive subscriber left: coverage may narrow again so a
+        // closed Workspace does not leave the remaining 005 interest paying
+        // recursive-event cost. The narrowing also interrupts completeness, so
+        // the remaining consumers are told to revalidate (FR-010).
+        let directory = watch.directory.clone();
+        Some(DetachPlan {
+            invalidations: self.logical_pairs_for(&directory),
+            backend: Some(BackendChange::Reconfigure {
+                directory,
+                scope: required,
+            }),
         })
     }
 
@@ -617,6 +888,18 @@ impl WatcherCore {
                     } else {
                         None
                     },
+                    // 006 maps an event back onto its logical Workspace root
+                    // through these, so a canonical/`\\?\`/symlink spelling of the
+                    // watched directory can never become a second Tree identity
+                    // system (FR-118). 005 ignores both fields.
+                    relative_path: relative_path_of(&record.watched_path, path),
+                    rename_target_relative_path: if index == 0 {
+                        raw.rename_target
+                            .as_ref()
+                            .and_then(|target| relative_path_of(&record.watched_path, target))
+                    } else {
+                        None
+                    },
                 }));
             }
         }
@@ -624,30 +907,25 @@ impl WatcherCore {
         payloads
     }
 
-    /// Turns a lost-completeness notice into per-directory invalidations.
+    /// Turns a lost-completeness notice into per-logical-scope invalidations.
+    ///
+    /// Deriving them from the live *logical* subscriptions rather than from the
+    /// backend `WatchRecord` is what makes a promoted recursive watch safe: one
+    /// promoted backend watch serves a non-recursive 005 interest and a
+    /// recursive 006 interest, and each of them has to receive the invalidation
+    /// that concerns its own scope instead of whichever scope happened to be
+    /// installed (FR-010).
     fn invalidations(&self, paths: &[PathBuf], reason: &str) -> Vec<WatchEventPayload> {
-        // No usable path means the backend cannot say what is still reliable,
-        // so every interest must be revalidated. This is the one case that
-        // produces a payload even when nothing is currently watched.
-        if paths.is_empty() {
-            return vec![WatchEventPayload::Invalidated(WatchInvalidated {
-                scope: WatchScope::NonRecursive,
-                watched_path: None,
-                reason: reason.to_string(),
-            })];
-        }
+        // No usable path means the backend cannot say what is still reliable, so
+        // every live logical interest is named and must be revalidated.
+        let filter = if paths.is_empty() { None } else { Some(paths) };
 
-        self.watches
-            .iter()
-            .filter(|watch| {
-                paths
-                    .iter()
-                    .any(|path| path_affects_directory(path, &watch.directory))
-            })
-            .map(|watch| {
+        self.logical_pairs(filter)
+            .into_iter()
+            .map(|(scope, watched_path)| {
                 WatchEventPayload::Invalidated(WatchInvalidated {
-                    scope: watch.scope,
-                    watched_path: Some(watch.directory.to_string_lossy().to_string()),
+                    scope,
+                    watched_path: Some(watched_path),
                     reason: reason.to_string(),
                 })
             })
@@ -676,8 +954,11 @@ impl SubscriptionRecord {
                     return false;
                 };
 
-                // Compare identity keys rather than raw strings: no disk access
-                // is allowed here, because the path may already be gone.
+                // Compare identity keys rather than raw strings. A key asks the
+                // *containing directory* for its comparison rule (006/T156),
+                // which is metadata about a directory that is still being
+                // watched; the event path itself is never touched, so an entry
+                // that is already gone cannot fail this check.
                 file_identity::comparison_key(&self.watched_path.join(file_name))
                     == self.target_key
             }
@@ -720,6 +1001,42 @@ fn path_affects_directory(path: &Path, directory: &Path) -> bool {
         || file_identity::relative_within(path, directory).is_some()
 }
 
+/// The event path relative to the subscription's watched directory.
+///
+/// The watched directory itself has no relative path — an event *about* the
+/// watched directory is about its entries, not a change to one of them — and
+/// neither has an event that lies outside it. Both are reported as `None`, which
+/// is what lets a consumer tell "inside my watch" from "somewhere else".
+fn relative_path_of(watched_path: &Path, target: &Path) -> Option<String> {
+    match file_identity::relative_within(watched_path, target) {
+        Some(relative) if !relative.is_empty() => Some(relative),
+        _ => None,
+    }
+}
+
+/// Performs one decided backend coverage change.
+///
+/// A scope change is issued as an explicit replacement rather than as a second
+/// `watch` call, because no backend promises that re-watching an already-watched
+/// directory with a different mode is atomic; the caller treats the resulting gap
+/// as lost completeness and invalidates the affected consumers.
+fn apply_backend_change(
+    backend: &mut dyn WatchBackend,
+    change: &BackendChange,
+) -> Result<(), String> {
+    match change {
+        BackendChange::Watch { directory, scope } => backend.watch(directory, *scope),
+        BackendChange::Reconfigure { directory, scope } => {
+            // The old watch is released first so the new mode really takes
+            // effect; a failure here is still reported, and the caller then
+            // degrades the directory instead of trusting stale coverage.
+            let _ = backend.unwatch(directory);
+            backend.watch(directory, *scope)
+        }
+        BackendChange::Unwatch { directory } => backend.unwatch(directory),
+    }
+}
+
 /// Maps a raw occurrence onto the coarse hint the frontend consumes.
 fn hint_for(kind: RawWatchEventKind) -> WatchChangeHint {
     match kind {
@@ -743,17 +1060,29 @@ pub type WatchPayloadSink = std::sync::Arc<dyn Fn(WatchEventPayload) + Send + Sy
 
 /// The reusable, Tauri-free watcher manager.
 ///
-/// Locking rule: the core mutex and the backend mutex are never held at the
-/// same time. `start` takes the core, releases it, takes the backend, releases
-/// it, and takes the core again; `stop` and `shutdown` detach the bookkeeping
-/// first and only then call the backend. The notify handler closure owns only
-/// the core and the sink, so no lock ordering between the two can deadlock.
+/// Locking rule: the core mutex and the backend mutex are never held at the same
+/// time. `start` takes the core, releases it, takes the backend, releases it, and
+/// takes the core again; `stop` and `shutdown` detach the bookkeeping first and
+/// only then call the backend. The notify handler closure owns only the core and
+/// the sink, so no lock ordering between the two can deadlock.
+///
+/// A second, coarser rule protects *coverage*: the whole decide → native call →
+/// confirm sequence is serialized by [`FilesystemWatcher::transition`]. The core
+/// bookkeeping records the demand of a subscription as soon as it is planned, so
+/// two overlapping transitions on one directory could otherwise make the second
+/// caller report a live subscription against coverage the first never
+/// established, or let a narrowing downgrade land after a widening upgrade and
+/// leave recursive demand served by a non-recursive watch (FR-009, FR-011). The
+/// transition guard is taken *before* the core or backend lock and never while
+/// holding either, so it adds no new lock-order edge.
 pub struct FilesystemWatcher {
     /// Subscription/reference bookkeeping, also shared with the handler.
     core: Arc<Mutex<WatcherCore>>,
     /// The real backend, behind its own mutex so calls do not serialize with
     /// event delivery.
     backend: Mutex<Box<dyn WatchBackend>>,
+    /// Serializes backend coverage transitions; see the type documentation.
+    transition: Mutex<()>,
     /// Kept so the manager can route a backend message through the same sink
     /// the handler uses. The real notify handler owns its own clone, so only
     /// `handle_backend_message` reads this field.
@@ -775,6 +1104,7 @@ impl FilesystemWatcher {
         Ok(Self {
             core,
             backend: Mutex::new(Box::new(backend)),
+            transition: Mutex::new(()),
             sink,
         })
     }
@@ -785,6 +1115,7 @@ impl FilesystemWatcher {
         Self {
             core: Arc::new(Mutex::new(WatcherCore::new())),
             backend: Mutex::new(backend),
+            transition: Mutex::new(()),
             sink,
         }
     }
@@ -795,45 +1126,99 @@ impl FilesystemWatcher {
         path: &str,
         scope: WatchScope,
     ) -> Result<WatchSubscription, FileCommandError> {
-        // Core lock only: decide what must happen and reserve the refcount.
+        // Coverage transitions are serialized as one unit: planning, the native
+        // call and the confirmation all happen under this guard.
+        let _transition = lock(&self.transition);
+
+        // Core lock only: decide what must happen and reserve the demand.
         let plan = lock(&self.core).begin_subscribe(path, scope)?;
 
-        if plan.needs_backend_watch {
+        if let Some(change) = plan.backend.clone() {
             // Backend lock only, released before the core is touched again.
             // Perform the OS call before confirming, so a refusal is never
             // reported to the frontend as a live subscription.
-            let watched = lock(&self.backend).watch(&plan.directory, plan.scope);
-            if let Err(message) = watched {
+            let applied = watch_change(&self.backend, &change);
+            if let Err(message) = applied {
                 let message = format!("Cannot watch {}: {message}", plan.directory.display());
-                lock(&self.core).cancel_subscribe(plan);
+                let invalidations = lock(&self.core).cancel_subscribe(plan);
+                self.publish_invalidations(
+                    invalidations,
+                    "the filesystem watch could not be established or reconfigured",
+                );
                 return Err(FileCommandError::new(CODE_PATH_RESOLUTION, message));
             }
         }
 
         // Core lock only again.
-        Ok(lock(&self.core).confirm_subscribe(plan))
+        let subscription = lock(&self.core).confirm_subscribe(&plan);
+
+        // A replaced backend watch has an unavoidable gap, so the consumers that
+        // still rely on this directory revalidate instead of trusting continuity
+        // across it (FR-010, FR-011).
+        self.publish_invalidations(
+            plan.invalidations.clone(),
+            "the filesystem watch coverage changed",
+        );
+
+        Ok(subscription)
     }
 
     /// Idempotent: stopping an unknown subscription succeeds.
     pub fn stop(&self, subscription_id: u64) {
-        let detached = lock(&self.core).detach_subscription(subscription_id);
+        // Serialized with `start`: a stop that narrows coverage must not land
+        // after a start that widened it, and vice versa.
+        let _transition = lock(&self.transition);
 
-        if let Some(DetachedSubscription {
-            unwatch_directory: Some(directory),
-        }) = detached
-        {
-            let _ = lock(&self.backend).unwatch(&directory);
+        let plan = match lock(&self.core).detach_subscription(subscription_id) {
+            Some(plan) => plan,
+            None => return,
+        };
+
+        let mut degraded = Vec::new();
+        if let Some(change) = plan.backend.clone() {
+            if watch_change(&self.backend, &change).is_err() {
+                // The directory's coverage could not be re-established, so the
+                // core stops claiming it and every remaining logical interest is
+                // told to revalidate from disk instead.
+                lock(&self.core).abandon_watch(change.directory());
+                degraded = lock(&self.core).logical_pairs_for(change.directory());
+            } else if let BackendChange::Reconfigure { directory, scope } = change {
+                lock(&self.core).set_backend_scope(&directory, scope);
+            }
         }
+
+        let mut invalidations = plan.invalidations;
+        invalidations.extend(degraded);
+        invalidations.sort_by(|left, right| left.1.cmp(&right.1));
+        invalidations.dedup();
+
+        self.publish_invalidations(
+            invalidations,
+            "the filesystem watch coverage changed",
+        );
     }
 
     /// Releases every watch. Called on application shutdown.
     pub fn shutdown(&self) {
+        let _transition = lock(&self.transition);
+
         // Bound before the loop so the core guard is released before the
         // backend lock is taken.
         let directories = lock(&self.core).detach_all();
 
         for directory in directories {
             let _ = lock(&self.backend).unwatch(&directory);
+        }
+    }
+
+    /// Forwards invalidation notices for logical `(scope, path)` pairs.
+    fn publish_invalidations(&self, pairs: Vec<(WatchScope, String)>, reason: &str) {
+        for (scope, watched_path) in pairs {
+            (self.sink)(WatchEventPayload::Invalidated(WatchInvalidated {
+                scope,
+                watched_path: Some(watched_path),
+                reason: reason.to_string(),
+            }));
         }
     }
 
@@ -871,13 +1256,29 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Applies one backend coverage change while holding only the backend lock.
+///
+/// Kept a free function so the manager never has to hold the core lock and the
+/// backend lock at the same time: the decision is made under the core lock, the
+/// native call happens under the backend lock alone, and the bookkeeping is
+/// confirmed afterwards.
+fn watch_change(
+    backend: &Mutex<Box<dyn WatchBackend>>,
+    change: &BackendChange,
+) -> Result<(), String> {
+    apply_backend_change(&mut **lock(backend), change)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::mpsc;
     use std::sync::Mutex as StdMutex;
+    use std::thread;
+    use std::time::Duration;
 
-    use serde_json::{json, Value};
+    use serde_json::json;
 
     /* ---------------------------------------------------------------- */
     /* Live backend (the only test that uses the real OS watcher)          */
@@ -1566,21 +1967,22 @@ mod tests {
         );
 
         // An empty path list means the backend cannot say what is still
-        // reliable, so every interest must be revalidated. No directory is
-        // named, which is exactly the pinned `watchedPath: null` shape.
+        // reliable, so every live *logical* interest is named and must be
+        // revalidated. The two non-recursive subscriptions above share one
+        // directory and therefore one logical pair (FR-010).
         let unnamed = core.handle_message(BackendMessage::Error {
             paths: Vec::new(),
             reason: "overflow".to_string(),
         });
-        assert_eq!(unnamed.len(), 1);
-        assert_eq!(invalidated(&unnamed[0]).watched_path, None);
+        assert_eq!(unnamed.len(), 1, "one logical pair is invalidated once");
+        assert_eq!(invalidated(&unnamed[0]).watched_path, Some(display(&dir)));
         assert_eq!(invalidated(&unnamed[0]).scope, WatchScope::NonRecursive);
         assert_eq!(
             serde_json::to_value(&unnamed[0]).expect("serialize the invalidation"),
             json!({
                 "type": "invalidated",
                 "scope": "nonRecursive",
-                "watchedPath": Value::Null,
+                "watchedPath": display(&dir),
                 "reason": "overflow",
             })
         );
@@ -1760,5 +2162,736 @@ mod tests {
         assert!(core.unsubscribe(subscription.subscription_id, &mut backend));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Mixed non-recursive/recursive coverage (006)                      */
+    /* ---------------------------------------------------------------- */
+
+    /// 005 (opened document) and 006 (Workspace root) can legitimately want the
+    /// same directory with different scopes. A recursive subscriber added to an
+    /// existing non-recursive watch must promote the backend coverage instead of
+    /// silently joining the narrower one (FR-009).
+    #[test]
+    fn a_recursive_subscriber_promotes_an_existing_non_recursive_watch() {
+        let root = work_dir("mixed-promote");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let document = write_file(&root, "notes.txt");
+        let descendant = nested.join("a.txt");
+
+        let mut core = WatcherCore::new();
+        let mut backend = RecordingBackend::new();
+
+        let _document_subscription = core
+            .subscribe_with(&display(&document), WatchScope::NonRecursive, &mut backend)
+            .expect("subscribe to the document");
+        assert_eq!(
+            backend.watched(),
+            vec![(root.clone(), WatchScope::NonRecursive)]
+        );
+
+        let workspace = core
+            .subscribe_with(&display(&root), WatchScope::Recursive, &mut backend)
+            .expect("subscribe to the Workspace root");
+
+        assert_eq!(
+            backend.watched(),
+            vec![
+                (root.clone(), WatchScope::NonRecursive),
+                (root.clone(), WatchScope::Recursive),
+            ],
+            "the recursive subscriber must promote the shared backend watch"
+        );
+        assert_eq!(core.active_watch_count(), 1, "one directory, one watch");
+        assert_eq!(core.watch_refcount(&root), 2);
+
+        let payloads = core.handle_message(raw(RawWatchEventKind::Created, vec![descendant.clone()]));
+        assert_eq!(
+            payloads.len(),
+            1,
+            "recursive descendant coverage must not be downgraded by the first subscriber"
+        );
+        assert_eq!(
+            change(&payloads[0]).subscription_id,
+            workspace.subscription_id
+        );
+
+        // The reverse order must not downgrade anything either.
+        let mut core = WatcherCore::new();
+        let mut backend = RecordingBackend::new();
+        let workspace = core
+            .subscribe_with(&display(&root), WatchScope::Recursive, &mut backend)
+            .expect("subscribe recursively first");
+        let document_subscription = core
+            .subscribe_with(&display(&document), WatchScope::NonRecursive, &mut backend)
+            .expect("subscribe to the document second");
+
+        assert_eq!(
+            backend.watched(),
+            vec![(root.clone(), WatchScope::Recursive)],
+            "a later non-recursive subscriber joins the recursive watch unchanged"
+        );
+        assert_eq!(
+            core.subscription_count(),
+            2,
+            "both logical interests stay registered: {document_subscription:?} {workspace:?}"
+        );
+
+        let payloads = core.handle_message(raw(RawWatchEventKind::Created, vec![descendant]));
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            change(&payloads[0]).subscription_id,
+            workspace.subscription_id
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A promoted backend watch still routes each subscription by *its own*
+    /// scope: over-observation must never widen a 005 document interest (FR-009).
+    #[test]
+    fn a_promoted_recursive_watch_routes_each_subscription_by_its_own_scope() {
+        let root = work_dir("mixed-routing");
+        let nested = root.join("src");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let document = write_file(&root, "notes.txt");
+        let descendant = nested.join("deep.ts");
+        let moved = root.join("moved.txt");
+
+        let mut core = WatcherCore::new();
+        let mut backend = RecordingBackend::new();
+
+        let document_subscription = core
+            .subscribe_with(&display(&document), WatchScope::NonRecursive, &mut backend)
+            .expect("subscribe to the document");
+        let workspace = core
+            .subscribe_with(&display(&root), WatchScope::Recursive, &mut backend)
+            .expect("subscribe to the Workspace root");
+
+        // A descendant is the Workspace's business only.
+        let payloads = core.handle_message(raw(RawWatchEventKind::Created, vec![descendant.clone()]));
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(change(&payloads[0]).subscription_id, workspace.subscription_id);
+        assert_eq!(
+            change(&payloads[0]).relative_path,
+            Some(String::from("src") + std::path::MAIN_SEPARATOR_STR + "deep.ts"),
+            "006 receives the subscription-relative location"
+        );
+        assert_eq!(
+            change(&payloads[0]).rename_target_relative_path,
+            None,
+            "a plain creation carries no rename target"
+        );
+
+        // The subscribed document is both consumers' business, each with its own
+        // scope and its own relative path.
+        let payloads = core.handle_message(raw_with_target(
+            RawWatchEventKind::Removed,
+            vec![document.clone()],
+            moved.clone(),
+        ));
+        assert_eq!(payloads.len(), 2, "both subscriptions are interested");
+
+        let document_hint = payloads
+            .iter()
+            .map(change)
+            .find(|event| event.subscription_id == document_subscription.subscription_id)
+            .expect("the document subscription must receive its own hint");
+        assert_eq!(document_hint.scope, WatchScope::NonRecursive);
+        assert_eq!(document_hint.relative_path, Some("notes.txt".to_string()));
+        assert_eq!(
+            document_hint.rename_target,
+            Some(display(&moved)),
+            "005 keeps the raw rename target"
+        );
+
+        let workspace_hint = payloads
+            .iter()
+            .map(change)
+            .find(|event| event.subscription_id == workspace.subscription_id)
+            .expect("the Workspace subscription must receive its own hint");
+        assert_eq!(workspace_hint.scope, WatchScope::Recursive);
+        assert_eq!(workspace_hint.relative_path, Some("notes.txt".to_string()));
+        assert_eq!(
+            workspace_hint.rename_target_relative_path,
+            Some("moved.txt".to_string()),
+            "an in-root rename target gets a relative path"
+        );
+
+        // A rename target outside the recursive root keeps its raw spelling but
+        // has no relative path, so 006 can never use it as an Explorer path.
+        let outside = work_dir("mixed-routing-outside").join("moved.txt");
+        let payloads = core.handle_message(raw_with_target(
+            RawWatchEventKind::Removed,
+            vec![document.clone()],
+            outside.clone(),
+        ));
+        let workspace_hint = payloads
+            .iter()
+            .map(change)
+            .find(|event| event.subscription_id == workspace.subscription_id)
+            .expect("the Workspace subscription must receive its own hint");
+        assert_eq!(
+            workspace_hint.rename_target_relative_path,
+            None,
+            "an outside target has no in-root relative path"
+        );
+        assert_eq!(
+            workspace_hint.rename_target,
+            Some(display(&outside)),
+            "the raw target survives as a document-only relocation candidate"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Removing the last recursive subscriber may narrow coverage again, but the
+    /// remaining non-recursive subscribers must keep working and must still be
+    /// routed by their own scope (FR-009, plan §2).
+    #[test]
+    fn removing_the_last_recursive_subscriber_narrows_coverage_only() {
+        let root = work_dir("mixed-downgrade");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let document = write_file(&root, "notes.txt");
+        let sibling = write_file(&root, "other.txt");
+        let descendant = nested.join("a.txt");
+
+        let mut core = WatcherCore::new();
+        let mut backend = RecordingBackend::new();
+
+        let document_subscription = core
+            .subscribe_with(&display(&document), WatchScope::NonRecursive, &mut backend)
+            .expect("subscribe to the document");
+        let workspace = core
+            .subscribe_with(&display(&root), WatchScope::Recursive, &mut backend)
+            .expect("subscribe to the Workspace root");
+
+        assert!(core.unsubscribe(workspace.subscription_id, &mut backend));
+
+        assert_eq!(
+            backend.watched().last(),
+            Some(&(root.clone(), WatchScope::NonRecursive)),
+            "coverage narrows back to what the remaining subscribers need"
+        );
+        assert_eq!(core.subscription_count(), 1);
+        assert_eq!(core.active_watch_count(), 1);
+
+        // The remaining document interest still receives its own target...
+        let payloads = core.handle_message(raw(RawWatchEventKind::Changed, vec![document.clone()]));
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            change(&payloads[0]).subscription_id,
+            document_subscription.subscription_id
+        );
+
+        // ...and nothing else: a descendant and a sibling are not its business.
+        assert!(core
+            .handle_message(raw(RawWatchEventKind::Created, vec![descendant]))
+            .is_empty());
+        assert!(core
+            .handle_message(raw(RawWatchEventKind::Changed, vec![sibling]))
+            .is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Removing the non-recursive subscribers must not disturb recursive
+    /// coverage or its routing.
+    #[test]
+    fn removing_non_recursive_subscribers_keeps_recursive_coverage() {
+        let root = work_dir("mixed-keep-recursive");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let document = write_file(&root, "notes.txt");
+        let descendant = nested.join("a.txt");
+
+        let mut core = WatcherCore::new();
+        let mut backend = RecordingBackend::new();
+
+        let document_subscription = core
+            .subscribe_with(&display(&document), WatchScope::NonRecursive, &mut backend)
+            .expect("subscribe to the document");
+        let workspace = core
+            .subscribe_with(&display(&root), WatchScope::Recursive, &mut backend)
+            .expect("subscribe to the Workspace root");
+
+        let watched_before = backend.watched().len();
+        assert!(core.unsubscribe(document_subscription.subscription_id, &mut backend));
+
+        assert_eq!(
+            backend.watched().len(),
+            watched_before,
+            "recursive coverage needs no backend transition"
+        );
+        assert_eq!(
+            backend.watched().last(),
+            Some(&(root.clone(), WatchScope::Recursive))
+        );
+
+        let payloads = core.handle_message(raw(RawWatchEventKind::Created, vec![descendant]));
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(change(&payloads[0]).subscription_id, workspace.subscription_id);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A refused upgrade must not be reported live: the recursive subscriber
+    /// fails, the surviving consumers are told to revalidate, and the directory
+    /// is degraded rather than falsely claimed covered (FR-009, FR-010).
+    #[test]
+    fn a_refused_recursive_upgrade_is_not_reported_as_live_coverage() {
+        let root = work_dir("mixed-refused-upgrade");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let document = write_file(&root, "notes.txt");
+        let descendant = nested.join("a.txt");
+
+        let mut core = WatcherCore::new();
+        let mut backend = RecordingBackend::new();
+
+        core.subscribe_with(&display(&document), WatchScope::NonRecursive, &mut backend)
+            .expect("subscribe to the document");
+
+        let plan = core
+            .begin_subscribe(&display(&root), WatchScope::Recursive)
+            .expect("plan the recursive subscription");
+        let change = plan.backend.clone().expect("an upgrade is required");
+        assert!(matches!(change, BackendChange::Reconfigure { .. }));
+
+        backend.fail_next_watch();
+        assert!(apply_backend_change(&mut backend, &change).is_err());
+
+        let invalidations = core.cancel_subscribe(plan);
+
+        assert_eq!(
+            invalidations,
+            vec![(WatchScope::NonRecursive, display(&root))],
+            "the survivor is told its coverage may be incomplete"
+        );
+        assert_eq!(core.subscription_count(), 1, "the failed subscriber is gone");
+        assert_eq!(
+            core.active_watch_count(),
+            0,
+            "the directory is degraded, not falsely covered"
+        );
+
+        assert!(
+            core.handle_message(raw(RawWatchEventKind::Created, vec![descendant]))
+                .is_empty(),
+            "no recursive coverage exists, so no descendant is claimed"
+        );
+
+        // A later subscribe repairs the directory with a fresh watch.
+        let repaired = core
+            .subscribe_with(&display(&root), WatchScope::Recursive, &mut backend)
+            .expect("repair the subscription");
+        assert_eq!(
+            backend.watched().last(),
+            Some(&(root.clone(), WatchScope::Recursive))
+        );
+        assert_eq!(core.watch_refcount(&root), 2);
+        assert_eq!(repaired.scope, WatchScope::Recursive);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A failed downgrade degrades the directory instead of leaving the core
+    /// claiming coverage it could not re-establish.
+    #[test]
+    fn a_failed_downgrade_degrades_the_directory() {
+        let root = work_dir("mixed-failed-downgrade");
+        let document = write_file(&root, "notes.txt");
+
+        let mut core = WatcherCore::new();
+        let mut backend = RecordingBackend::new();
+
+        core.subscribe_with(&display(&document), WatchScope::NonRecursive, &mut backend)
+            .expect("subscribe to the document");
+        let workspace = core
+            .subscribe_with(&display(&root), WatchScope::Recursive, &mut backend)
+            .expect("subscribe to the Workspace root");
+
+        backend.fail_next_watch();
+        assert!(core.unsubscribe(workspace.subscription_id, &mut backend));
+
+        assert_eq!(core.subscription_count(), 1, "the survivor stays logical");
+        assert_eq!(
+            core.active_watch_count(),
+            0,
+            "the core must not claim a watch it could not re-establish"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A backend-global loss notice has no path to intersect with, so it becomes
+    /// one invalidation per live *logical* scope — never a single
+    /// non-recursive-only notice (FR-010, T020).
+    #[test]
+    fn a_global_loss_notice_invalidates_every_live_logical_scope() {
+        let root = work_dir("mixed-global-loss");
+        let nested = root.join("src");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let document = write_file(&root, "notes.txt");
+
+        let mut core = WatcherCore::new();
+        let mut backend = RecordingBackend::new();
+
+        core.subscribe_with(&display(&document), WatchScope::NonRecursive, &mut backend)
+            .expect("subscribe to the document");
+        core.subscribe_with(&display(&root), WatchScope::Recursive, &mut backend)
+            .expect("subscribe to the Workspace root");
+
+        let payloads = core.handle_message(BackendMessage::Error {
+            paths: Vec::new(),
+            reason: "overflow".to_string(),
+        });
+
+        let mut pairs: Vec<(WatchScope, Option<String>)> = payloads
+            .iter()
+            .map(invalidated)
+            .map(|invalidated| (invalidated.scope, invalidated.watched_path.clone()))
+            .collect();
+        pairs.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
+
+        assert_eq!(
+            pairs,
+            vec![
+                (WatchScope::NonRecursive, Some(display(&root))),
+                (WatchScope::Recursive, Some(display(&root))),
+            ],
+            "both consumers must receive the invalidation that concerns their scope"
+        );
+
+        // A named loss inside the root concerns both scopes of that directory.
+        let named = core.handle_message(BackendMessage::Rescan {
+            paths: vec![nested.clone()],
+            reason: "rescan".to_string(),
+        });
+        assert_eq!(named.len(), 2);
+        assert!(named.iter().all(|payload| invalidated(payload).watched_path
+            == Some(display(&root))));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// One bounded live test for the real recursive backend: a descendant
+    /// creation below the watched root must actually be observed. Everything
+    /// else about mixed scopes stays synthetic, so the suite does not depend on
+    /// OS event timing.
+    #[test]
+    fn live_backend_observes_a_recursive_descendant() {
+        let root = work_dir("live-recursive");
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let target = nested.join("a.txt");
+
+        let payloads: Arc<StdMutex<Vec<WatchEventPayload>>> = Arc::new(StdMutex::new(Vec::new()));
+        let sink_state = Arc::clone(&payloads);
+        let sink: WatchPayloadSink = Arc::new(move |payload| {
+            sink_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(payload);
+        });
+
+        let watcher = FilesystemWatcher::new(sink).expect("create the real watcher");
+        watcher
+            .start(&display(&root), WatchScope::Recursive)
+            .expect("watch the fixture root");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut received = false;
+        let mut last_write = std::time::Instant::now() - std::time::Duration::from_secs(1);
+
+        while std::time::Instant::now() < deadline && !received {
+            if last_write.elapsed() >= std::time::Duration::from_millis(250) {
+                fs::write(&target, b"alpha\nbeta\ngamma").expect("write the descendant");
+                last_write = std::time::Instant::now();
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            let recorded = payloads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            received = recorded.iter().any(|payload| match payload {
+                WatchEventPayload::Change(event) => {
+                    event.scope == WatchScope::Recursive
+                        && event.path.eq_ignore_ascii_case(&display(&target))
+                }
+                WatchEventPayload::Invalidated(_) => false,
+            });
+        }
+
+        watcher.shutdown();
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(
+            received,
+            "the real recursive backend must report a descendant under the watched root"
+        );
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Transition serialization (T146)                                    */
+    /* ---------------------------------------------------------------- */
+
+    /// Backend state a test controls from outside the watcher.
+    #[derive(Default)]
+    struct GatedState {
+        watched: Vec<(PathBuf, WatchScope)>,
+        unwatched: Vec<PathBuf>,
+        /// Signalled when a held `watch` call has entered the backend.
+        entered: Option<mpsc::Sender<()>>,
+        /// Waited on before a held `watch` call returns.
+        gate: Option<mpsc::Receiver<()>>,
+        /// Kept so the test can open the gate.
+        gate_opener: Option<mpsc::Sender<()>>,
+        /// Whether the held call must fail once it is released.
+        fail_after_gate: bool,
+    }
+
+    /// A backend that can hold one `watch` call open on demand.
+    ///
+    /// This is what makes an overlapping transition deterministic: the test knows
+    /// exactly when a second `start`/`stop` races the first one, without relying
+    /// on a sleep to create the window.
+    #[derive(Clone, Default)]
+    struct GatedBackend {
+        state: Arc<StdMutex<GatedState>>,
+    }
+
+    impl GatedBackend {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        /// Holds the next `watch` call open; the returned receiver fires when that
+        /// call has entered the backend.
+        fn hold_next_watch(&self) -> mpsc::Receiver<()> {
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (gate_tx, gate_rx) = mpsc::channel();
+            let mut state = lock(&self.state);
+            state.entered = Some(entered_tx);
+            state.gate = Some(gate_rx);
+            state.gate_opener = Some(gate_tx);
+            entered_rx
+        }
+
+        /// Makes the currently held call fail once it is released.
+        fn fail_held_watch(&self) {
+            lock(&self.state).fail_after_gate = true;
+        }
+
+        /// Releases the held call.
+        fn release_held_watch(&self) {
+            if let Some(opener) = lock(&self.state).gate_opener.take() {
+                let _ = opener.send(());
+            }
+        }
+
+        fn watched(&self) -> Vec<(PathBuf, WatchScope)> {
+            lock(&self.state).watched.clone()
+        }
+    }
+
+    impl WatchBackend for GatedBackend {
+        fn watch(&mut self, directory: &Path, scope: WatchScope) -> Result<(), String> {
+            let (entered, gate, fail) = {
+                let mut state = lock(&self.state);
+                state.watched.push((directory.to_path_buf(), scope));
+                let fail = state.fail_after_gate;
+                // Consumed, so only the held call fails.
+                state.fail_after_gate = false;
+                (state.entered.take(), state.gate.take(), fail)
+            };
+
+            if let Some(entered) = entered {
+                let _ = entered.send(());
+            }
+            if let Some(gate) = gate {
+                // A test that never opens the gate fails loudly instead of
+                // hanging the suite.
+                let _ = gate.recv_timeout(Duration::from_secs(10));
+            }
+            if fail {
+                return Err("backend refused the watch".to_string());
+            }
+
+            Ok(())
+        }
+
+        fn unwatch(&mut self, directory: &Path) -> Result<(), String> {
+            lock(&self.state).unwatched.push(directory.to_path_buf());
+            Ok(())
+        }
+    }
+
+    /// A sink that records every payload it receives.
+    fn recording_sink() -> (WatchPayloadSink, Arc<StdMutex<Vec<WatchEventPayload>>>) {
+        let recorded: Arc<StdMutex<Vec<WatchEventPayload>>> = Arc::new(StdMutex::new(Vec::new()));
+        let state = Arc::clone(&recorded);
+        let sink: WatchPayloadSink = Arc::new(move |payload| {
+            lock(&state).push(payload);
+        });
+        (sink, recorded)
+    }
+
+    /// A second `start` may not ride on coverage the first attempt never
+    /// established: every logical subscription owns a real backend watch.
+    #[test]
+    fn an_overlapping_subscribe_does_not_ride_on_an_unestablished_watch() {
+        let dir = work_dir("transition-start-start");
+        let notes = write_file(&dir, "notes.txt");
+        // Two files in *one* directory: both attempts therefore share one backend
+        // watch record, which is what makes their coverage decision overlap.
+        let todos = write_file(&dir, "todos.txt");
+
+        let backend = GatedBackend::new();
+        let probe = backend.clone();
+        let (sink, recorded) = recording_sink();
+        let watcher = Arc::new(FilesystemWatcher::with_backend(Box::new(backend), sink));
+
+        // The first attempt enters the backend and is held there; it will fail.
+        let entered = probe.hold_next_watch();
+        probe.fail_held_watch();
+
+        let first = {
+            let watcher = Arc::clone(&watcher);
+            let path = display(&notes);
+            thread::spawn(move || watcher.start(&path, WatchScope::NonRecursive))
+        };
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first attempt must reach the backend");
+
+        let (second_done, second_done_rx) = mpsc::channel();
+        let second = {
+            let watcher = Arc::clone(&watcher);
+            let path = display(&todos);
+            thread::spawn(move || {
+                let result = watcher.start(&path, WatchScope::NonRecursive);
+                let _ = second_done.send(());
+                result
+            })
+        };
+
+        // While the first transition is still deciding, the overlapping one must
+        // not report itself live: it is serialized behind the transition guard.
+        assert!(
+            second_done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the second subscribe returned before the first coverage was decided"
+        );
+
+        probe.release_held_watch();
+        let first = first.join().expect("the first thread must not panic");
+        assert!(first.is_err(), "the held attempt was refused");
+
+        let second = second
+            .join()
+            .expect("the second thread must not panic")
+            .expect("the serialized subscribe must establish its own coverage");
+
+        // Exactly one backend watch per attempt: the first failed, the second
+        // installed real coverage of its own.
+        assert_eq!(probe.watched().len(), 2, "the second subscribe must watch for itself");
+
+        // And that coverage is real: a change for the surviving subscription is
+        // routed to the sink.
+        watcher.handle_backend_message(raw(RawWatchEventKind::Changed, vec![todos.clone()]));
+        let payloads = lock(&recorded).clone();
+        assert_eq!(payloads.len(), 1, "the surviving subscription must receive events");
+        assert_eq!(change(&payloads[0]).subscription_id, second.subscription_id);
+    }
+
+    /// A narrowing stop may not land after a widening start: recursive demand is
+    /// never left served by a non-recursive backend watch (FR-009, FR-011).
+    #[test]
+    fn an_overlapping_resubscribe_keeps_recursive_coverage() {
+        let dir = work_dir("transition-stop-start");
+        let notes = write_file(&dir, "notes.txt");
+
+        let backend = GatedBackend::new();
+        let probe = backend.clone();
+        let (sink, _recorded) = recording_sink();
+        let watcher = Arc::new(FilesystemWatcher::with_backend(Box::new(backend), sink));
+
+        // A document interest and a Workspace interest share the directory, so
+        // coverage is currently recursive.
+        watcher
+            .start(&display(&notes), WatchScope::NonRecursive)
+            .expect("document watch");
+        let workspace = watcher
+            .start(&display(&dir), WatchScope::Recursive)
+            .expect("workspace watch");
+        assert_eq!(
+            probe.watched().last(),
+            Some(&(dir.clone(), WatchScope::Recursive))
+        );
+
+        // Removing the recursive interest narrows coverage, and the native call is
+        // held open so a new recursive subscription can race it.
+        let entered = probe.hold_next_watch();
+        let stopping = {
+            let watcher = Arc::clone(&watcher);
+            let id = workspace.subscription_id;
+            thread::spawn(move || watcher.stop(id))
+        };
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the narrowing transition must reach the backend");
+
+        let (resubscribed, resubscribed_rx) = mpsc::channel();
+        let resubscribe = {
+            let watcher = Arc::clone(&watcher);
+            let path = display(&dir);
+            thread::spawn(move || {
+                let result = watcher.start(&path, WatchScope::Recursive);
+                let _ = resubscribed.send(());
+                result
+            })
+        };
+        assert!(
+            resubscribed_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the re-subscribe returned before the narrowing transition was decided"
+        );
+
+        probe.release_held_watch();
+        stopping.join().expect("the stop thread must not panic");
+        let resubscribe = resubscribe
+            .join()
+            .expect("the re-subscribe thread must not panic")
+            .expect("the re-subscribe must succeed");
+
+        // Coverage is recursive again: the narrowing could not win the race.
+        assert_eq!(
+            probe.watched().last(),
+            Some(&(dir.clone(), WatchScope::Recursive)),
+            "recursive demand must not be served by a non-recursive watch"
+        );
+
+        // The restored recursive subscription really is covered: a descendant
+        // event reaches it.
+        let (sink, recorded) = recording_sink();
+        let watcher = Arc::new(FilesystemWatcher::with_backend(
+            Box::new(GatedBackend::new()),
+            sink,
+        ));
+        let restored = watcher
+            .start(&display(&dir), WatchScope::Recursive)
+            .expect("recursive watch");
+        assert_eq!(restored.subscription_id, restored.subscription_id);
+        watcher.handle_backend_message(raw(
+            RawWatchEventKind::Created,
+            vec![dir.join("nested").join("a.txt")],
+        ));
+        assert_eq!(
+            lock(&recorded).len(),
+            1,
+            "a descendant event reaches the recursive subscription"
+        );
+        assert_eq!(resubscribe.scope, WatchScope::Recursive);
     }
 }

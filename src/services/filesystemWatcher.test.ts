@@ -82,6 +82,10 @@ const CHANGE_JSON = {
   path: "C:\\work\\notes.txt",
   hint: "changed",
   renameTarget: null,
+  // 006: the subscription-relative location fields. 005 ignores them, but its
+  // decoder still pins them so the two sides cannot drift apart.
+  relativePath: "notes.txt",
+  renameTargetRelativePath: null,
 };
 
 /** The exact `invalidated` JSON the Rust watcher tests pin. */
@@ -199,6 +203,8 @@ describe("filesystemWatcher.listen", () => {
         path: "C:\\work\\notes.txt",
         hint: "changed",
         renameTarget: null,
+        relativePath: "notes.txt",
+        renameTargetRelativePath: null,
       },
     ]);
   });
@@ -222,6 +228,45 @@ describe("filesystemWatcher.listen", () => {
         path: "C:\\work\\notes.txt",
         hint: "removed",
         renameTarget: "C:\\work\\new.txt",
+        relativePath: "notes.txt",
+        renameTargetRelativePath: null,
+      },
+    ]);
+  });
+
+  it("decodes the subscription-relative location 006 maps onto its logical root", async () => {
+    const ipc = new FakeWatcherIpc();
+    const watcher = createFilesystemWatcherService(ipc);
+    const received: WatchEventPayload[] = [];
+    await watcher.listen((payload) => {
+      received.push(payload);
+    });
+
+    ipc.emit({
+      type: "change",
+      subscriptionId: 9,
+      scope: "recursive",
+      watchedPath: "\\\\?\\D:\\project",
+      path: "\\\\?\\D:\\project\\src\\renamed.ts",
+      hint: "removed",
+      renameTarget: "D:\\elsewhere\\renamed.ts",
+      relativePath: "src\\renamed.ts",
+      // An outside target has no in-root relative path, so 006 can never treat
+      // it as an Explorer path.
+      renameTargetRelativePath: null,
+    });
+
+    expect(received).toEqual([
+      {
+        type: "change",
+        subscriptionId: 9,
+        scope: "recursive",
+        watchedPath: "\\\\?\\D:\\project",
+        path: "\\\\?\\D:\\project\\src\\renamed.ts",
+        hint: "removed",
+        renameTarget: "D:\\elsewhere\\renamed.ts",
+        relativePath: "src\\renamed.ts",
+        renameTargetRelativePath: null,
       },
     ]);
   });
@@ -296,12 +341,58 @@ describe("decodeWatchEventPayload", () => {
       path: "C:\\work\\notes.txt",
       hint: "changed",
       renameTarget: null,
+      relativePath: "notes.txt",
+      renameTargetRelativePath: null,
     });
     expect(decodeWatchEventPayload({ ...INVALIDATED_JSON })).toEqual({
       type: "invalidated",
       scope: "nonRecursive",
       watchedPath: "C:\\work",
       reason: "overflow",
+    });
+  });
+
+  it("decodes a missing or non-string relative field as null instead of dropping the hint", () => {
+    // A producer that predates 006 must not cost 005 its validation hint, and a
+    // malformed location must not either.
+    const withoutFields = decodeWatchEventPayload({
+      type: "change",
+      subscriptionId: 7,
+      scope: "nonRecursive",
+      watchedPath: "C:\\work",
+      path: "C:\\work\\notes.txt",
+      hint: "changed",
+      renameTarget: null,
+    });
+
+    expect(withoutFields).toEqual({
+      type: "change",
+      subscriptionId: 7,
+      scope: "nonRecursive",
+      watchedPath: "C:\\work",
+      path: "C:\\work\\notes.txt",
+      hint: "changed",
+      renameTarget: null,
+      relativePath: null,
+      renameTargetRelativePath: null,
+    });
+
+    const malformed = decodeWatchEventPayload({
+      ...CHANGE_JSON,
+      relativePath: 12,
+      renameTargetRelativePath: { path: "x" },
+    });
+
+    expect(malformed).toEqual({
+      type: "change",
+      subscriptionId: 7,
+      scope: "nonRecursive",
+      watchedPath: "C:\\work",
+      path: "C:\\work\\notes.txt",
+      hint: "changed",
+      renameTarget: null,
+      relativePath: null,
+      renameTargetRelativePath: null,
     });
   });
 

@@ -23,6 +23,16 @@ export interface ExplorerEntry {
   path: string;
   kind: WorkspaceEntryKind;
   isSymlink: boolean;
+  /**
+   * Opaque identity of the filesystem entry itself (006), or `null`.
+   *
+   * Used only as continuity evidence while reconciling one batch of directory
+   * listings. It is deliberately *not* the logical Tree-node key: the same
+   * physical object may legitimately appear in several logical Tree positions
+   * through symlinks/junctions, and two logical entries may share one token (hard
+   * links), so identity never deduplicates nodes (FR-047, FR-090).
+   */
+  objectIdentity: string | null;
 }
 
 /** A visible file. */
@@ -148,7 +158,12 @@ export function sortExplorerEntries<T extends ExplorerEntry>(
 
 /** Creates a directory node that has not been read yet. */
 export function createDirectoryNode(
-  entry: { name: string; path: string; isSymlink?: boolean },
+  entry: {
+    name: string;
+    path: string;
+    isSymlink?: boolean;
+    objectIdentity?: string | null;
+  },
   options: {
     expanded?: boolean;
     resolvedCanonicalPath?: string;
@@ -159,6 +174,7 @@ export function createDirectoryNode(
     path: entry.path,
     kind: "directory",
     isSymlink: entry.isSymlink ?? false,
+    objectIdentity: entry.objectIdentity ?? null,
     expanded: options.expanded ?? false,
     loadState: "not-loaded",
     ...(options.resolvedCanonicalPath === undefined
@@ -175,6 +191,7 @@ export function toExplorerNode(entry: WorkspaceDirectoryEntry): ExplorerNode {
       path: entry.path,
       kind: "directory",
       isSymlink: entry.isSymlink,
+      objectIdentity: entry.objectIdentity,
       expanded: false,
       loadState: "not-loaded",
     };
@@ -186,6 +203,7 @@ export function toExplorerNode(entry: WorkspaceDirectoryEntry): ExplorerNode {
       path: entry.path,
       kind: "file",
       isSymlink: entry.isSymlink,
+      objectIdentity: entry.objectIdentity,
     };
   }
 
@@ -194,38 +212,13 @@ export function toExplorerNode(entry: WorkspaceDirectoryEntry): ExplorerNode {
     path: entry.path,
     kind: "other",
     isSymlink: entry.isSymlink,
+    objectIdentity: entry.objectIdentity,
   };
 }
 
-/**
- * Replaces a directory's children with freshly read entries.
- *
- * Surviving entries keep their existing node object, which is what preserves
- * expansion, cached grandchildren and resolved identity across a Refresh
- * (FR-084). An entry whose kind changed becomes a new node, because the old
- * node's state no longer describes it.
- */
-export function mergeChildren(
-  existing: readonly ExplorerNode[] | undefined,
-  entries: readonly WorkspaceDirectoryEntry[],
-): ExplorerNode[] {
-  const previous = new Map<string, ExplorerNode>();
-  for (const node of existing ?? []) {
-    previous.set(node.path, node);
-  }
-
-  return sortExplorerEntries(
-    entries.map((entry) => {
-      const node = previous.get(entry.path);
-      if (node !== undefined && node.kind === entry.kind) {
-        node.name = entry.name;
-        node.isSymlink = entry.isSymlink;
-        return node;
-      }
-      return toExplorerNode(entry);
-    }),
-  );
-}
+/* -------------------------------------------------------------------------- */
+/* Lookup                                                                     */
+/* -------------------------------------------------------------------------- */
 
 /** Finds the node at `path`, searching the whole visible tree. */
 export function findNode(

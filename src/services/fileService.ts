@@ -68,6 +68,19 @@ export interface ResolvedPathIdentity {
   comparisonKey: string;
   kind: ResolvedPathKind;
   diskRevision: DiskRevision | null;
+  /**
+   * Opaque identity of the object this path resolves to (006).
+   *
+   * It is *not* an ownership key: `comparisonKey` keeps owning path and
+   * destination semantics exactly as before. This token adds the one fact a
+   * canonical path cannot carry — whether the object at a *different* path is
+   * the same filesystem object — which is what makes a confirmed external
+   * rename/move provable instead of guessed. The frontend never parses it, never
+   * case-folds it and never compares it against a Tree-entry token; `null` means
+   * the platform could not supply one, and continuity then simply cannot be
+   * claimed.
+   */
+  objectIdentity: string | null;
 }
 
 /**

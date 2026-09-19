@@ -81,6 +81,7 @@ describe("tauriFileService.inspectFilePath", () => {
     comparisonKey: "\\\\?\\c:\\work\\notes.txt",
     kind: "file",
     diskRevision: { size: 1234, modifiedTimeMillis: 1789600000000 },
+    objectIdentity: "win:1a2b3c4d:0000000000000abc",
   };
 
   it("invokes inspect_file_path with a nested camelCase request", async () => {
@@ -105,6 +106,9 @@ describe("tauriFileService.inspectFilePath", () => {
       comparisonKey: "\\\\?\\c:\\work\\brand-new.txt",
       kind: "missing",
       diskRevision: null,
+      // A destination that does not exist yet has no object identity, and the
+      // wire field is nullable rather than absent (FR-042).
+      objectIdentity: null,
     };
     invokeMock.mockResolvedValue(candidate);
 

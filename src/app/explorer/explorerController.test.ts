@@ -141,6 +141,10 @@ class FakeReader {
         requestedPath: path,
         canonicalPath,
         comparisonKey: fixture.comparisonKey ?? keyFor(canonicalPath),
+        // These fixtures model the case-insensitive platform this application
+        // targets; the pre-mutation comparison contract itself is pinned by the
+        // explorer-action tests.
+        caseSensitive: false,
         entries: fixture.entries,
       },
     };
@@ -169,11 +173,23 @@ function keyFor(path: string): string {
 }
 
 function file(path: string): WorkspaceDirectoryEntry {
-  return { name: leafName(path), path, kind: "file", isSymlink: false };
+  return {
+    name: leafName(path),
+    path,
+    kind: "file",
+    isSymlink: false,
+    objectIdentity: `fake:${keyFor(path)}`,
+  };
 }
 
 function directory(path: string, isSymlink = false): WorkspaceDirectoryEntry {
-  return { name: leafName(path), path, kind: "directory", isSymlink };
+  return {
+    name: leafName(path),
+    path,
+    kind: "directory",
+    isSymlink,
+    objectIdentity: `fake:${keyFor(path)}`,
+  };
 }
 
 function leafName(path: string): string {
@@ -362,7 +378,7 @@ describe("ExplorerController lazy loading (US2)", () => {
     expect(src.path).toBe(SRC);
   });
 
-  it("reuses cached children when a loaded directory is collapsed and expanded", async () => {
+  it("reuses cached children on re-expansion and requests one bounded reconciliation", async () => {
     const harness = createHarness();
     harness.reader.addDirectory(ROOT, { entries: [directory(SRC)] });
     harness.reader.addDirectory(SRC, { entries: [file("C:\\work\\src\\a.ts")] });
@@ -371,12 +387,32 @@ describe("ExplorerController lazy loading (US2)", () => {
     await harness.controller.expandDirectory(SRC);
     await harness.controller.toggleDirectory(SRC);
     expect(directoryNode(harness.controller, SRC).expanded).toBe(false);
+    expect(directoryNode(harness.controller, SRC).children).toHaveLength(1);
 
     await harness.controller.toggleDirectory(SRC);
 
-    // SC-003: collapsing and re-expanding costs no additional read.
+    // SR-002 (006): the cached children render immediately — nothing is
+    // discarded and no "loading" flicker is introduced — and exactly one
+    // bounded direct-child reconciliation is requested on top.
+    const node = directoryNode(harness.controller, SRC);
+    expect(node.loadState).toBe("loaded");
+    expect(node.children).toHaveLength(1);
+    expect(node.expanded).toBe(true);
+
+    await harness.controller.whenIdle();
+    expect(harness.reader.readsFor(SRC)).toBe(2);
+  });
+
+  it("reads a never-loaded directory exactly once on its first expansion", async () => {
+    const harness = createHarness();
+    harness.reader.addDirectory(ROOT, { entries: [directory(SRC)] });
+    harness.reader.addDirectory(SRC, { entries: [file("C:\\work\\src\\a.ts")] });
+    await openContext(harness);
+
+    await harness.controller.expandDirectory(SRC);
+    await harness.controller.whenIdle();
+
     expect(harness.reader.readsFor(SRC)).toBe(1);
-    expect(directoryNode(harness.controller, SRC).loadState).toBe("loaded");
   });
 
   it("caches a load that finished after the user collapsed the directory", async () => {
@@ -405,7 +441,7 @@ describe("ExplorerController lazy loading (US2)", () => {
     expect(node.expanded).toBe(false);
   });
 
-  it("drops a superseded read of the same directory", async () => {
+  it("shares one in-flight read for duplicate requests and applies the newest listing once", async () => {
     const harness = createHarness();
     harness.reader.addDirectory(ROOT, { entries: [file("C:\\work\\first.txt")] });
     await openContext(harness);
@@ -413,25 +449,58 @@ describe("ExplorerController lazy loading (US2)", () => {
       harness.controller.getState().root?.children?.map((child) => child.name),
     ).toEqual(["first.txt"]);
 
-    // Two reads of the same node, with the older one returning last.
+    // Two requests for the same directory while the first read is in flight.
     harness.reader.hold = true;
-    const older = harness.controller.loadRoot();
+    const first = harness.controller.loadRoot();
     await flush();
     harness.reader.addDirectory(ROOT, { entries: [file("C:\\work\\second.txt")] });
-    const newer = harness.controller.loadRoot();
+    const second = harness.controller.loadRoot();
     await flush();
-    expect(harness.reader.pendingReadCount()).toBe(2);
 
-    // The newer read applies first, then the older one completes and must be
-    // discarded instead of overwriting the newer listing (FR-030).
-    harness.reader.releaseLast();
-    await newer;
-    harness.reader.releaseNext();
-    await older;
+    // FR-018: the duplicate joins the in-flight read instead of launching a
+    // parallel one; it merely marks the directory dirty again.
+    expect(harness.reader.pendingReadCount()).toBe(1);
 
+    harness.reader.hold = false;
+    harness.reader.releaseAll();
+    await first;
+    await second;
+    await harness.controller.whenIdle();
+
+    // FR-019: at most one follow-up read ran, and the final state is the newest
+    // filesystem listing rather than the one the first read happened to see.
     const root = harness.controller.getState().root!;
     expect(root.children?.map((child) => child.name)).toEqual(["second.txt"]);
     expect(root.loadState).toBe("loaded");
+    expect(harness.reader.readsFor(ROOT)).toBe(3);
+  });
+
+  it("prevents an older completion from overwriting a newer explicit read", async () => {
+    const harness = createHarness();
+    harness.reader.addDirectory(ROOT, { entries: [directory(SRC)] });
+    harness.reader.addDirectory(SRC, { entries: [file("C:\\work\\src\\old.ts")] });
+    await openContext(harness);
+    await harness.controller.expandDirectory(SRC);
+
+    // A held background read of SRC is in flight...
+    harness.reader.hold = true;
+    const background = harness.controller.reconcileDirectory(SRC, "watcher");
+    await flush();
+
+    // ...the user refreshes, and the disk now holds something newer.
+    harness.reader.addDirectory(SRC, { entries: [file("C:\\work\\src\\new.ts")] });
+    const refreshing = harness.controller.refresh();
+    await flush();
+
+    harness.reader.hold = false;
+    harness.reader.releaseAll();
+    await background;
+    await refreshing;
+    await harness.controller.whenIdle();
+
+    const node = directoryNode(harness.controller, SRC);
+    expect(node.children?.map((child) => child.name)).toEqual(["new.ts"]);
+    expect(node.loadState).toBe("loaded");
   });
 
   it("keeps a failed load local to its node", async () => {
@@ -641,6 +710,257 @@ describe("ExplorerController selection and inline editor", () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* Interaction state during reconciliation (006 US6)                           */
+/* -------------------------------------------------------------------------- */
+
+/** An entry with an explicit object token, so continuity can be proven. */
+function withIdentity(
+  entry: WorkspaceDirectoryEntry,
+  objectIdentity: string | null,
+): WorkspaceDirectoryEntry {
+  return { ...entry, objectIdentity };
+}
+
+describe("ExplorerController interaction state (006 US6)", () => {
+  async function openRootWith(
+    harness: Harness,
+    entries: readonly WorkspaceDirectoryEntry[],
+  ): Promise<void> {
+    harness.reader.addDirectory(ROOT, { entries: [...entries] });
+    await openContext(harness);
+  }
+
+  it("preserves selection, expansion and an unrelated inline draft", async () => {
+    const harness = createHarness();
+    await openRootWith(harness, [directory(SRC), file("C:\\work\\beta.txt")]);
+    await harness.controller.expandDirectory(SRC);
+    harness.controller.selectPath(SRC);
+    harness.controller.beginRename("C:\\work\\beta.txt");
+
+    // An unrelated external creation in the same directory.
+    harness.reader.addDirectory(ROOT, {
+      entries: [
+        directory(SRC),
+        file("C:\\work\\beta.txt"),
+        file("C:\\work\\gamma.txt"),
+      ],
+    });
+    await harness.controller.reconcileDirectory(ROOT, "watcher");
+
+    expect(harness.controller.getSelectedPath()).toBe(SRC);
+    expect(directoryNode(harness.controller, SRC).expanded).toBe(true);
+    // FR-088: background reconciliation never cancels an unrelated draft.
+    expect(harness.controller.getInlineEdit()).toMatchObject({
+      type: "rename",
+      sourcePath: "C:\\work\\beta.txt",
+    });
+    expect(
+      harness.controller.getNode("C:\\work\\gamma.txt"),
+    ).not.toBeNull();
+  });
+
+  it("clears the selection when the selected node is externally deleted", async () => {
+    const harness = createHarness();
+    await openRootWith(harness, [directory(SRC), file("C:\\work\\beta.txt")]);
+    harness.controller.selectPath("C:\\work\\beta.txt");
+
+    harness.reader.addDirectory(ROOT, { entries: [directory(SRC)] });
+    await harness.controller.reconcileDirectory(ROOT, "watcher");
+
+    expect(harness.controller.getSelectedPath()).toBeNull();
+    expect(harness.controller.getNode("C:\\work\\beta.txt")).toBeNull();
+  });
+
+  it("cancels an inline rename whose target was externally replaced", async () => {
+    const harness = createHarness();
+    await openRootWith(harness, [
+      withIdentity(file("C:\\work\\beta.txt"), "obj:old"),
+    ]);
+    harness.controller.beginRename("C:\\work\\beta.txt");
+
+    // The path exists, but it is a *different* filesystem object.
+    harness.reader.addDirectory(ROOT, {
+      entries: [withIdentity(file("C:\\work\\beta.txt"), "obj:new")],
+    });
+    await harness.controller.reconcileDirectory(ROOT, "watcher");
+
+    expect(harness.controller.getInlineEdit()).toBeNull();
+  });
+
+  it("cancels an inline create whose parent directory disappeared", async () => {
+    const harness = createHarness();
+    await openRootWith(harness, [directory(SRC)]);
+    await harness.controller.expandDirectory(SRC);
+    harness.controller.beginCreate("file", SRC);
+
+    harness.reader.addDirectory(ROOT, { entries: [] });
+    await harness.controller.reconcileDirectory(ROOT, "watcher");
+
+    expect(harness.controller.getInlineEdit()).toBeNull();
+  });
+
+  it("follows a confirmed external rename for the selection and the cache", async () => {
+    const harness = createHarness();
+    const MOVED = "C:\\work\\lib";
+    await openRootWith(harness, [
+      withIdentity(directory(SRC), "obj:src"),
+      withIdentity(file("C:\\work\\beta.txt"), "obj:beta"),
+    ]);
+    harness.reader.addDirectory(SRC, {
+      entries: [withIdentity(file("C:\\work\\src\\a.ts"), "obj:a")],
+    });
+    await harness.controller.expandDirectory(SRC);
+    harness.controller.selectPath("C:\\work\\src\\a.ts");
+
+    // The directory keeps its object identity, so the move is provable.
+    harness.reader.addDirectory(ROOT, {
+      entries: [
+        withIdentity(directory(MOVED), "obj:src"),
+        withIdentity(file("C:\\work\\beta.txt"), "obj:beta"),
+      ],
+    });
+    const result = await harness.controller.reconcileDirectory(ROOT, "watcher");
+
+    expect(result.relocations).toEqual([
+      {
+        kind: "directory",
+        oldPath: SRC,
+        newPath: MOVED,
+        objectIdentity: "obj:src",
+      },
+    ]);
+    // FR-044/FR-085: the cached subtree follows the node and the selection is
+    // rebased with its descendant suffix, without any directory read.
+    expect(harness.controller.getNode(SRC)).toBeNull();
+    const moved = directoryNode(harness.controller, MOVED);
+    expect(moved.expanded).toBe(true);
+    expect(moved.children?.map((child) => child.path)).toEqual([
+      "C:\\work\\lib\\a.ts",
+    ]);
+    expect(harness.controller.getSelectedPath()).toBe("C:\\work\\lib\\a.ts");
+    expect(harness.reader.readsFor(MOVED)).toBe(0);
+  });
+
+  it("keeps two logical positions that reach one object as separate nodes", async () => {
+    const harness = createHarness();
+    const FIRST = "C:\\work\\first-link";
+    const SECOND = "C:\\work\\second-link";
+    await openRootWith(harness, [
+      withIdentity(directory(FIRST, true), "obj:shared"),
+      withIdentity(directory(SECOND, true), "obj:shared"),
+    ]);
+    // Both links resolve to one directory outside the Workspace root.
+    for (const link of [FIRST, SECOND]) {
+      harness.reader.addDirectory(link, {
+        entries: [withIdentity(file(`${link}\\shared.ts`), "obj:file")],
+        canonicalPath: "D:\\outside",
+        comparisonKey: keyFor("D:\\outside"),
+      });
+    }
+
+    await harness.controller.expandDirectory(FIRST);
+    await harness.controller.expandDirectory(SECOND);
+    await harness.controller.reconcileDirectory(ROOT, "watcher");
+
+    // FR-047/FR-090: identity never deduplicates logical Tree positions.
+    expect(harness.controller.getNode(FIRST)).not.toBeNull();
+    expect(harness.controller.getNode(SECOND)).not.toBeNull();
+    expect(directoryNode(harness.controller, FIRST).children).toHaveLength(1);
+    expect(directoryNode(harness.controller, SECOND).children).toHaveLength(1);
+  });
+
+  it("lists an expanded link by its logical path for periodic reconciliation", async () => {
+    const harness = createHarness();
+    const LINK = "C:\\work\\link";
+    await openRootWith(harness, [withIdentity(directory(LINK, true), "obj:link")]);
+    harness.reader.addDirectory(LINK, {
+      entries: [withIdentity(file("C:\\work\\link\\a.ts"), "obj:a")],
+      canonicalPath: "D:\\outside",
+      comparisonKey: keyFor("D:\\outside"),
+    });
+
+    await harness.controller.expandDirectory(LINK);
+
+    // FR-091/FR-115: the *logical* path is the target, even though the physical
+    // target lies outside the Workspace root and outside its watch.
+    expect(harness.controller.listExpandedDirectoryPaths()).toEqual([
+      ROOT,
+      LINK,
+    ]);
+  });
+
+  it("updates the displayed casing of a case-only external rename", async () => {
+    const harness = createHarness();
+    await openRootWith(harness, [
+      withIdentity(file("C:\\work\\foo.ts"), "obj:1"),
+    ]);
+
+    // Windows compares paths case-insensitively, so the canonical key is the
+    // same before and after; only the object token proves continuity and only
+    // the listing carries the new spelling (FR-046).
+    harness.reader.addDirectory(ROOT, {
+      entries: [withIdentity(file("C:\\work\\Foo.ts"), "obj:1")],
+    });
+    const result = await harness.controller.reconcileDirectory(ROOT, "watcher");
+
+    expect(result.relocations).toEqual([
+      {
+        kind: "file",
+        oldPath: "C:\\work\\foo.ts",
+        newPath: "C:\\work\\Foo.ts",
+        objectIdentity: "obj:1",
+      },
+    ]);
+    const renamed = harness.controller.getNode("C:\\work\\Foo.ts");
+    expect(renamed?.name).toBe("Foo.ts");
+    expect(harness.controller.getNode("C:\\work\\foo.ts")).toBeNull();
+  });
+
+  it("drops a descendant read whose parent was removed first", async () => {
+    const harness = createHarness();
+    await openRootWith(harness, [directory(SRC)]);
+    harness.reader.addDirectory(SRC, { entries: [directory(SRC_NESTED)] });
+    await harness.controller.expandDirectory(SRC);
+
+    // A lazy read of the grandchild is in flight...
+    harness.reader.hold = true;
+    const nestedRead = harness.controller.expandDirectory(SRC_NESTED);
+    await flush();
+
+    // ...the whole parent subtree disappears on disk, and the parent is
+    // reconciled before the descendant read returns (FR-024, FR-107).
+    harness.reader.hold = false;
+    harness.reader.addDirectory(ROOT, { entries: [] });
+    await harness.controller.reconcileDirectory(ROOT, "watcher");
+    harness.reader.releaseAll();
+    await nestedRead;
+    await harness.controller.whenIdle();
+
+    // The stale completion could not repopulate the removed subtree.
+    expect(harness.controller.getNode(SRC)).toBeNull();
+    expect(harness.controller.getNode(SRC_NESTED)).toBeNull();
+  });
+
+  it("reports the represented root and directory query surface", async () => {
+    const harness = createHarness();
+    await openRootWith(harness, [directory(SRC)]);
+    harness.reader.addDirectory(SRC, { entries: [file("C:\\work\\src\\a.ts")] });
+    await harness.controller.expandDirectory(SRC);
+
+    expect(harness.controller.getRepresentedRootPath()).toBe(ROOT);
+    expect(harness.controller.isDirectoryRepresented(SRC)).toBe(true);
+    expect(harness.controller.isDirectoryLoaded(SRC)).toBe(true);
+    expect(harness.controller.isDirectoryRepresented(SRC_NESTED)).toBe(false);
+    expect(harness.controller.isDirectoryLoaded(SRC_NESTED)).toBe(false);
+
+    // A never-loaded directory is never reconciled by a background request.
+    const readsBefore = harness.reader.reads.length;
+    await harness.controller.reconcileDirectory(SRC_NESTED, "watcher");
+    expect(harness.reader.reads).toHaveLength(readsBefore);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
 /* Refresh                                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -789,7 +1109,9 @@ describe("ExplorerController root availability (FR-088)", () => {
     expect(state.contextId).not.toBeNull();
     expect(state.rootUnavailable).toBe(true);
     expect(state.root?.loadState).toBe("error");
-    expect(state.root?.errorMessage).toBe("The drive is not ready.");
+    // The condition is projected by the panel-level notice, not by a raw
+    // filesystem message on the root row (FR-095).
+    expect(state.root?.errorMessage).toBeUndefined();
     expect(harness.rootUnavailable).toEqual([true]);
   });
 
@@ -997,5 +1319,292 @@ describe("ExplorerController mutation reconciliation (FR-086)", () => {
     harness.controller.applyDeletedEntry(SRC);
 
     expect(harness.controller.getSelectedPath()).toBe("C:\\work\\src2\\c.ts");
+  });
+});
+
+describe("ExplorerController root identity (006 FR-097)", () => {
+  it("does not adopt a root path that now resolves somewhere else", async () => {
+    const harness = createHarness();
+    harness.reader.addDirectory(ROOT, {
+      entries: [file("C:\\work\\a.txt")],
+    });
+    await openContext(harness);
+    expect(harness.controller.getState().rootUnavailable).toBe(false);
+
+    // The same spelling now names a different canonical directory: the root was
+    // moved and a junction was re-pointed at it. 006 must not follow that.
+    harness.reader.addDirectory(ROOT, {
+      entries: [file("C:\\work\\elsewhere.txt")],
+      canonicalPath: "D:\\other",
+      comparisonKey: keyFor("D:\\other"),
+    });
+    await harness.controller.loadRoot();
+    await harness.controller.whenIdle();
+
+    const state = harness.controller.getState();
+    expect(state.rootUnavailable).toBe(true);
+    expect(state.root?.loadState).toBe("error");
+    // The root's condition is projected once, at panel level: a node-level
+    // message inside the Tree would duplicate it and collide with the rows.
+    expect(state.root?.errorMessage).toBeUndefined();
+    expect(harness.rootUnavailable).toContain(true);
+    // The previous children were not replaced by the other directory's.
+    expect(state.root?.children?.map((child) => child.name)).toEqual(["a.txt"]);
+  });
+
+  it("keeps a failed root read out of the Tree and localizes a child failure", async () => {
+    const harness = createHarness();
+    harness.reader.addDirectory(ROOT, {
+      entries: [directory(SRC), file("C:\\work\\a.txt")],
+    });
+    await openContext(harness);
+    expect(harness.controller.getState().root?.children).toHaveLength(2);
+
+    // The whole Workspace disappears on disk (moved away or deleted).
+    harness.reader.failWith(ROOT, {
+      code: "io_directory",
+      message:
+        "Cannot read directory C:\\work: 系统找不到指定的文件。 (os error 2)",
+    });
+    await harness.controller.loadRoot();
+    await harness.controller.whenIdle();
+
+    const state = harness.controller.getState();
+    expect(state.rootUnavailable).toBe(true);
+    expect(state.root?.loadState).toBe("error");
+    // No raw filesystem message on the root row; the panel notice is the surface
+    // and Refresh/periodic retries remain the recovery path (FR-095).
+    expect(state.root?.errorMessage).toBeUndefined();
+    // Cached children survive: an unreadable root is not a confirmed deletion.
+    expect(state.root?.children?.map((child) => child.name)).toEqual([
+      "src",
+      "a.txt",
+    ]);
+
+    // A *non-root* failure stays localized to its own node (FR-025).
+    harness.reader.failWith(SRC, {
+      code: "io_directory",
+      message: "Access is denied.",
+    });
+    await harness.controller.expandDirectory(SRC);
+
+    const src = harness.controller.getNode(SRC) as {
+      loadState: string;
+      errorMessage?: string;
+    };
+    expect(src.loadState).toBe("error");
+    expect(src.errorMessage).toBe("Access is denied.");
+    // The root is still unavailable, and still carries no message of its own.
+    expect(harness.controller.getState().root?.errorMessage).toBeUndefined();
+  });
+
+  it("recovers when the original root resolves to its own identity again", async () => {
+    const harness = createHarness();
+    harness.reader.addDirectory(ROOT, { entries: [file("C:\\work\\a.txt")] });
+    await openContext(harness);
+
+    harness.reader.addDirectory(ROOT, {
+      entries: [],
+      canonicalPath: "D:\\other",
+      comparisonKey: keyFor("D:\\other"),
+    });
+    await harness.controller.loadRoot();
+    expect(harness.controller.getState().rootUnavailable).toBe(true);
+
+    // The original directory is restored at its original path.
+    harness.reader.addDirectory(ROOT, {
+      entries: [file("C:\\work\\a.txt"), file("C:\\work\\b.txt")],
+    });
+    await harness.controller.loadRoot();
+    await harness.controller.whenIdle();
+
+    const state = harness.controller.getState();
+    expect(state.rootUnavailable).toBe(false);
+    expect(state.root?.loadState).toBe("loaded");
+    expect(state.root?.children?.map((child) => child.name)).toEqual([
+      "a.txt",
+      "b.txt",
+    ]);
+  });
+});
+
+/**
+ * Opens a Workspace whose root holds exactly `entries`.
+ *
+ * Module-level so the late 006 interaction-state cases share one fixture setup
+ * with the interaction-state describe.
+ */
+async function openRootWith(
+  harness: Harness,
+  entries: readonly WorkspaceDirectoryEntry[],
+): Promise<void> {
+  harness.reader.addDirectory(ROOT, { entries: [...entries] });
+  await openContext(harness);
+}
+
+describe("ExplorerController inline editor across relocation (FR-087, FR-088)", () => {
+  it("cancels an inline rename whose own target was relocated", async () => {
+    const harness = createHarness();
+    await openRootWith(harness, [
+      withIdentity(file("C:\\work\\beta.txt"), "obj:beta"),
+    ]);
+    harness.controller.beginRename("C:\\work\\beta.txt");
+    expect(harness.controller.getInlineEdit()).not.toBeNull();
+
+    // The very entry being renamed moved: rebasing the draft would let a commit
+    // rename a path the user never chose, so the edit is cancelled before the new
+    // structure is applied (FR-087, US6-AC5).
+    harness.reader.addDirectory(ROOT, {
+      entries: [withIdentity(file("C:\\work\\moved.txt"), "obj:beta")],
+    });
+    const result = await harness.controller.reconcileDirectory(ROOT, "watcher");
+
+    expect(result.relocations).toHaveLength(1);
+    expect(harness.controller.getInlineEdit()).toBeNull();
+    expect(harness.controller.getNode("C:\\work\\moved.txt")).not.toBeNull();
+  });
+
+  it("follows a relocated parent for an inline create draft", async () => {
+    const harness = createHarness();
+    await openRootWith(harness, [
+      withIdentity(directory(SRC), "obj:src"),
+    ]);
+    harness.reader.addDirectory(SRC, { entries: [] });
+    await harness.controller.expandDirectory(SRC);
+    harness.controller.beginCreate("file", SRC);
+
+    // Only the directory the entry will be created in moved, so the draft is
+    // still valid under the new path (FR-088).
+    const MOVED = "C:\\work\\lib";
+    harness.reader.addDirectory(ROOT, {
+      entries: [withIdentity(directory(MOVED), "obj:src")],
+    });
+    await harness.controller.reconcileDirectory(ROOT, "watcher");
+
+    expect(harness.controller.getInlineEdit()).toEqual({
+      type: "create-file",
+      parentPath: MOVED,
+      draftName: "",
+    });
+  });
+});
+
+describe("ExplorerController bounded sweep over hundreds of loaded directories (T085, T142)", () => {
+  it("returns only the root and the currently expanded directories", async () => {
+    const harness = createHarness();
+    const MANY = Array.from({ length: 200 }, (_unused, index) =>
+      `C:\\work\\pkg-${String(index).padStart(3, "0")}`,
+    );
+    harness.reader.addDirectory(ROOT, {
+      entries: MANY.map((path) => directory(path)),
+    });
+    await openContext(harness);
+
+    // Hundreds of loaded-but-collapsed directories: each is read once, then
+    // collapsed again, so cached history exists without being part of the sweep.
+    for (const path of MANY) {
+      harness.reader.addDirectory(path, { entries: [file(`${path}\\index.ts`)] });
+      await harness.controller.expandDirectory(path);
+      await harness.controller.toggleDirectory(path);
+    }
+
+    const EXPANDED = MANY.slice(0, 3);
+    for (const path of EXPANDED) {
+      await harness.controller.expandDirectory(path);
+    }
+    await harness.controller.whenIdle();
+
+    const paths = harness.controller.listExpandedDirectoryPaths();
+
+    expect(paths[0]).toBe(ROOT);
+    expect(paths).toHaveLength(4);
+    expect(new Set(paths)).toEqual(new Set([ROOT, ...EXPANDED]));
+    for (const collapsed of MANY.slice(3)) {
+      expect(paths).not.toContain(collapsed);
+      // Loaded, just not expanded.
+      expect(harness.controller.isDirectoryLoaded(collapsed)).toBe(true);
+    }
+  });
+});
+
+  it("does not sweep below a collapsed ancestor but restores it on re-expansion", async () => {
+    const harness = createHarness();
+    const INNER = "C:\\work\\outer";
+    const DEEP = "C:\\work\\outer\\deep";
+    harness.reader.addDirectory(ROOT, { entries: [directory(INNER)] });
+    harness.reader.addDirectory(INNER, { entries: [directory(DEEP)] });
+    harness.reader.addDirectory(DEEP, {
+      entries: [file("C:\\work\\outer\\deep\\c.ts")],
+    });
+    await openContext(harness);
+    await harness.controller.expandDirectory(INNER);
+    await harness.controller.expandDirectory(DEEP);
+    expect(harness.controller.listExpandedDirectoryPaths()).toEqual([
+      ROOT,
+      INNER,
+      DEEP,
+    ]);
+
+    // Collapsing the ancestor hides the whole subtree: the hidden descendant must
+    // not be swept by periodic/recovery work even though it was expanded before
+    // (FR-074, US4-AC3).
+    await harness.controller.toggleDirectory(INNER);
+    expect(harness.controller.listExpandedDirectoryPaths()).toEqual([ROOT]);
+    expect(new Set(harness.controller.listExpandedDirectoryPaths())).not.toContain(
+      DEEP,
+    );
+    // Its own expansion state is remembered, not discarded.
+    const deep = harness.controller.getNode(DEEP) as { expanded: boolean };
+    expect(deep.expanded).toBe(true);
+
+    // Re-expanding the ancestor puts it back in the sweep, without a re-read of
+    // the hidden level being needed for that.
+    await harness.controller.expandDirectory(INNER);
+    expect(harness.controller.listExpandedDirectoryPaths()).toEqual([
+      ROOT,
+      INNER,
+      DEEP,
+    ]);
+  });
+
+describe("ExplorerController identity-less replacement (T145)", () => {
+  it("gives a same-path identity-less entry a fresh node with no inherited state", async () => {
+    const harness = createHarness();
+    const IDENTITY_LESS = "C:\\work\\pkg";
+    harness.reader.addDirectory(ROOT, {
+      entries: [withIdentity(directory(IDENTITY_LESS), null)],
+    });
+    harness.reader.addDirectory(IDENTITY_LESS, {
+      entries: [file("C:\\work\\pkg\\old.ts")],
+    });
+    await openContext(harness);
+
+    await harness.controller.expandDirectory(IDENTITY_LESS);
+    const before = harness.controller.getNode(IDENTITY_LESS) as ExplorerDirectoryNode;
+    expect(before.children).toHaveLength(1);
+    expect(before.expanded).toBe(true);
+
+    harness.controller.selectPath("C:\\work\\pkg\\old.ts");
+    harness.controller.beginRename("C:\\work\\pkg\\old.ts");
+
+    // The very same path reappears in the listing with no identity to prove it is
+    // still the same directory: the old node, its cache and the interaction state
+    // that pointed into it must not be inherited (FR-034, FR-042).
+    harness.reader.addDirectory(ROOT, {
+      entries: [withIdentity(directory(IDENTITY_LESS), null)],
+    });
+    const result = await harness.controller.reconcileDirectory(ROOT, "watcher");
+
+    expect(result.removedPaths).toEqual([IDENTITY_LESS]);
+    expect(result.addedPaths).toEqual([IDENTITY_LESS]);
+
+    const after = harness.controller.getNode(IDENTITY_LESS) as ExplorerDirectoryNode;
+    expect(after).not.toBe(before);
+    expect(after.children).toBeUndefined();
+    expect(after.loadState).toBe("not-loaded");
+    expect(after.expanded).toBe(false);
+    // Selection and the inline rename both pointed into the replaced node.
+    expect(harness.controller.getSelectedPath()).toBeNull();
+    expect(harness.controller.getInlineEdit()).toBeNull();
   });
 });

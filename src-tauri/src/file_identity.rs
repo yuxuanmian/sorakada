@@ -65,6 +65,16 @@ pub struct ResolvedPathIdentity {
     pub kind: ResolvedPathKind,
     /// Metadata when the target exists.
     pub disk_revision: Option<DiskRevision>,
+    /// Opaque identity of the object `canonical_path` resolves to (006).
+    ///
+    /// It is *not* an ownership key: [`Self::comparison_key`] keeps owning path
+    /// and destination semantics, exactly as it did before 006. This token only
+    /// adds the one fact a canonical path cannot carry — whether the object at a
+    /// *different* path is the same filesystem object, which is what makes a
+    /// confirmed external rename/move provable instead of guessed. It follows
+    /// the final link exactly like the rest of this identity, and it is `None`
+    /// when the platform cannot supply a reliable value.
+    pub object_identity: Option<String>,
 }
 
 /// Request payload of the `inspect_file_path` command.
@@ -136,6 +146,7 @@ pub fn resolve_path_identity(
             comparison_key: comparison_key(&canonical),
             kind,
             disk_revision: Some(disk_revision_for(&metadata)),
+            object_identity: object_identity(&canonical, true),
         });
     }
 
@@ -169,6 +180,10 @@ pub fn resolve_path_identity(
         comparison_key: comparison_key(&canonical),
         kind: ResolvedPathKind::Missing,
         disk_revision: None,
+        // A destination that does not exist yet has no object to identify. The
+        // token appears only once the object really exists, which is what keeps
+        // "not created yet" from masquerading as "same object".
+        object_identity: None,
     })
 }
 
@@ -230,12 +245,166 @@ fn canonical_directory(path: &str) -> Result<std::path::PathBuf, FileCommandErro
     Ok(canonical)
 }
 
+/* -------------------------------------------------------------------- */
+/* Directory comparison contract (006 / T156)                            */
+/* -------------------------------------------------------------------- */
+
+/// How one *directory* compares the names it contains.
+///
+/// Case sensitivity is a property of a directory rather than of a platform:
+/// Windows 10 1803+ can mark a single directory case-sensitive (the WSL
+/// interoperability flag), a Linux filesystem compares exactly everywhere, and a
+/// network share may answer neither way. Every consumer that has to decide "may
+/// a differently-cased spelling name the same entry here?" therefore asks this
+/// one contract instead of re-implementing a platform check.
+///
+/// `Some(true)` means the directory distinguishes case, `Some(false)` means it
+/// does not, and `None` means the platform could not report it. A caller that
+/// needs a decision uses [`directory_case_sensitive`], which resolves `None`
+/// conservatively.
+pub(crate) trait CaseComparator {
+    /// The rule of `directory`, or `None` when it cannot be determined.
+    fn case_sensitivity(&self, directory: &Path) -> Option<bool>;
+}
+
+/// The operating system's own answer.
+pub(crate) struct PlatformCaseComparator;
+
+impl CaseComparator for PlatformCaseComparator {
+    fn case_sensitivity(&self, directory: &Path) -> Option<bool> {
+        platform_directory_case_sensitive(directory)
+    }
+}
+
+/// Whether names inside `directory` are compared case-sensitively.
+///
+/// Conservative by construction: a directory whose rule cannot be reported is
+/// treated as case-*sensitive*, so nothing may fall back to a differently-cased
+/// spelling — a Rename/Delete source (FR-066) or a relocation source
+/// (FR-045/FR-056) — without real evidence that the two spellings can be one
+/// entry. The price of the conservative answer is a refused convenience, never a
+/// mutation of an entry the user did not select (Constitution I).
+pub(crate) fn directory_case_sensitive(directory: &Path) -> bool {
+    directory_case_sensitive_with(&PlatformCaseComparator, directory)
+}
+
+/// [`directory_case_sensitive`] against an injected comparator.
+pub(crate) fn directory_case_sensitive_with(
+    comparator: &impl CaseComparator,
+    directory: &Path,
+) -> bool {
+    comparator.case_sensitivity(directory).unwrap_or(true)
+}
+
+/// The one place a name is folded for comparison.
+///
+/// Windows compares names with its own upcase table; this Unicode lowercase is
+/// the approximation the application already used, kept in a single function so
+/// no caller can invent a second rule.
+pub(crate) fn folded_name(name: &str) -> String {
+    name.to_lowercase()
+}
+
+/// Windows: the directory's own `FileCaseSensitiveInfo` flag.
+///
+/// The flag is read through a handle opened for attribute queries only: no
+/// descendant level is enumerated and no file content is touched. `None` covers
+/// everything the platform cannot answer — a filesystem driver that does not
+/// implement the information class, a share that refuses it, a path that is not
+/// a directory — and every caller then treats the directory as case-sensitive.
+#[cfg(windows)]
+fn platform_directory_case_sensitive(directory: &Path) -> Option<bool> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FileCaseSensitiveInfo, GetFileInformationByHandleEx,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    /// The four-byte output buffer of `FileCaseSensitiveInfo`
+    /// (`FILE_CASE_SENSITIVE_INFO`).
+    ///
+    /// `windows-sys` 0.59 binds the information class in
+    /// `Win32::Storage::FileSystem` but the matching struct only in its WDK
+    /// module, so the layout is declared here instead of pulling a second
+    /// binding surface in for one `u32`.
+    #[repr(C)]
+    struct CaseSensitiveInformation {
+        flags: u32,
+    }
+
+    /// `FILE_CS_FLAG_CASE_SENSITIVE_DIR`.
+    const CASE_SENSITIVE_DIRECTORY: u32 = 0x0000_0001;
+
+    let wide: Vec<u16> = directory
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: `wide` is a NUL-terminated buffer that outlives the call, the
+    // security attributes are absent and no argument is retained by the callee.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+
+    let mut information = CaseSensitiveInformation { flags: 0 };
+    // SAFETY: the handle was opened for attribute queries above, and
+    // `information` is a valid, writable, properly aligned value of exactly the
+    // size reported to the callee.
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileCaseSensitiveInfo,
+            std::ptr::addr_of_mut!(information).cast(),
+            std::mem::size_of::<CaseSensitiveInformation>() as u32,
+        )
+    };
+    // SAFETY: the handle is owned by this function and is not used afterwards.
+    unsafe { CloseHandle(handle) };
+
+    if read == 0 {
+        return None;
+    }
+
+    Some(information.flags & CASE_SENSITIVE_DIRECTORY != 0)
+}
+
+/// Other supported platforms: the platform rule *is* the directory rule.
+#[cfg(not(windows))]
+fn platform_directory_case_sensitive(_directory: &Path) -> Option<bool> {
+    Some(!PATHS_ARE_CASE_INSENSITIVE)
+}
+
 /// The path of `target` relative to `root`, or `None` when it is not contained.
 ///
-/// Comparison is per path component with the platform's own case rules, which is
-/// why this replaces any `starts_with`-style text check. `Some("")` means the
-/// two paths name the same object.
+/// Comparison walks the components of `root` against `target` under the rule of
+/// the directory that contains each one, which is why this replaces both a
+/// `starts_with`-style text check and any platform-wide folding. `Some("")` means
+/// the two paths name the same object.
 pub(crate) fn relative_within(root: &Path, target: &Path) -> Option<String> {
+    relative_within_with(&PlatformCaseComparator, root, target)
+}
+
+/// [`relative_within`] against an injected comparator.
+pub(crate) fn relative_within_with(
+    comparator: &impl CaseComparator,
+    root: &Path,
+    target: &Path,
+) -> Option<String> {
     let root_components: Vec<_> = root.components().collect();
     let target_components: Vec<_> = target.components().collect();
 
@@ -243,12 +412,26 @@ pub(crate) fn relative_within(root: &Path, target: &Path) -> Option<String> {
         return None;
     }
 
+    // Component `index` is contained by the components before it, and that prefix
+    // is the directory whose rule decides whether the two spellings can name one
+    // entry. A volume/share prefix and the root itself have no containing
+    // directory, so the platform rule governs them.
+    let mut container: Option<std::path::PathBuf> = None;
     for (root_component, target_component) in
         root_components.iter().zip(target_components.iter())
     {
-        if !same_component(root_component, target_component) {
+        if !same_component(
+            comparator,
+            container.as_deref(),
+            root_component,
+            target_component,
+        ) {
             return None;
         }
+
+        let mut next = container.unwrap_or_default();
+        next.push(root_component.as_os_str());
+        container = Some(next);
     }
 
     let remainder = &target_components[root_components.len()..];
@@ -264,39 +447,252 @@ pub(crate) fn relative_within(root: &Path, target: &Path) -> Option<String> {
     Some(relative.to_string_lossy().to_string())
 }
 
-/// Whether two path components name the same segment under platform rules.
-fn same_component(left: &std::path::Component<'_>, right: &std::path::Component<'_>) -> bool {
-    let left = left.as_os_str().to_string_lossy();
-    let right = right.as_os_str().to_string_lossy();
+/// Whether two path components name one entry under `directory`'s rule.
+///
+/// `directory` is the container of the component being compared, or `None` for a
+/// prefix/root component, which the platform rule governs. Two identical
+/// spellings are answered without asking any directory at all, which is what
+/// keeps the per-event containment checks free of filesystem access in the
+/// common case (FR-013, FR-014).
+fn same_component(
+    comparator: &impl CaseComparator,
+    directory: Option<&Path>,
+    left: &std::path::Component<'_>,
+    right: &std::path::Component<'_>,
+) -> bool {
+    let left = left.as_os_str();
+    let right = right.as_os_str();
 
-    #[cfg(windows)]
-    {
-        left.eq_ignore_ascii_case(&right)
+    if left == right {
+        return true;
     }
 
-    #[cfg(not(windows))]
-    {
-        left == right
+    let case_insensitive = match directory {
+        Some(directory) => !directory_case_sensitive_with(comparator, directory),
+        None => PATHS_ARE_CASE_INSENSITIVE,
+    };
+
+    if !case_insensitive {
+        return false;
+    }
+
+    folded_name(&left.to_string_lossy()) == folded_name(&right.to_string_lossy())
+}
+
+/// The comparison key of a canonical path, component by component.
+///
+/// This stays the *only* path-ownership key 002 uses, and it is still derived
+/// from the canonical path rather than from a native file id, so distinct
+/// hard-link paths keep distinct keys. What changed with T156 is that a name is
+/// folded only when the directory that contains it really compares names
+/// case-insensitively: two paths that differ by case inside a case-sensitive
+/// directory stay two keys instead of collapsing into one.
+pub(crate) fn comparison_key(canonical: &Path) -> String {
+    comparison_key_with(&PlatformCaseComparator, canonical)
+}
+
+/// [`comparison_key`] against an injected comparator.
+///
+/// A name whose folding would not change it is rendered without asking its
+/// directory at all: the answer cannot affect the key, which keeps the
+/// per-event watcher path (and every one-level read) from opening handles it
+/// does not need.
+pub(crate) fn comparison_key_with(
+    comparator: &impl CaseComparator,
+    canonical: &Path,
+) -> String {
+    use std::ffi::OsString;
+    use std::path::Component;
+
+    let mut parts: Vec<OsString> = Vec::new();
+    // The directory that contains the component being rendered next.
+    let mut container = std::path::PathBuf::new();
+
+    for component in canonical.components() {
+        let text = component.as_os_str();
+
+        match component {
+            Component::Prefix(_) => parts.push(text.to_os_string()),
+            // `C:` + `\` and `\\?\C:` + `\` keep one volume prefix, while a Unix
+            // root contributes the leading separator the join below supplies.
+            Component::RootDir => match parts.last_mut() {
+                Some(last) => last.push(std::path::MAIN_SEPARATOR.to_string()),
+                None => parts.push(OsString::new()),
+            },
+            Component::ParentDir => parts.push(text.to_os_string()),
+            // A `.` never names an entry, so it contributes neither text nor a
+            // directory level.
+            Component::CurDir => continue,
+            Component::Normal(_) => {
+                let spelled = text.to_string_lossy();
+                let folded = folded_name(&spelled);
+                let rendered = if folded == spelled
+                    || directory_case_sensitive_with(comparator, &container)
+                {
+                    text.to_os_string()
+                } else {
+                    OsString::from(folded)
+                };
+                parts.push(rendered);
+            }
+        }
+
+        container.push(text);
+    }
+
+    let separator = std::path::MAIN_SEPARATOR.to_string();
+    parts
+        .iter()
+        .map(|part| part.to_string_lossy().to_string())
+        .collect::<Vec<String>>()
+        .join(&separator)
+}
+
+/// Whether this *platform* compares paths case-insensitively.
+///
+/// This is no longer the whole rule — [`directory_case_sensitive`] reports the
+/// rule of a concrete directory and is what every consumer must ask — but it
+/// stays the fallback for the one kind of path component that has no containing
+/// directory: a volume prefix (`C:`) or a UNC share, and the root itself.
+/// Windows is the case-insensitive platform this application targets; every
+/// other supported platform compares exactly.
+pub(crate) const PATHS_ARE_CASE_INSENSITIVE: bool = cfg!(windows);
+
+/* -------------------------------------------------------------------- */
+/* Filesystem-object identity (006)                                      */
+/* -------------------------------------------------------------------- */
+
+/// Opaque identity of the filesystem object `path` names.
+///
+/// 006 needs to prove that the object at one path *is* the object that used to
+/// be at another path, because a canonical path changes exactly when a rename or
+/// move happens and therefore cannot answer that question at all. The token this
+/// function returns:
+///
+/// - stays the same for one object across an in-filesystem rename/move;
+/// - differs for a delete/recreate replacement at the same path on the platforms
+///   that provide a reliable value;
+/// - is `None` when the platform/filesystem cannot supply one, because inventing
+///   continuity is worse than admitting it cannot be proven (FR-041, FR-042).
+///
+/// `follow_final_link` selects which of the two identity domains is reported:
+/// `true` identifies the object the path resolves to (what a document binding
+/// stores), `false` identifies the entry itself without following a final
+/// link/reparse point (what an Explorer entry carries). 006 never substitutes
+/// one domain for the other.
+///
+/// Obtaining the token reads metadata only: never file contents, and never a
+/// descendant level of a directory. The token is opaque above this module — no
+/// frontend code parses it, folds its case or uses it as a path-ownership key,
+/// and this crate never re-derives a path from it.
+pub(crate) fn object_identity(path: &Path, follow_final_link: bool) -> Option<String> {
+    platform_object_identity(path, follow_final_link)
+}
+
+/// Windows: volume identity plus the file index the volume assigns the object.
+///
+/// The combination is what a rename preserves and what a delete/recreate
+/// replacement cannot keep, so it is exactly the continuity evidence 006 needs.
+/// The pair is read through a native handle because the safe `std` accessors for
+/// it are not stable on this toolchain; the handle is opened for attribute
+/// queries only and is closed before returning.
+#[cfg(windows)]
+fn platform_object_identity(path: &Path, follow_final_link: bool) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // `FILE_FLAG_BACKUP_SEMANTICS` is what lets a directory be opened at all,
+    // and `FILE_FLAG_OPEN_REPARSE_POINT` is what makes the answer describe a
+    // link entry itself instead of the object it points at.
+    let mut flags = FILE_FLAG_BACKUP_SEMANTICS;
+    if !follow_final_link {
+        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    }
+
+    // SAFETY: `wide` is a NUL-terminated buffer that outlives the call, the
+    // security attributes are absent and no argument is retained by the callee.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            flags,
+            std::ptr::null_mut(),
+        )
+    };
+
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+
+    // SAFETY: the handle was just opened above and `information` is a valid,
+    // writable, properly aligned value for the duration of the call.
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let read = unsafe { GetFileInformationByHandle(handle, &mut information) };
+    // SAFETY: the handle is owned by this function and is not used afterwards.
+    unsafe { CloseHandle(handle) };
+
+    if read == 0 {
+        return None;
+    }
+
+    let index = ((information.nFileIndexHigh as u64) << 32) | information.nFileIndexLow as u64;
+    windows_object_token(Some(information.dwVolumeSerialNumber), Some(index))
+}
+
+/// Builds the Windows token, refusing to invent one from unusable parts.
+#[cfg(windows)]
+fn windows_object_token(volume: Option<u32>, index: Option<u64>) -> Option<String> {
+    match (volume, index) {
+        (Some(volume), Some(index)) if volume != 0 && index != 0 => {
+            Some(format!("win:{volume:08x}:{index:016x}"))
+        }
+        _ => None,
     }
 }
 
-/// The platform's own path-equality semantics.
-///
-/// Windows compares paths case-insensitively, so the key is case-folded there.
-/// Distinct hard-link paths are deliberately *not* folded together: 002 keys on
-/// the canonical path, not on a native file id.
-pub(crate) fn comparison_key(canonical: &Path) -> String {
-    let text = canonical.to_string_lossy().to_string();
+/// Other supported platforms: the device/inode pair the kernel assigns.
+#[cfg(unix)]
+fn platform_object_identity(path: &Path, follow_final_link: bool) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
 
-    #[cfg(windows)]
-    {
-        text.to_lowercase()
+    let metadata = if follow_final_link {
+        fs::metadata(path)
+    } else {
+        fs::symlink_metadata(path)
+    }
+    .ok()?;
+
+    unix_object_token(metadata.dev(), metadata.ino())
+}
+
+/// Builds the device/inode token, refusing to invent one from unusable parts.
+#[cfg(unix)]
+fn unix_object_token(device: u64, inode: u64) -> Option<String> {
+    if inode == 0 {
+        return None;
     }
 
-    #[cfg(not(windows))]
-    {
-        text
-    }
+    Some(format!("unix:{device:x}:{inode:x}"))
+}
+
+/// A platform without a stable object identity reports that honestly.
+#[cfg(not(any(windows, unix)))]
+fn platform_object_identity(_path: &Path, _follow_final_link: bool) -> Option<String> {
+    None
 }
 
 /// Modification time in milliseconds since the Unix epoch, when available.
@@ -602,6 +998,224 @@ mod tests {
         path.to_string_lossy().to_string()
     }
 
+    /// Builds an absolute path the same way on every platform, so the injected
+    /// comparison tests below exercise the component walk everywhere.
+    fn rooted(parts: &[&str]) -> PathBuf {
+        let mut path = if cfg!(windows) {
+            PathBuf::from("C:\\")
+        } else {
+            PathBuf::from("/")
+        };
+        for part in parts {
+            path.push(part);
+        }
+        path
+    }
+
+    /// A comparator that models a filesystem whose directories can differ.
+    ///
+    /// A case-sensitive Windows directory cannot be created portably in a test
+    /// (the flag needs a volume/driver that supports it and cannot be assumed
+    /// here), so the per-directory contract is pinned against this model instead
+    /// — including the directories it was actually asked about, which is what
+    /// proves which directory governs which path component.
+    struct ModelComparator {
+        case_sensitive: Vec<PathBuf>,
+        unreported: Vec<PathBuf>,
+        queried: std::cell::RefCell<Vec<PathBuf>>,
+    }
+
+    impl ModelComparator {
+        fn new(case_sensitive: &[PathBuf]) -> Self {
+            Self {
+                case_sensitive: case_sensitive.to_vec(),
+                unreported: Vec::new(),
+                queried: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn unreported(directory: PathBuf) -> Self {
+            Self {
+                case_sensitive: Vec::new(),
+                unreported: vec![directory],
+                queried: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn was_asked_about(&self, directory: &Path) -> bool {
+            self.queried.borrow().iter().any(|asked| asked == directory)
+        }
+    }
+
+    impl CaseComparator for ModelComparator {
+        fn case_sensitivity(&self, directory: &Path) -> Option<bool> {
+            self.queried.borrow_mut().push(directory.to_path_buf());
+
+            if self.unreported.iter().any(|other| other == directory) {
+                return None;
+            }
+
+            Some(
+                self.case_sensitive
+                    .iter()
+                    .any(|other| other == directory),
+            )
+        }
+    }
+
+    /// T156: the platform rule is not the directory rule. A directory that is
+    /// case-sensitive on its own (and contains no case-colliding pair to prove
+    /// it) must keep two differently-cased names apart in the key.
+    #[test]
+    fn comparison_key_follows_the_rule_of_the_containing_directory() {
+        let work = rooted(&["work"]);
+        let sensitive = rooted(&["work", "real"]);
+        let model = ModelComparator::new(&[sensitive.clone()]);
+
+        // Inside the case-sensitive directory, case is part of the name.
+        assert_ne!(
+            comparison_key_with(&model, &rooted(&["work", "real", "Notes.txt"])),
+            comparison_key_with(&model, &rooted(&["work", "real", "notes.txt"])),
+            "a case-sensitive directory keeps two spellings apart"
+        );
+
+        // The directory that contains `real` is the parent, which is not
+        // case-sensitive, so `REAL` and `real` still name that same directory.
+        assert_eq!(
+            comparison_key_with(&model, &rooted(&["work", "real", "a.ts"])),
+            comparison_key_with(&model, &rooted(&["work", "REAL", "a.ts"])),
+            "the rule of the containing directory is what decides, per component"
+        );
+
+        // Which directory governs which component: `real` is decided by `work`,
+        // and `Notes.txt` by `real` itself.
+        assert!(
+            model.was_asked_about(&work),
+            "the name `real` must be decided by its containing directory"
+        );
+        assert!(
+            model.was_asked_about(&sensitive),
+            "the name `Notes.txt` must be decided by the case-sensitive directory"
+        );
+
+        // And the same names inside a case-insensitive directory do fold.
+        let insensitive = ModelComparator::new(&[]);
+        assert_eq!(
+            comparison_key_with(&insensitive, &rooted(&["work", "real", "Notes.txt"])),
+            comparison_key_with(&insensitive, &rooted(&["work", "real", "notes.txt"])),
+            "a case-insensitive directory folds its names"
+        );
+    }
+
+    /// T156: an answer the platform cannot give is treated as case-sensitive, so
+    /// no convenience may reuse a differently-cased spelling without evidence.
+    #[test]
+    fn an_unreported_directory_rule_is_treated_as_case_sensitive() {
+        let directory = rooted(&["work"]);
+        let model = ModelComparator::unreported(directory.clone());
+
+        assert!(
+            directory_case_sensitive_with(&model, &directory),
+            "an unavailable answer is conservative"
+        );
+        assert_ne!(
+            comparison_key_with(&model, &rooted(&["work", "Notes.txt"])),
+            comparison_key_with(&model, &rooted(&["work", "notes.txt"])),
+            "without a reported rule no two spellings may share one key"
+        );
+    }
+
+    /// T156: containment walks components under the rule of each component's own
+    /// containing directory rather than one platform-wide rule.
+    #[test]
+    fn relative_within_uses_the_rule_of_the_directory_containing_each_component() {
+        let model = ModelComparator::new(&[rooted(&["work", "real"])]);
+
+        // `Sub` and `sub` are two entries inside the case-sensitive directory.
+        assert_eq!(
+            relative_within_with(
+                &model,
+                &rooted(&["work", "real", "Sub"]),
+                &rooted(&["work", "real", "sub", "a.ts"]),
+            ),
+            None,
+            "a case-distinct component inside a case-sensitive directory is not containment"
+        );
+
+        // The case-sensitive directory's *own* name is still decided by its
+        // parent, so a case-flipped spelling of it names the same directory.
+        assert_eq!(
+            relative_within_with(
+                &model,
+                &rooted(&["work", "real"]),
+                &rooted(&["work", "REAL", "a.ts"]),
+            ),
+            Some("a.ts".to_string()),
+            "the parent's rule governs the case-sensitive directory's own name"
+        );
+
+        // A case-insensitive directory keeps folding, so nothing regressed there.
+        assert_eq!(
+            relative_within_with(
+                &model,
+                &rooted(&["work", "other"]),
+                &rooted(&["work", "OTHER", "a.ts"]),
+            ),
+            Some("a.ts".to_string())
+        );
+    }
+
+    /// T156: the filesystem's real answer is what the application uses. The
+    /// directory's own behaviour is the oracle: two names that differ only by
+    /// case can coexist only in a case-sensitive directory.
+    #[test]
+    fn the_directory_rule_matches_what_the_filesystem_actually_does() {
+        let dir = work_dir("case-rule");
+        let observed = case_distinct_names_can_coexist(&dir);
+
+        assert_eq!(
+            directory_case_sensitive(&dir),
+            observed,
+            "the reported rule must match what this directory really does"
+        );
+
+        // Where the platform answers at all, it must answer the same thing: this
+        // is the native call the whole contract is built on.
+        if let Some(reported) = PlatformCaseComparator.case_sensitivity(&dir) {
+            assert_eq!(reported, observed, "the platform's own answer agrees");
+        }
+
+        // A path that cannot be asked at all answers `None`, and the conservative
+        // answer is what every caller then sees.
+        let absent = dir.join("absent");
+        assert_eq!(PlatformCaseComparator.case_sensitivity(&absent), None);
+        assert!(directory_case_sensitive(&absent));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Whether two names that differ only by case can both be created in
+    /// `directory`, asked of the filesystem itself.
+    fn case_distinct_names_can_coexist(directory: &Path) -> bool {
+        let lower = directory.join("case-probe.txt");
+        let upper = directory.join("CASE-PROBE.TXT");
+
+        let created = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lower)
+            .is_ok()
+            && fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&upper)
+                .is_ok();
+
+        let _ = fs::remove_file(&lower);
+        let _ = fs::remove_file(&upper);
+        created
+    }
+
     #[test]
     fn existing_file_reports_file_kind_and_revision() {
         let dir = work_dir("existing-file");
@@ -765,7 +1379,7 @@ mod tests {
         )
         .expect("serialize");
 
-        assert_eq!(value.as_object().expect("object").len(), 5);
+        assert_eq!(value.as_object().expect("object").len(), 6);
         assert_eq!(value["kind"], json!("file"));
         assert_eq!(value["requestedPath"], json!(display(&path)));
         assert!(
@@ -775,6 +1389,10 @@ mod tests {
         assert!(
             value["comparisonKey"].is_string(),
             "comparisonKey is part of the contract"
+        );
+        assert!(
+            value["objectIdentity"].is_string(),
+            "an existing object carries its opaque 006 identity"
         );
 
         let revision = value["diskRevision"].as_object().expect("revision object");
@@ -788,6 +1406,149 @@ mod tests {
         assert!(value.get("requested_path").is_none());
         assert!(value.get("comparison_key").is_none());
         assert!(value.get("modified_time_millis").is_none());
+        assert!(value.get("object_identity").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// FR-042: a destination that does not exist yet has no object identity, and
+    /// the wire field is nullable rather than absent.
+    #[test]
+    fn missing_identity_serializes_a_null_object_identity() {
+        let dir = work_dir("wire-shape-missing");
+        let target = dir.join("brand-new.txt");
+
+        let value =
+            serde_json::to_value(resolve_path_identity(&display(&target), true).expect("resolve"))
+                .expect("serialize");
+
+        assert_eq!(value.as_object().expect("object").len(), 6);
+        assert_eq!(value["kind"], json!("missing"));
+        assert_eq!(value["objectIdentity"], json!(null));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Filesystem-object identity (006)                                  */
+    /* ---------------------------------------------------------------- */
+
+    /// The identity of an object must survive a rename inside one filesystem,
+    /// which is the entire reason 006 needs a token that is not a path.
+    #[test]
+    fn object_identity_is_stable_across_a_rename() {
+        let dir = work_dir("object-rename");
+        let before = write_file(&dir, "before.txt", b"content");
+
+        let original = resolve_path_identity(&display(&before), false)
+            .expect("resolve the original path")
+            .object_identity;
+
+        let after = dir.join("after.txt");
+        fs::rename(&before, &after).expect("rename the fixture");
+
+        let renamed = resolve_path_identity(&display(&after), false)
+            .expect("resolve the renamed path")
+            .object_identity;
+
+        match (&original, &renamed) {
+            (Some(original), Some(renamed)) => assert_eq!(
+                original, renamed,
+                "one object must keep one identity across a rename"
+            ),
+            (None, None) => {
+                // A filesystem without usable identity must degrade to `None`
+                // rather than to a token, and the comparison key must still have
+                // followed the rename.
+                assert_ne!(
+                    resolve_path_identity(&display(&before), true)
+                        .expect("resolve the old spelling")
+                        .comparison_key,
+                    resolve_path_identity(&display(&after), false)
+                        .expect("resolve the new spelling")
+                        .comparison_key,
+                    "without an object token the path identity still changes"
+                );
+            }
+            other => panic!("one side of the rename reported an identity and the other did not: {other:?}"),
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A delete/recreate replacement at the same path must not inherit the old
+    /// token: path equality is not object continuity (FR-034).
+    #[test]
+    fn object_identity_distinguishes_a_recreated_replacement() {
+        let dir = work_dir("object-recreate");
+        let target = write_file(&dir, "notes.txt", b"first");
+
+        let before = resolve_path_identity(&display(&target), false)
+            .expect("resolve the original")
+            .object_identity;
+
+        fs::remove_file(&target).expect("delete the fixture");
+        write_file(&dir, "notes.txt", b"second");
+
+        let after = resolve_path_identity(&display(&target), false)
+            .expect("resolve the replacement")
+            .object_identity;
+
+        if let (Some(before), Some(after)) = (&before, &after) {
+            assert_ne!(
+                before, after,
+                "a recreated file is a different filesystem object"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Unusable platform parts must produce `None` rather than a token that
+    /// would compare equal to every other unavailable object.
+    #[test]
+    #[cfg(windows)]
+    fn unusable_windows_parts_produce_no_object_token() {
+        assert_eq!(windows_object_token(None, None), None);
+        assert_eq!(windows_object_token(Some(0), Some(42)), None);
+        assert_eq!(windows_object_token(Some(7), None), None);
+        assert_eq!(windows_object_token(Some(7), Some(0)), None);
+        assert!(
+            windows_object_token(Some(7), Some(42)).is_some(),
+            "a complete volume/index pair is a usable token"
+        );
+    }
+
+    /// The same rule for the device/inode spelling.
+    #[test]
+    #[cfg(unix)]
+    fn unusable_unix_parts_produce_no_object_token() {
+        assert_eq!(unix_object_token(3, 0), None);
+        assert!(unix_object_token(3, 9).is_some());
+    }
+
+    /// Directories and files both carry an identity, and a directory keeps it
+    /// across a rename just like a file does.
+    #[test]
+    fn object_identity_covers_directories() {
+        let dir = work_dir("object-directory");
+        let before = dir.join("before");
+        fs::create_dir(&before).expect("create the fixture directory");
+
+        let original = resolve_path_identity(&display(&before), false)
+            .expect("resolve the directory")
+            .object_identity;
+
+        let after = dir.join("after");
+        fs::rename(&before, &after).expect("rename the fixture directory");
+
+        let renamed = resolve_path_identity(&display(&after), false)
+            .expect("resolve the renamed directory")
+            .object_identity;
+
+        if let (Some(original), Some(renamed)) = (&original, &renamed) {
+            assert_eq!(original, renamed);
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }

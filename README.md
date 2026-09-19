@@ -2,11 +2,40 @@
 
 A modern, good-looking desktop text editor aimed at programmers
 
-> **Status: Early Development.** The single-file editing lifecycle (milestone M1) is
-> implemented: open, edit, save, save a copy, unsaved-work protection and a native
-> File/Edit menu with IDEA-style shortcuts. There is still no syntax highlighting,
-> tabs, workspace, search/replace or settings, and only UTF-8 (with or without BOM)
-> can be opened.
+> **Status: Early Development.** Six milestones are implemented: single-file editing
+> (M1), multi-document tabs (M2), the Workspace Explorer (M3), interaction polish
+> (M4), opened-document external-change detection (M5) and Workspace filesystem
+> synchronization (M6). There is still no syntax highlighting, search/replace,
+> settings, multi-root Workspace or Git integration, and only UTF-8 (with or
+> without BOM) can be opened.
+
+## Workspace filesystem synchronization (M6)
+
+The Explorer follows structural changes made outside Sorakada without ever turning
+into a recursive crawler:
+
+- **Structure converges from disk, not from events.** Watcher notifications are
+  hints only; the authoritative answer is a fresh one-level read of a directory
+  the Tree already represents. A never-opened directory is never read merely
+  because events happened below it.
+- **Confirmed rename/move continuity.** A rename or move preserves the Tree node
+  (cached subtree and expansion included) and rebinds open documents only when the
+  source and destination can be *proven* to be the same filesystem object — a
+  stable volume + file-index identity on Windows. Without that proof the result
+  degrades to remove + create, and M5's missing/conflict rules stay authoritative
+  for the document.
+- **Bounded under event storms.** Hints coalesce per represented directory,
+  recovery covers only the root plus currently expanded directories, and a
+  low-frequency periodic pass (plus focus regain and Manual Refresh) provides
+  eventual consistency. A collapsed `node_modules` with hundreds of thousands of
+  descendants is never enumerated.
+- **Internal operations stay safe.** Rename/Delete re-verify the selected entry
+  immediately before touching the filesystem, so an externally replaced object is
+  never renamed or trashed.
+
+The behavioral contract is `specs/006-workspace-filesystem-sync/spec.md`, the
+design is `plan.md`, and the task list plus verification evidence (including the
+manual acceptance matrix) is `tasks.md` in the same directory.
 
 ## Tech stack
 
@@ -87,5 +116,7 @@ cargo test          # Rust: byte-level file codec (run in src-tauri/)
 
 Native dialogs, menus, accelerators and close interception are validated manually;
 the end-to-end acceptance matrix lives in
-`specs/001-single-file-editing/quickstart.md`.
+`specs/001-single-file-editing/quickstart.md`. Workspace synchronization (M6) is
+covered by the deterministic suites above plus the manual matrix recorded in
+`specs/006-workspace-filesystem-sync/tasks.md`.
 

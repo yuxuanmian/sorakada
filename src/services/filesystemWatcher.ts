@@ -38,10 +38,29 @@ export interface WatchEvent {
   /**
    * The destination of an observed rename pair.
    *
-   * Retained so the later Workspace watcher can consume it. 005 must never treat
-   * it as an opened-document path migration (FR-024/scope contract).
+   * The Workspace consumer may offer it as a source/target *candidate*, which
+   * can narrow an identity match; it is never rename proof, and 005 must never
+   * treat it as an opened-document path migration.
    */
   renameTarget: string | null;
+  /**
+   * `path` relative to this subscription's watched directory (006).
+   *
+   * The backend watches a canonical directory spelling that can differ from the
+   * logical Workspace root the user chose, so 006 rebases this under
+   * `WorkContext.rootPath` instead of comparing raw watcher path text against
+   * Tree paths. `null` means the event path is not inside the watched directory.
+   * 005 ignores it.
+   */
+  relativePath: string | null;
+  /**
+   * `renameTarget` relative to the watched directory, or `null`.
+   *
+   * `null` when there is no target *or* when the target lies outside the watch:
+   * an outside target is a document-only relocation candidate and must never be
+   * used as an Explorer path.
+   */
+  renameTargetRelativePath: string | null;
 }
 
 /**
@@ -190,6 +209,15 @@ export function decodeWatchEventPayload(
       hint: value.hint,
       renameTarget:
         typeof value.renameTarget === "string" ? value.renameTarget : null,
+      // Both 006 fields are nullable by contract, so a missing or non-string
+      // value decodes to `null` rather than failing the whole payload: an
+      // undecodable *location* must not cost 005 its validation hint.
+      relativePath:
+        typeof value.relativePath === "string" ? value.relativePath : null,
+      renameTargetRelativePath:
+        typeof value.renameTargetRelativePath === "string"
+          ? value.renameTargetRelativePath
+          : null,
     };
   }
 

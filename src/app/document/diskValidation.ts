@@ -46,7 +46,28 @@ export type DiskValidationTrigger =
   | "window-focus"
   | "pre-save"
   | "post-subscription"
-  | "reappearance";
+  | "reappearance"
+  /**
+   * 006: the document was just rebound to a new path by a confirmed external
+   * rename/move.
+   *
+   * This trigger is the one case where the cheap revision comparison may not be
+   * trusted: the rebind adopted the destination's *current* metadata as the new
+   * baseline, so an immediate revision comparison against that same value would
+   * declare "unchanged" even when the move itself rewrote the content. A forced
+   * snapshot read is what keeps a real content conflict from being silently
+   * cleared (FR-061, plan §11).
+   */
+  | "external-relocation";
+
+/**
+ * Triggers that must read the supported snapshot instead of trusting a matching
+ * revision, because the baseline they would compare against was captured by the
+ * same observation that triggered the validation.
+ */
+const FORCED_SNAPSHOT_TRIGGERS: ReadonlySet<DiskValidationTrigger> = new Set([
+  "external-relocation",
+]);
 
 /** The exact binding a result may still be applied to. */
 export interface DiskBinding {
@@ -137,6 +158,11 @@ export function refreshedIdentity(
     comparisonKey: inspection.comparisonKey ?? binding.identity.comparisonKey,
     kind: "file",
     diskRevision: inspection.diskRevision,
+    // The inspection carries no object token of its own, so the binding's own
+    // continuity evidence is carried forward. It is never used as an ownership
+    // key here, and it never decides the outcome: the revision comparison and the
+    // snapshot read do.
+    objectIdentity: binding.identity.objectIdentity,
   };
 }
 
@@ -256,7 +282,12 @@ export class DiskValidator {
     // 005 deliberately does not hash content in order to catch pathological
     // external edits that preserve every observed metadata field — see the spec's
     // Assumptions.
-    if (revisionsMatch(binding.identity.diskRevision, inspection.diskRevision)) {
+    //
+    // The one exception is a forced-snapshot trigger: after an external
+    // relocation the adopted revision *is* the destination's current metadata, so
+    // a matching revision proves nothing about the content (FR-061).
+    const forced = FORCED_SNAPSHOT_TRIGGERS.has(request.trigger);
+    if (!forced && revisionsMatch(binding.identity.diskRevision, inspection.diskRevision)) {
       return { outcome: "unchanged", identity };
     }
 

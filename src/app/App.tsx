@@ -39,6 +39,7 @@ import { EmptyState } from "./shell/EmptyState";
 import { TabBar } from "./tabs/TabBar";
 import { installWindowLifecycle } from "./window/windowLifecycle";
 import { WorkContextManager } from "./workspace/workContextManager";
+import { WorkspaceWatchCoordinator } from "./workspace/workspaceWatchCoordinator";
 
 import "../styles/global.css";
 
@@ -130,6 +131,24 @@ export function App() {
         fileService: tauriFileService,
       }),
   );
+  /**
+   * 006: the Workspace watcher consumer.
+   *
+   * It sits *beside* the opened-document consumer, shares the same generic
+   * watcher, WorkContext and Explorer instances, and owns none of their facts:
+   * it only turns hints into bounded reconciliation requests. It is a separate
+   * object on purpose, so 005's document rules and 006's Tree rules cannot leak
+   * into one another.
+   */
+  const [workspaceWatcher] = useState(
+    () =>
+      new WorkspaceWatchCoordinator({
+        workContexts: workContext,
+        explorer: controller,
+        documents: manager,
+        watcher: tauriFilesystemWatcher,
+      }),
+  );
 
   const [snapshot, setSnapshot] = useState<DocumentManagerSnapshot>(() =>
     manager.getSnapshot(),
@@ -171,6 +190,10 @@ export function App() {
     // validation it starts is asynchronous, so nothing on this path can block a
     // keystroke or the first paint.
     void watcher.start();
+
+    // 006: the Workspace consumer starts after the document consumer, so both
+    // listen on the same channel before any payload can arrive.
+    void workspaceWatcher.start();
 
     // The bridge reports every state update with the document it was bound to,
     // which is what keeps a Tab switch from being credited to the wrong Tab.
@@ -359,6 +382,10 @@ export function App() {
       const unlistenFocus = await appWindow.onFocusChanged(({ payload }) => {
         if (payload) {
           watcher.validateAllOnWindowFocus();
+          // 006 focus regain (FR-079): request one bounded reconciliation of the
+          // currently relevant expanded Workspace area. Like the 005 call it
+          // schedules only and never awaits filesystem work.
+          workspaceWatcher.notifyFocusRegained();
         }
       });
 
@@ -430,6 +457,10 @@ export function App() {
       disposeWindow?.();
       void disposeMenu?.();
       void watcher.dispose();
+      // Both consumers are disposed exactly once per mounted lifecycle, in the
+      // same restart-safe style, so React Strict Mode cannot leave a second
+      // Workspace listener or timer behind.
+      void workspaceWatcher.dispose();
     };
   }, [
     actions,
@@ -440,6 +471,7 @@ export function App() {
     registry,
     watcher,
     workContext,
+    workspaceWatcher,
   ]);
 
   // Menu state has to follow document, Workspace and Explorer operation state,

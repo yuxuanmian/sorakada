@@ -263,13 +263,75 @@ class FakeFileService implements FileService {
 
   private pendingReads: Array<{ resolve: () => void }> = [];
 
+  /**
+   * 006 object identity of each registered path.
+   *
+   * A real filesystem hands out a token that follows the *object*, so the fake
+   * models it the same way: registering a path assigns a fresh token, an
+   * in-place modification keeps it, and a remove/recreate cycle produces a
+   * different one. That is what lets a rename be proven and a delete/recreate
+   * replacement be refused without any test reaching for `as any`.
+   */
+  private readonly objectIdentities = new Map<string, string>();
+  /**
+   * Paths whose object identity the platform cannot supply.
+   *
+   * Modelling this explicitly is what lets a test pin the `null` fallback: an
+   * unsupported filesystem must make 006 refuse continuity, never guess it.
+   */
+  private readonly unknownObjectIdentities = new Set<string>();
+  private objectEpoch = 0;
+
+  private nextObjectIdentity(key: string): string {
+    this.objectEpoch += 1;
+    return `fake:${key}#${this.objectEpoch}`;
+  }
+
+  /** Registers an object token for `key` unless it already has one. */
+  private ensureObjectIdentity(key: string): string {
+    const existing = this.objectIdentities.get(key);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const identity = this.nextObjectIdentity(key);
+    this.objectIdentities.set(key, identity);
+    return identity;
+  }
+
+  /** The token a path reports, or `null` when the platform cannot supply one. */
+  private objectIdentityOrNull(key: string): string | null {
+    if (this.unknownObjectIdentities.has(key)) {
+      return null;
+    }
+    return this.ensureObjectIdentity(key);
+  }
+
+  /** The 006 object token of a path that currently exists. */
+  objectIdentityFor(path: string): string {
+    return this.ensureObjectIdentity(this.keyFor(path));
+  }
+
+  /** Forces a specific object token, modelling an externally replaced object. */
+  setObjectIdentity(path: string, identity: string): void {
+    this.objectIdentities.set(this.keyFor(path), identity);
+  }
+
+  /** Models a filesystem/platform that cannot identify this object at all. */
+  clearObjectIdentity(path: string): void {
+    const key = this.keyFor(path);
+    this.objectIdentities.delete(key);
+    this.unknownObjectIdentities.add(key);
+  }
+
   /* -------- fixtures -------- */
 
   addFile(path: string, text = "", format: TextFormat = DEFAULT_FORMAT): void {
-    this.files.set(this.keyFor(path), {
+    const key = this.keyFor(path);
+    this.files.set(key, {
       text,
       format: { ...format },
     });
+    this.ensureObjectIdentity(key);
   }
 
   addUnreadableFile(path: string, error: FileCommandError): void {
@@ -282,7 +344,11 @@ class FakeFileService implements FileService {
 
   /** Removes a registered file, modelling a rename/delete that moved it away. */
   removeFile(path: string): void {
-    this.files.delete(this.keyFor(path));
+    const key = this.keyFor(path);
+    this.files.delete(key);
+    // The object is gone, so its token must not be reusable by whatever appears
+    // at the same path later.
+    this.objectIdentities.delete(key);
   }
 
   /** The text currently registered for a path, or `undefined` when it is absent. */
@@ -297,10 +363,13 @@ class FakeFileService implements FileService {
     text: string,
     format: TextFormat = DEFAULT_FORMAT,
   ): void {
-    this.files.set(this.keyFor(path), {
+    const key = this.keyFor(path);
+    this.files.set(key, {
       text,
       format: { ...format },
     });
+    // Same object, new content: the token deliberately survives the rewrite.
+    this.ensureObjectIdentity(key);
   }
 
   /** Forces the 005 validation outcome of one path. */
@@ -617,13 +686,21 @@ class FakeFileService implements FileService {
     return this.keyFor(path);
   }
 
+  /**
+   * Models a filesystem that compares paths case-sensitively.
+   *
+   * The canonical key is produced by the backend's own rule, so the frontend has
+   * to work from *this* answer rather than folding case on its own (T155).
+   */
+  caseSensitiveKeys = false;
+
   private keyFor(path: string): string {
     const source = this.aliases.get(path) ?? path;
-    return source
+    const normalized = source
       .replace(/\\/g, "/")
       .replace(/\/{2,}/g, "/")
-      .replace(/\/\.\//g, "/")
-      .toLowerCase();
+      .replace(/\/\.\//g, "/");
+    return this.caseSensitiveKeys ? normalized : normalized.toLowerCase();
   }
 
   private identityFor(
@@ -651,6 +728,10 @@ class FakeFileService implements FileService {
               size,
               modifiedTimeMillis: this.modifiedTimes.get(comparisonKey) ?? 0,
             },
+      // 006: only an object that exists carries a token, and a platform that
+      // cannot supply one reports `null` instead of inventing continuity.
+      objectIdentity:
+        kind === "missing" ? null : this.objectIdentityOrNull(comparisonKey),
     };
   }
 }
@@ -2682,6 +2763,7 @@ function syntheticIdentity(
     comparisonKey: harness.files.comparisonKeyFor(path),
     kind,
     diskRevision: kind === "missing" ? null : { size: 0, modifiedTimeMillis: 0 },
+    objectIdentity: kind === "missing" ? null : harness.files.objectIdentityFor(path),
   };
 }
 
@@ -4721,3 +4803,683 @@ describe("DocumentManager settlement after the write proof (T064, FR-036)", () =
     expect(session.pathIdentity?.diskRevision).toBeNull();
   });
 });
+/* -------------------------------------------------------------------------- */
+/* External relocation adoption (006 US2)                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Models an external rename on the fake filesystem: the source disappears, the
+ * destination appears and both paths report the *same* filesystem-object token,
+ * which is exactly the evidence 006 requires before continuity may be claimed.
+ */
+function moveFileExternally(
+  files: FakeFileService,
+  sourcePath: string,
+  destinationPath: string,
+  text: string,
+): string {
+  const identity = files.objectIdentityFor(sourcePath);
+  files.removeFile(sourcePath);
+  files.addFile(destinationPath, text);
+  files.setObjectIdentity(destinationPath, identity);
+  return identity;
+}
+
+describe("DocumentManager external relocation (006 US2)", () => {
+  it("adopts a confirmed relocation without touching document state", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    const opened = await harness.manager.openPath(SMALL_A);
+    const id = opened.status === "opened" ? opened.documentId : "";
+    const before = harness.manager.getSession(id)!;
+    const editorState = before.editorState;
+    const generation = before.bindingGeneration;
+    const readsBefore = harness.files.reads.length;
+
+    const entryIdentity = moveFileExternally(
+      harness.files,
+      SMALL_A,
+      SMALL_B,
+      "alpha",
+    );
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: SMALL_A,
+      newPath: SMALL_B,
+      kind: "file",
+      entryObjectIdentity: entryIdentity,
+    });
+
+    expect(outcomes).toEqual([
+      { documentId: id, status: "adopted", path: SMALL_B },
+    ]);
+
+    const after = harness.manager.getSession(id)!;
+    // FR-057: identity, text, editor state, history and dirty state all survive;
+    // only path-facing metadata moves.
+    expect(after.id).toBe(id);
+    expect(after.editorState).toBe(editorState);
+    expect(after.displayName).toBe("b.txt");
+    expect(after.path).toBe(SMALL_B);
+    expect(after.pathIdentity?.comparisonKey).toBe(
+      harness.files.comparisonKeyFor(SMALL_B),
+    );
+    // FR-065: the binding generation advances, so an in-flight validation for the
+    // old path is stale from now on.
+    expect(after.bindingGeneration).toBe(generation + 1);
+    // FR-035/FR-057: relocation never reads or replaces the buffer.
+    expect(harness.files.reads).toHaveLength(readsBefore);
+    // FR-035: the active Tab is not changed by an external structural change.
+    expect(harness.manager.getActiveDocumentId()).toBe(id);
+    expect(tabNames(harness.manager.getSnapshot())).toEqual([
+      "Untitled1",
+      "b.txt",
+    ]);
+  });
+
+  it("keeps a dirty document dirty and follows the new path", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    const opened = await harness.manager.openPath(SMALL_A);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    const edited = EditorState.create({ doc: toText("alpha edited") });
+    harness.manager.handleEditorStateUpdate(id, edited, true);
+    expect(harness.manager.getSession(id)!.dirty).toBe(true);
+
+    const entryIdentity = moveFileExternally(
+      harness.files,
+      SMALL_A,
+      SMALL_B,
+      "alpha",
+    );
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: SMALL_A,
+      newPath: SMALL_B,
+      kind: "file",
+      entryObjectIdentity: entryIdentity,
+    });
+
+    expect(outcomes[0].status).toBe("adopted");
+    const after = harness.manager.getSession(id)!;
+    // FR-059: a dirty document is eligible to follow a confirmed move, and its
+    // unsaved buffer is not reloaded.
+    expect(after.dirty).toBe(true);
+    expect(after.editorState).toBe(edited);
+    expect(after.editorState.doc.toString()).toBe("alpha edited");
+  });
+
+  it("proves the destination from its own binding, never from the entry token", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    const opened = await harness.manager.openPath(SMALL_A);
+    const id = opened.status === "opened" ? opened.documentId : "";
+    const targetIdentity = harness.files.objectIdentityFor(SMALL_A);
+
+    moveFileExternally(harness.files, SMALL_A, SMALL_B, "alpha");
+
+    // A moved symlink entry keeps its *own* token, which is a different identity
+    // domain from the target the document is bound to. The request therefore
+    // carries an entry token that differs from the binding's, and adoption must
+    // still succeed because the destination proves the *target* (FR-067, plan §10).
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: SMALL_A,
+      newPath: SMALL_B,
+      kind: "file",
+      entryObjectIdentity: "obj:the-link-entry-itself",
+    });
+
+    expect(outcomes).toEqual([
+      { documentId: id, status: "adopted", path: SMALL_B },
+    ]);
+    expect(harness.manager.getSession(id)!.pathIdentity?.objectIdentity).toBe(
+      targetIdentity,
+    );
+  });
+
+  it("moves path ownership exactly once", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    const opened = await harness.manager.openPath(SMALL_A);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    const entryIdentity = moveFileExternally(
+      harness.files,
+      SMALL_A,
+      SMALL_B,
+      "alpha",
+    );
+
+    const first = await harness.manager.adoptExternalRelocation({
+      oldPath: SMALL_A,
+      newPath: SMALL_B,
+      kind: "file",
+      entryObjectIdentity: entryIdentity,
+    });
+    expect(first[0].status).toBe("adopted");
+
+    // A second attempt for the same document no longer finds the old binding, so
+    // it changes nothing instead of duplicating ownership.
+    const second = await harness.manager.adoptExternalRelocation({
+      oldPath: SMALL_A,
+      newPath: SMALL_B,
+      kind: "file",
+      entryObjectIdentity: entryIdentity,
+    });
+    expect(second).toEqual([]);
+    expect(harness.manager.getSession(id)!.path).toBe(SMALL_B);
+  });
+
+  it("refuses a destination that is a different filesystem object", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    const opened = await harness.manager.openPath(SMALL_A);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    // The destination exists but is *not* the same object: rename continuity
+    // must never be guessed from paths alone (FR-039, FR-041).
+    harness.files.addFile(SMALL_B, "alpha");
+    harness.files.removeFile(SMALL_A);
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: SMALL_A,
+      newPath: SMALL_B,
+      kind: "file",
+      entryObjectIdentity: "obj:whatever-the-tree-saw",
+    });
+
+    expect(outcomes).toEqual([
+      {
+        documentId: id,
+        status: "rejected",
+        path: SMALL_A,
+        reason: "identity-mismatch",
+      },
+    ]);
+    expect(harness.manager.getSession(id)!.path).toBe(SMALL_A);
+  });
+
+  it("refuses when no object identity can prove continuity", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    // The platform cannot identify the source object, so the binding holds no
+    // continuity evidence to compare anything against.
+    harness.files.clearObjectIdentity(SMALL_A);
+    const opened = await harness.manager.openPath(SMALL_A);
+    const id = opened.status === "opened" ? opened.documentId : "";
+    expect(harness.manager.getSession(id)!.pathIdentity?.objectIdentity).toBeNull();
+
+    harness.files.removeFile(SMALL_A);
+    harness.files.addFile(SMALL_B, "alpha");
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: SMALL_A,
+      newPath: SMALL_B,
+      kind: "file",
+      entryObjectIdentity: null,
+    });
+
+    expect(outcomes[0].status).toBe("rejected");
+    expect(outcomes[0].reason).toBe("identity-unavailable");
+    expect(harness.manager.getSession(id)!.path).toBe(SMALL_A);
+  });
+
+  it("refuses a destination another live session already owns", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    harness.files.addFile(SMALL_B, "beta");
+    const first = await harness.manager.openPath(SMALL_A);
+    const firstId = first.status === "opened" ? first.documentId : "";
+    const second = await harness.manager.openPath(SMALL_B);
+    const secondId = second.status === "opened" ? second.documentId : "";
+
+    // Both paths report one object identity, so the destination is *provably*
+    // the same object; ownership is still decided by the canonical path, which
+    // another live session holds (FR-062, FR-063).
+    const identity = harness.files.objectIdentityFor(SMALL_A);
+    harness.files.setObjectIdentity(SMALL_B, identity);
+    harness.files.removeFile(SMALL_A);
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: SMALL_A,
+      newPath: SMALL_B,
+      kind: "file",
+      entryObjectIdentity: identity,
+    });
+
+    expect(outcomes).toEqual([
+      {
+        documentId: firstId,
+        status: "rejected",
+        path: SMALL_A,
+        reason: "destination-owned",
+      },
+    ]);
+    // Neither session was merged, moved or closed.
+    expect(harness.manager.getSession(firstId)!.path).toBe(SMALL_A);
+    expect(harness.manager.getSession(secondId)!.path).toBe(SMALL_B);
+    expect(tabNames(harness.manager.getSnapshot())).toEqual([
+      "Untitled1",
+      "a.txt",
+      "b.txt",
+    ]);
+  });
+
+  it("adopts a directory relocation and rebases each open descendant", async () => {
+    const harness = createHarness();
+    const SOURCE_DIR = "C:\\work\\src";
+    const TARGET_DIR = "C:\\work\\lib";
+    const FIRST = `${SOURCE_DIR}\\a.ts`;
+    const SECOND = `${SOURCE_DIR}\\nested\\b.ts`;
+    harness.files.addDirectory(SOURCE_DIR);
+    harness.files.addFile(FIRST, "alpha");
+    harness.files.addFile(SECOND, "beta");
+    harness.files.addDirectory(`${SOURCE_DIR}\\nested`);
+
+    const first = await harness.manager.openPath(FIRST);
+    const second = await harness.manager.openPath(SECOND);
+    const firstId = first.status === "opened" ? first.documentId : "";
+    const secondId = second.status === "opened" ? second.documentId : "";
+    const firstIdentity = harness.files.objectIdentityFor(FIRST);
+    const secondIdentity = harness.files.objectIdentityFor(SECOND);
+
+    // The whole directory moved: both descendants keep their own object.
+    harness.files.removeFile(FIRST);
+    harness.files.removeFile(SECOND);
+    harness.files.addFile(`${TARGET_DIR}\\a.ts`, "alpha");
+    harness.files.addFile(`${TARGET_DIR}\\nested\\b.ts`, "beta");
+    harness.files.setObjectIdentity(`${TARGET_DIR}\\a.ts`, firstIdentity);
+    harness.files.setObjectIdentity(`${TARGET_DIR}\\nested\\b.ts`, secondIdentity);
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: SOURCE_DIR,
+      newPath: TARGET_DIR,
+      kind: "directory",
+      entryObjectIdentity: "obj:src-directory",
+    });
+
+    expect(outcomes).toEqual([
+      { documentId: firstId, status: "adopted", path: `${TARGET_DIR}\\a.ts` },
+      {
+        documentId: secondId,
+        status: "adopted",
+        path: `${TARGET_DIR}\\nested\\b.ts`,
+      },
+    ]);
+    expect(harness.manager.getSession(firstId)!.path).toBe(`${TARGET_DIR}\\a.ts`);
+    expect(harness.manager.getSession(secondId)!.path).toBe(
+      `${TARGET_DIR}\\nested\\b.ts`,
+    );
+    expect(harness.manager.getSession(firstId)!.editorState.doc.toString()).toBe(
+      "alpha",
+    );
+  });
+
+  it("rejects one conflicting descendant without blocking its siblings", async () => {
+    const harness = createHarness();
+    const SOURCE_DIR = "C:\\work\\src";
+    const TARGET_DIR = "C:\\work\\lib";
+    const FIRST = `${SOURCE_DIR}\\a.ts`;
+    const SECOND = `${SOURCE_DIR}\\b.ts`;
+    harness.files.addDirectory(SOURCE_DIR);
+    harness.files.addFile(FIRST, "alpha");
+    harness.files.addFile(SECOND, "beta");
+
+    const first = await harness.manager.openPath(FIRST);
+    const second = await harness.manager.openPath(SECOND);
+    const firstId = first.status === "opened" ? first.documentId : "";
+    const secondId = second.status === "opened" ? second.documentId : "";
+
+    const firstIdentity = harness.files.objectIdentityFor(FIRST);
+    const secondIdentity = harness.files.objectIdentityFor(SECOND);
+
+    harness.files.removeFile(FIRST);
+    harness.files.removeFile(SECOND);
+    harness.files.addFile(`${TARGET_DIR}\\a.ts`, "alpha");
+    harness.files.setObjectIdentity(`${TARGET_DIR}\\a.ts`, firstIdentity);
+    // The sibling's destination is now a *different* object.
+    harness.files.addFile(`${TARGET_DIR}\\b.ts`, "beta");
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: SOURCE_DIR,
+      newPath: TARGET_DIR,
+      kind: "directory",
+      entryObjectIdentity: "obj:src-directory",
+    });
+
+    expect(outcomes).toEqual([
+      { documentId: firstId, status: "adopted", path: `${TARGET_DIR}\\a.ts` },
+      {
+        documentId: secondId,
+        status: "rejected",
+        path: SECOND,
+        reason: "identity-mismatch",
+      },
+    ]);
+    // The rejected document keeps its own binding and stays subject to 005.
+    expect(harness.manager.getSession(secondId)!.path).toBe(SECOND);
+    expect(secondIdentity).not.toBe(firstIdentity);
+  });
+
+  it("never uses the object identity as the path-ownership key", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    harness.files.addFile(SMALL_B, "alpha");
+    // Two hard-link-like paths that share one filesystem object.
+    const shared = harness.files.objectIdentityFor(SMALL_A);
+    harness.files.setObjectIdentity(SMALL_B, shared);
+
+    const first = await harness.manager.openPath(SMALL_A);
+    const second = await harness.manager.openPath(SMALL_B);
+
+    // FR-067: distinct canonical paths stay distinct sessions; a shared native
+    // object id must not merge them.
+    expect(first.status).toBe("opened");
+    expect(second.status).toBe("opened");
+    expect(tabNames(harness.manager.getSnapshot())).toEqual([
+      "Untitled1",
+      "a.txt",
+      "b.txt",
+    ]);
+    const firstId = first.status === "opened" ? first.documentId : "";
+    const secondId = second.status === "opened" ? second.documentId : "";
+    expect(harness.manager.getSession(firstId)!.pathIdentity?.objectIdentity).toBe(
+      shared,
+    );
+    expect(harness.manager.getSession(secondId)!.pathIdentity?.objectIdentity).toBe(
+      shared,
+    );
+
+    // Destination reservation still keys on the canonical path, so a Save As
+    // onto the sibling path is refused for the path, never for the token.
+    const reservation = await harness.manager.reservePathMutation({
+      kind: "rename",
+      sourceKey: harness.files.comparisonKeyFor(SMALL_A),
+      destinationKey: harness.files.comparisonKeyFor(SMALL_B),
+    });
+    expect(reservation.status).toBe("failed");
+    reservation.status === "failed"
+      ? expect(reservation.error.message).toContain("another tab")
+      : undefined;
+  });
+});
+
+  it("announces a relocation rebound even when only the path casing changed", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    const opened = await harness.manager.openPath(SMALL_A);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    const changes: WatchInterestChange[] = [];
+    harness.manager.subscribeWatchInterest((change) => changes.push(change));
+
+    // Windows: `a.txt` -> `A.TXT` keeps the canonical comparison key, so only the
+    // *path* changed. 005 must still be told, because the forced post-relocation
+    // validation hangs off that rebound (FR-046, FR-061).
+    const CASED = "C:\\work\\A.TXT";
+    const entryIdentity = moveFileExternally(
+      harness.files,
+      SMALL_A,
+      CASED,
+      "alpha",
+    );
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: SMALL_A,
+      newPath: CASED,
+      kind: "file",
+      entryObjectIdentity: entryIdentity,
+    });
+
+    expect(outcomes).toEqual([
+      { documentId: id, status: "adopted", path: CASED },
+    ]);
+    expect(changes).toHaveLength(1);
+    const change = changes[0];
+    expect(change.type).toBe("rebound");
+    if (change.type !== "rebound") {
+      throw new Error("expected a rebound");
+    }
+    expect(change.cause).toBe("external-relocation");
+    expect(change.path).toBe(CASED);
+    expect(change.previousPath).toBe(SMALL_A);
+    expect(change.identity.comparisonKey).toBe(
+      change.previousIdentity.comparisonKey,
+    );
+  });
+
+  it("notifies the UI once after a successful adoption", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    const opened = await harness.manager.openPath(SMALL_A);
+    const id = opened.status === "opened" ? opened.documentId : "";
+    expect(tabFor(harness, id).displayName).toBe("a.txt");
+
+    const entryIdentity = moveFileExternally(
+      harness.files,
+      SMALL_A,
+      SMALL_B,
+      "alpha",
+    );
+
+    // The snapshot stream, not a direct read: the UI only learns about the new
+    // name through an emission (FR-057).
+    const emitted: DocumentManagerSnapshot[] = [];
+    harness.manager.subscribe((snapshot) => emitted.push(snapshot));
+    const emissionsBefore = harness.emissions();
+
+    await harness.manager.adoptExternalRelocation({
+      oldPath: SMALL_A,
+      newPath: SMALL_B,
+      kind: "file",
+      entryObjectIdentity: entryIdentity,
+    });
+
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].tabs.find((tab) => tab.id === id)?.displayName).toBe(
+      "b.txt",
+    );
+    expect(harness.emissions()).toBe(emissionsBefore + 1);
+  });
+
+  it("refuses a destination an in-flight Open is about to claim", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    harness.files.addFile(SMALL_B, "beta");
+    const opened = await harness.manager.openPath(SMALL_A);
+    const firstId = opened.status === "opened" ? opened.documentId : "";
+
+    // The relocation destination is provably the same object as the open
+    // document's binding (a hard-link-like case), but another Open of that very
+    // path is still in flight.
+    const identity = harness.files.objectIdentityFor(SMALL_A);
+    harness.files.setObjectIdentity(SMALL_B, identity);
+    harness.files.removeFile(SMALL_A);
+
+    harness.files.holdReads = true;
+    const pendingOpen = harness.manager.openPath(SMALL_B);
+    // The Open inspects before it reads, so its read is only issued once that
+    // inspection has settled.
+    await flush();
+    expect(harness.files.pendingReadCount()).toBe(1);
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: SMALL_A,
+      newPath: SMALL_B,
+      kind: "file",
+      entryObjectIdentity: identity,
+    });
+
+    // Waiting could not change this: a successful Open registers itself as the
+    // canonical owner of that key, so adopting first would leave two live
+    // sessions claiming one path (FR-062, FR-063).
+    expect(outcomes).toEqual([
+      {
+        documentId: firstId,
+        status: "rejected",
+        path: SMALL_A,
+        reason: "destination-owned",
+      },
+    ]);
+    expect(harness.manager.getSession(firstId)!.path).toBe(SMALL_A);
+
+    // Once the Open settles, ownership is exactly one session per path: the new
+    // session owns the destination and the old one keeps its own binding.
+    harness.files.releaseReads();
+    const openedByPending = await pendingOpen;
+    expect(openedByPending.status).toBe("opened");
+    const secondId =
+      openedByPending.status === "opened" ? openedByPending.documentId : "";
+    expect(secondId).not.toBe(firstId);
+    expect(harness.manager.getSession(secondId)!.path).toBe(SMALL_B);
+    expect(harness.manager.getSession(firstId)!.path).toBe(SMALL_A);
+    expect(tabNames(harness.manager.getSnapshot())).toEqual([
+      "Untitled1",
+      "a.txt",
+      "b.txt",
+    ]);
+  });
+
+  it("follows a relocation whose logical spelling differs only by case", async () => {
+    const harness = createHarness();
+    // The session keeps the spelling it was opened with...
+    const LOWER = "c:\\work\\a.txt";
+    harness.files.addFile(LOWER, "alpha");
+    const opened = await harness.manager.openPath(LOWER);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    // ...while the Tree reports the on-disk spelling for the same entry.
+    const DESTINATION = "C:\\WORK\\B.TXT";
+    const identity = moveFileExternally(harness.files, LOWER, DESTINATION, "alpha");
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: "C:\\WORK\\A.TXT",
+      newPath: DESTINATION,
+      kind: "file",
+      entryObjectIdentity: identity,
+    });
+
+    expect(outcomes).toEqual([
+      { documentId: id, status: "adopted", path: DESTINATION },
+    ]);
+    expect(harness.manager.getSession(id)!.path).toBe(DESTINATION);
+  });
+
+  it("rebases a nested open document when the moved directory is spelled differently", async () => {
+    const harness = createHarness();
+    const SOURCE = "C:\\work\\src";
+    const TARGET = "C:\\work\\lib";
+    const NESTED = `${SOURCE}\\nested\\b.ts`;
+    harness.files.addDirectory(SOURCE);
+    harness.files.addDirectory(`${SOURCE}\\nested`);
+    harness.files.addFile(NESTED, "beta");
+    const opened = await harness.manager.openPath(NESTED);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    const identity = harness.files.objectIdentityFor(NESTED);
+    harness.files.removeFile(NESTED);
+    harness.files.addFile(`${TARGET}\\nested\\b.ts`, "beta");
+    harness.files.setObjectIdentity(`${TARGET}\\nested\\b.ts`, identity);
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: "C:\\WORK\\SRC",
+      newPath: TARGET,
+      kind: "directory",
+      entryObjectIdentity: "obj:src-directory",
+    });
+
+    expect(outcomes).toEqual([
+      {
+        documentId: id,
+        status: "adopted",
+        path: `${TARGET}\\nested\\b.ts`,
+      },
+    ]);
+    expect(harness.manager.getSession(id)!.path).toBe(`${TARGET}\\nested\\b.ts`);
+  });
+
+  it("leaves a session alone when the relocation source is a different location", async () => {
+    const harness = createHarness();
+    harness.files.addFile(SMALL_A, "alpha");
+    const opened = await harness.manager.openPath(SMALL_A);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    const identity = harness.files.objectIdentityFor(SMALL_A);
+    harness.files.removeFile(SMALL_A);
+    harness.files.addFile("C:\\work\\alias\\a.txt", "alpha");
+    harness.files.setObjectIdentity("C:\\work\\alias\\a.txt", identity);
+
+    // The source the caller names is not the session's location under any casing,
+    // so the document is not a candidate at all: it keeps its binding and stays
+    // subject to 005 rather than being rebased on a guess.
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: "C:\\work\\alias",
+      newPath: "C:\\work\\lib",
+      kind: "directory",
+      entryObjectIdentity: "obj:dir",
+    });
+
+    expect(outcomes).toEqual([]);
+    expect(harness.manager.getSession(id)!.path).toBe(SMALL_A);
+  });
+
+  it("does not adopt an equivalent-casing source on a case-sensitive filesystem", async () => {
+    const harness = createHarness();
+    // The backend reports a case-sensitive volume: `REAL` and `real` are two
+    // different directories, so a relocation of one must never rebase a document
+    // that lives in the other (FR-045, FR-056).
+    harness.files.caseSensitiveKeys = true;
+
+    const SOURCE = "C:\\work\\real";
+    const OTHER = "C:\\work\\REAL";
+    const DOCUMENT = `${SOURCE}\\a.ts`;
+    harness.files.addDirectory(SOURCE);
+    harness.files.addFile(DOCUMENT, "alpha");
+    const opened = await harness.manager.openPath(DOCUMENT);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    const identity = harness.files.objectIdentityFor(DOCUMENT);
+    harness.files.removeFile(DOCUMENT);
+    harness.files.addFile("C:\\work\\lib\\a.ts", "alpha");
+    harness.files.setObjectIdentity("C:\\work\\lib\\a.ts", identity);
+
+    // The request names the *other* directory, which only a case-folding
+    // comparison would treat as the document's location.
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: OTHER,
+      newPath: "C:\\work\\lib",
+      kind: "directory",
+      entryObjectIdentity: "obj:dir",
+    });
+
+    expect(outcomes).toEqual([]);
+    expect(harness.manager.getSession(id)!.path).toBe(DOCUMENT);
+  });
+
+  it("does not adopt a same-tail entry that lives in another directory", async () => {
+    const harness = createHarness();
+    const DOCUMENT = "C:\\work\\other\\a.ts";
+    harness.files.addDirectory("C:\\work\\other");
+    harness.files.addFile(DOCUMENT, "alpha");
+    const opened = await harness.manager.openPath(DOCUMENT);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    // The same object is reachable at the document's path *and* at the moved
+    // directory's destination, so only canonical containment may decide whether
+    // this session followed the move — a matching tail must prove nothing.
+    const identity = harness.files.objectIdentityFor(DOCUMENT);
+    harness.files.addDirectory("C:\\work\\src");
+    harness.files.addFile("C:\\work\\lib\\a.ts", "alpha");
+    harness.files.setObjectIdentity("C:\\work\\lib\\a.ts", identity);
+
+    const outcomes = await harness.manager.adoptExternalRelocation({
+      oldPath: "C:\\work\\src",
+      newPath: "C:\\work\\lib",
+      kind: "directory",
+      entryObjectIdentity: "obj:dir",
+    });
+
+    expect(outcomes).toEqual([]);
+    expect(harness.manager.getSession(id)!.path).toBe(DOCUMENT);
+  });

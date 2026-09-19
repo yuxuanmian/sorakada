@@ -28,18 +28,23 @@ describe("tauriWorkspaceFileService.readWorkspaceDirectory (US1)", () => {
     requestedPath: "C:\\work",
     canonicalPath: "\\\\?\\C:\\work",
     comparisonKey: "\\\\?\\c:\\work",
+    // The comparison contract comes from the backend, never from the frontend.
+    caseSensitive: false,
     entries: [
       {
         name: "src",
         path: "C:\\work\\src",
         kind: "directory",
         isSymlink: false,
+        objectIdentity: "win:1a2b3c4d:0000000000000001",
       },
       {
         name: "a.txt",
         path: "C:\\work\\a.txt",
         kind: "file",
         isSymlink: true,
+        // A symlink entry carries its own token, not its target's.
+        objectIdentity: "win:1a2b3c4d:0000000000000002",
       },
     ],
   };
@@ -65,6 +70,30 @@ describe("tauriWorkspaceFileService.readWorkspaceDirectory (US1)", () => {
       tauriWorkspaceFileService.readWorkspaceDirectory("C:\\gone"),
     ).rejects.toEqual(error);
   });
+
+  /**
+   * T156: the comparison contract belongs to the *directory*, so the frontend
+   * must carry whatever the backend reported for it — including a
+   * case-sensitive directory on Windows — without folding it back into a
+   * platform guess of its own.
+   */
+  it("carries a case-sensitive directory contract through unchanged", async () => {
+    const caseSensitive: ReadWorkspaceDirectoryResult = {
+      ...RESULT,
+      requestedPath: "C:\\work\\real",
+      canonicalPath: "\\\\?\\C:\\work\\real",
+      comparisonKey: "\\\\?\\c:\\work\\real",
+      caseSensitive: true,
+    };
+    invokeMock.mockResolvedValue(caseSensitive);
+
+    await expect(
+      tauriWorkspaceFileService.readWorkspaceDirectory("C:\\work\\real"),
+    ).resolves.toEqual(caseSensitive);
+    expect(invokeMock).toHaveBeenCalledWith("read_workspace_directory", {
+      request: { path: "C:\\work\\real" },
+    });
+  });
 });
 
 describe("tauriWorkspaceFileService.createWorkspaceEntry (US5)", () => {
@@ -76,6 +105,7 @@ describe("tauriWorkspaceFileService.createWorkspaceEntry (US5)", () => {
       comparisonKey: "\\\\?\\c:\\work\\new.txt",
       kind: "file",
       diskRevision: { size: 0, modifiedTimeMillis: 0 },
+      objectIdentity: "win:1a2b3c4d:0000000000000003",
     },
   };
 
@@ -105,6 +135,7 @@ describe("tauriWorkspaceFileService.createWorkspaceEntry (US5)", () => {
         comparisonKey: "c:\\work\\sub",
         kind: "directory",
         diskRevision: null,
+        objectIdentity: "win:1a2b3c4d:0000000000000004",
       },
     } satisfies CreateWorkspaceEntryResult);
 
@@ -143,6 +174,7 @@ describe("tauriWorkspaceFileService.renameWorkspaceEntry (US6)", () => {
       comparisonKey: "\\\\?\\c:\\work\\after.txt",
       kind: "file",
       diskRevision: { size: 3, modifiedTimeMillis: 0 },
+      objectIdentity: "win:1a2b3c4d:0000000000000005",
     },
   };
 

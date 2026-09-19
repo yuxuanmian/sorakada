@@ -51,3 +51,39 @@ pub fn run() {
             }
         });
 }
+
+#[cfg(test)]
+mod architecture_tests {
+    /// 006 adds filesystem-object identity, mixed-scope watching and directory
+    /// listings, and none of that may start interpreting file bytes:
+    /// `file_codec` stays the only module that reads or writes raw file content
+    /// (Constitution II), so BOM/EOL/encoding rules keep exactly one home.
+    ///
+    /// The audit is static because the property is structural: a module either
+    /// touches raw bytes or it does not. Only the production half of each file
+    /// is audited — the colocated tests deliberately write fixtures with
+    /// `std::fs`, which is not a production byte path.
+    #[test]
+    fn file_codec_remains_the_only_byte_interpreter() {
+        let modules = [
+            ("file_identity.rs", include_str!("file_identity.rs")),
+            ("workspace_fs.rs", include_str!("workspace_fs.rs")),
+            ("filesystem_watcher.rs", include_str!("filesystem_watcher.rs")),
+            ("watch_event.rs", include_str!("watch_event.rs")),
+            ("commands/file.rs", include_str!("commands/file.rs")),
+            ("commands/workspace.rs", include_str!("commands/workspace.rs")),
+            ("commands/watcher.rs", include_str!("commands/watcher.rs")),
+        ];
+
+        for (name, source) in modules {
+            let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+            for forbidden in ["fs::read(", "fs::write(", "read_to_string", "write_all"] {
+                assert!(
+                    !production.contains(forbidden),
+                    "{name} must not interpret file bytes; `{forbidden}` belongs in file_codec.rs",
+                );
+            }
+        }
+    }
+}

@@ -94,10 +94,11 @@ mod tests {
 
         let value = to_json(&read_workspace_directory(request).expect("read should succeed"));
 
-        assert_eq!(value.as_object().expect("object").len(), 4);
+        assert_eq!(value.as_object().expect("object").len(), 5);
         assert_eq!(value["requestedPath"], json!(display(&dir)));
         assert!(value["canonicalPath"].is_string());
         assert!(value["comparisonKey"].is_string());
+        assert!(value["caseSensitive"].is_boolean());
 
         let entries = value["entries"].as_array().expect("entry array");
         assert_eq!(entries.len(), 2, "direct children only");

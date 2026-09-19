@@ -10,6 +10,7 @@ import type {
   RenameWorkspaceEntryResult,
   ResolveWorkspaceRelationResult,
   WorkspaceDirectoryEntry,
+  WorkspaceEntryKind,
   WorkspaceFileService,
 } from "../../services/workspaceFileService";
 import type {
@@ -30,6 +31,7 @@ import type { WorkContext } from "../workspace/workContext";
 import { displayNameForWorkspaceRoot } from "../workspace/workContext";
 import {
   ExplorerActions,
+  SOURCE_ENTRY_CHANGED_MESSAGE,
   deriveFileOperationContext,
   isContextMenuCreateAvailable,
   isCreateAvailable,
@@ -40,12 +42,15 @@ import {
   type ExplorerActionTarget,
   type ExplorerDocumentPort,
 } from "./explorerActions";
-import type {
-  ExplorerDirectoryNode,
-  ExplorerNode,
-  ExplorerState,
-  InlineEditState,
+import {
+  rebaseNodePaths,
+  toExplorerNode,
+  type ExplorerDirectoryNode,
+  type ExplorerNode,
+  type ExplorerState,
+  type InlineEditState,
 } from "./explorerModel";
+import { reconcileDirectorySnapshots } from "./explorerReconciliation";
 
 /* -------------------------------------------------------------------------- */
 /* Test doubles                                                               */
@@ -79,6 +84,7 @@ function directoryNode(path: string): ExplorerDirectoryNode {
     path,
     kind: "directory",
     isSymlink: false,
+    objectIdentity: `fake:${keyFor(path)}`,
     expanded: true,
     loadState: "loaded",
     children: [],
@@ -91,7 +97,61 @@ function fileNode(path: string): ExplorerNode {
     path,
     kind: "file",
     isSymlink: false,
+    objectIdentity: `fake:${keyFor(path)}`,
   };
+}
+
+/**
+ * One direct child as the one-level workspace read reports it.
+ *
+ * The identity matches the Tree node helpers above, so a fixture that seeds a
+ * listing describes the same on-disk object its Tree already shows.
+ */
+function listEntry(
+  path: string,
+  kind: WorkspaceEntryKind = "file",
+): WorkspaceDirectoryEntry {
+  return {
+    name: leafName(path),
+    path,
+    kind,
+    isSymlink: false,
+    objectIdentity: `fake:${keyFor(path)}`,
+  };
+}
+
+/** The same entry, as if another process had replaced the object at that path. */
+function replacedEntry(
+  path: string,
+  identity: string | null,
+  kind: WorkspaceEntryKind = "file",
+): WorkspaceDirectoryEntry {
+  return { ...listEntry(path, kind), objectIdentity: identity };
+}
+
+/**
+ * The same on-disk object, now at `toPath`.
+ *
+ * A same-volume rename preserves the entry's own token, so this is what a
+ * watcher echo reports after an internal Rename.
+ */
+function movedEntry(
+  fromPath: string,
+  toPath: string,
+  kind: WorkspaceEntryKind = "file",
+): WorkspaceDirectoryEntry {
+  return {
+    ...listEntry(toPath, kind),
+    objectIdentity: `fake:${keyFor(fromPath)}`,
+  };
+}
+
+/** Sorted paths of a parent's visible direct children. */
+function childPaths(explorer: FakeExplorer, parentPath: string): string[] {
+  return explorer
+    .childrenOf(parentPath)
+    .map((node) => node.path)
+    .sort();
 }
 
 /** A recording stand-in for the Explorer controller. */
@@ -105,6 +165,57 @@ class FakeExplorer implements ExplorerActionTarget {
   /** The Workspace context this Tree belongs to; a test may replace it. */
   contextId: string | null = "workspace";
   rootUnavailable = false;
+
+  /**
+   * Visible direct children per parent path.
+   *
+   * The fake keeps a small structural model beside `nodes` so the T119
+   * idempotence test can assert the *Tree* after an internal mutation plus a
+   * watcher echo, using the real identity-aware reconciliation the controller
+   * uses. It is deliberately minimal: this is a recording stand-in, not a second
+   * controller implementation.
+   */
+  private readonly childLists = new Map<string, ExplorerNode[]>();
+
+  /** The visible direct children of `parentPath`. */
+  childrenOf(parentPath: string): readonly ExplorerNode[] {
+    return this.childLists.get(keyFor(parentPath)) ?? [];
+  }
+
+  /** Seeds the visible direct children of `parentPath`. */
+  setChildren(parentPath: string, nodes: readonly ExplorerNode[]): void {
+    this.childLists.set(keyFor(parentPath), [...nodes]);
+    for (const node of nodes) {
+      this.nodes.set(node.path, node);
+    }
+  }
+
+  /**
+   * Applies one watcher-echo reconciliation for `parentPath`.
+   *
+   * This is the controller's one-level reconcile against the current on-disk
+   * listing, which is exactly what an internal mutation's own watcher hint
+   * produces later.
+   */
+  echoDirectory(
+    parentPath: string,
+    entries: readonly WorkspaceDirectoryEntry[],
+  ): void {
+    this.calls.push(`echo:${parentPath}`);
+    const outcome = reconcileDirectorySnapshots({
+      snapshots: [
+        {
+          path: parentPath,
+          current: this.childrenOf(parentPath),
+          entries,
+        },
+      ],
+    });
+    this.childLists.set(
+      keyFor(parentPath),
+      outcome.directories[0]?.children ?? [],
+    );
+  }
 
   getState(): ExplorerState {
     return {
@@ -171,6 +282,15 @@ class FakeExplorer implements ExplorerActionTarget {
 
   applyCreatedEntry(parentPath: string, entry: WorkspaceDirectoryEntry): void {
     this.calls.push(`applyCreated:${parentPath}:${entry.path}`);
+    const children = this.childLists.get(keyFor(parentPath));
+    const alreadyShown =
+      children !== undefined &&
+      children.some((node) => node.path === entry.path);
+    if (children !== undefined && !alreadyShown) {
+      const node = toExplorerNode(entry);
+      children.push(node);
+      this.nodes.set(node.path, node);
+    }
   }
 
   applyRenamedEntry(request: {
@@ -179,10 +299,34 @@ class FakeExplorer implements ExplorerActionTarget {
     newName: string;
   }): void {
     this.calls.push(`applyRenamed:${request.sourcePath}->${request.newPath}`);
+    const parentPath = parentPathOf(request.sourcePath);
+    const children = this.childLists.get(keyFor(parentPath));
+    const node = children?.find((child) => child.path === request.sourcePath);
+    if (children === undefined || node === undefined) {
+      return;
+    }
+
+    // The renamed entry keeps its node (and therefore its expansion/cache
+    // state); only its path, name and descendants' paths change.
+    children.splice(children.indexOf(node), 1);
+    rebaseNodePaths(node, request.sourcePath, request.newPath);
+    node.name = request.newName;
+    children.push(node);
+    this.nodes.delete(request.sourcePath);
+    this.nodes.set(node.path, node);
   }
 
   applyDeletedEntry(path: string): void {
     this.calls.push(`applyDeleted:${path}`);
+    const children = this.childLists.get(keyFor(parentPathOf(path)));
+    if (children === undefined) {
+      return;
+    }
+    const index = children.findIndex((child) => child.path === path);
+    if (index >= 0) {
+      children.splice(index, 1);
+    }
+    this.nodes.delete(path);
   }
 
   async refresh(): Promise<void> {
@@ -215,6 +359,29 @@ class FakeWorkspaceFileService implements WorkspaceFileService {
   renameError: FileCommandError | null = null;
   trashError: FileCommandError | null = null;
   relationError: FileCommandError | null = null;
+  /** When set, the one-level read fails with it. */
+  directoryReadError: FileCommandError | null = null;
+
+  /**
+   * One-level directory listings, keyed by the directory path.
+   *
+   * The pre-mutation source guard reads the source's parent through this map, so
+   * a test seeds the *disk* state here and can change it mid-operation to model
+   * an external replacement (T116).
+   */
+  private readonly listings = new Map<string, WorkspaceDirectoryEntry[]>();
+
+  /** Directories the backend reports as comparing names case-sensitively. */
+  private readonly caseSensitiveDirectories = new Set<string>();
+
+  /**
+   * Directory reads, kept apart from mutating filesystem calls.
+   *
+   * Existing assertions count `calls` as "what was done to the filesystem", and a
+   * read is not a mutation, so the two are recorded separately exactly like
+   * `relationCalls`.
+   */
+  readonly directoryReads: string[] = [];
 
   addDirectory(path: string): void {
     this.directories.add(keyFor(path));
@@ -224,8 +391,61 @@ class FakeWorkspaceFileService implements WorkspaceFileService {
     return this.directories.has(keyFor(path));
   }
 
-  async readWorkspaceDirectory(): Promise<ReadWorkspaceDirectoryResult> {
-    throw new Error("not used");
+  /** Seeds the on-disk direct children of `parentPath`. */
+  setDirectoryListing(
+    parentPath: string,
+    entries: readonly WorkspaceDirectoryEntry[],
+  ): void {
+    this.listings.set(keyFor(parentPath), [...entries]);
+  }
+
+  /**
+   * Models a directory the real backend reports as case-sensitive.
+   *
+   * The comparison contract belongs to the backend, so a test has to be able to
+   * hand the frontend either answer rather than relying on the host platform.
+   */
+  setCaseSensitive(parentPath: string, caseSensitive = true): void {
+    const key = keyFor(parentPath);
+    if (caseSensitive) {
+      this.caseSensitiveDirectories.add(key);
+    } else {
+      this.caseSensitiveDirectories.delete(key);
+    }
+  }
+
+  /** The current on-disk direct children of `parentPath`. */
+  directoryListing(parentPath: string): readonly WorkspaceDirectoryEntry[] {
+    return this.listings.get(keyFor(parentPath)) ?? [];
+  }
+
+  async readWorkspaceDirectory(
+    path: string,
+  ): Promise<ReadWorkspaceDirectoryResult> {
+    this.directoryReads.push(path);
+
+    if (this.directoryReadError !== null) {
+      throw this.directoryReadError;
+    }
+
+    const entries = this.listings.get(keyFor(path));
+    if (entries === undefined) {
+      // The real command rejects a directory it cannot read, and a fixture that
+      // silently returned an empty listing would hide the missing seed behind a
+      // "entry disappeared" refusal.
+      throw {
+        code: "io_directory",
+        message: `Cannot read ${path}`,
+      } satisfies FileCommandError;
+    }
+
+    return {
+      requestedPath: path,
+      canonicalPath: path,
+      comparisonKey: keyFor(path),
+      caseSensitive: this.caseSensitiveDirectories.has(keyFor(path)),
+      entries,
+    };
   }
 
   async createWorkspaceEntry(
@@ -408,6 +628,7 @@ function identity(
     comparisonKey: keyFor(path),
     kind,
     diskRevision: { size: 0, modifiedTimeMillis: 0 },
+    objectIdentity: kind === "missing" ? null : `fake:${keyFor(path)}`,
   };
 }
 
@@ -474,14 +695,35 @@ function createHarness(options: { workspace?: boolean } = {}): Harness {
   return harness;
 }
 
-/** A clean Workspace tree with `src` expanded and `a.ts` inside it. */
+/**
+ * A clean Workspace tree with `src` expanded and `a.ts` inside it.
+ *
+ * The Tree and the fake's on-disk listings are seeded together, because the
+ * pre-mutation source guard compares the two: a fixture whose listing lacked the
+ * selected entry would model a replaced object rather than a normal operation.
+ */
 function withTree(harness: Harness): Harness {
   harness.files.addDirectory(ROOT);
   harness.files.addDirectory(SRC);
-  harness.explorer.nodes.set(ROOT, directoryNode(ROOT));
-  harness.explorer.nodes.set(SRC, directoryNode(SRC));
-  harness.explorer.nodes.set(FILE_A, fileNode(FILE_A));
-  harness.explorer.nodes.set("C:\\work\\notes.txt", fileNode("C:\\work\\notes.txt"));
+
+  const rootNode = directoryNode(ROOT);
+  const srcNode = directoryNode(SRC);
+  const fileANode = fileNode(FILE_A);
+  const notesNode = fileNode("C:\\work\\notes.txt");
+
+  harness.explorer.nodes.set(ROOT, rootNode);
+  harness.explorer.nodes.set(SRC, srcNode);
+  harness.explorer.nodes.set(FILE_A, fileANode);
+  harness.explorer.nodes.set("C:\\work\\notes.txt", notesNode);
+  harness.explorer.setChildren(ROOT, [srcNode, notesNode]);
+  harness.explorer.setChildren(SRC, [fileANode]);
+
+  harness.files.setDirectoryListing(ROOT, [
+    listEntry(SRC, "directory"),
+    listEntry("C:\\work\\notes.txt"),
+  ]);
+  harness.files.setDirectoryListing(SRC, [listEntry(FILE_A)]);
+
   return harness;
 }
 
@@ -1441,6 +1683,345 @@ describe("ExplorerActions delete (US7)", () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* Internal mutation race hardening (T116, T117, T118, T119)                   */
+/* -------------------------------------------------------------------------- */
+
+describe("ExplorerActions source identity guard (T116, T117, T118)", () => {
+  /** Opens the inline Rename editor for `a.ts`, as the controller does. */
+  function beginRename(harness: Harness, draftName: string): void {
+    harness.explorer.inlineEdit = {
+      type: "rename",
+      sourcePath: FILE_A,
+      originalName: "a.ts",
+      draftName,
+    };
+  }
+
+  /** Swaps the object at the source path, as another process would. */
+  function replaceSource(harness: Harness): void {
+    harness.files.setDirectoryListing(SRC, [
+      replacedEntry(FILE_A, "fake:replacement"),
+    ]);
+  }
+
+  const renameCalls = [
+    `reserve:${keyFor(FILE_A)}:${keyFor(`${SRC}\\renamed.ts`)}`,
+    "release",
+  ];
+
+  it("refuses to rename a source replaced while the reservation settled", async () => {
+    const harness = withTree(createHarness());
+    beginRename(harness, "renamed.ts");
+
+    // The reservation is the awaited path coordination step; the replacement
+    // lands while the operation is suspended there.
+    const reserve =
+      harness.documents.reservePathMutation.bind(harness.documents);
+    harness.documents.reservePathMutation = async (request) => {
+      replaceSource(harness);
+      return reserve(request);
+    };
+    const rename = vi.spyOn(harness.files, "renameWorkspaceEntry");
+
+    const result = await harness.actions.commitInlineEdit();
+
+    // The draft survives so the user can retry once the Tree has converged...
+    expect(result).toBe("retained");
+    // ...but the replaced object is never renamed, and neither document paths
+    // nor the Tree changed.
+    expect(rename).not.toHaveBeenCalled();
+    expect(harness.documents.renames).toEqual([]);
+    expect(harness.explorer.calls).toEqual([]);
+    expect(harness.dialogs.errors).toEqual([SOURCE_ENTRY_CHANGED_MESSAGE]);
+    // The reservation taken before the check is given back exactly like the
+    // existing failure paths, and the parent directory was the source of truth.
+    expect(harness.documents.calls).toEqual(renameCalls);
+    expect(harness.files.directoryReads).toEqual([SRC]);
+    expect(harness.explorer.inlineEdit).not.toBeNull();
+  });
+
+  it("still renames when only the on-disk leaf casing changed", async () => {
+    const harness = withTree(createHarness());
+    beginRename(harness, "renamed.ts");
+
+    // The source directory reports a case-*insensitive* contract, which is what
+    // makes a folded fallback legitimate here at all (T156).
+    await expect(
+      harness.files.readWorkspaceDirectory(SRC),
+    ).resolves.toMatchObject({ caseSensitive: false });
+
+    // An unreconciled case-only external rename: the Tree still spells `a.ts`
+    // while the listing now reports `A.TS`. The object is the *same* one — its
+    // token is unchanged — so refusing here would be a false negative (FR-066).
+    harness.files.setDirectoryListing(SRC, [movedEntry(FILE_A, `${SRC}\\A.TS`)]);
+
+    const result = await harness.actions.commitInlineEdit();
+
+    expect(result).toBe("committed");
+    expect(harness.files.calls).toContain(`rename:${FILE_A}:renamed.ts`);
+    expect(harness.documents.renames).toHaveLength(1);
+    expect(harness.dialogs.errors).toEqual([]);
+  });
+
+  it("refuses to rename a source whose fresh identity is unavailable", async () => {
+    const harness = withTree(createHarness());
+    beginRename(harness, "renamed.ts");
+    // The replacement entry carries no token, so continuity cannot be proven.
+    harness.files.setDirectoryListing(SRC, [replacedEntry(FILE_A, null)]);
+    const rename = vi.spyOn(harness.files, "renameWorkspaceEntry");
+
+    expect(await harness.actions.commitInlineEdit()).toBe("retained");
+
+    expect(rename).not.toHaveBeenCalled();
+    expect(harness.documents.renames).toEqual([]);
+    expect(harness.explorer.calls).toEqual([]);
+    expect(harness.dialogs.errors).toEqual([SOURCE_ENTRY_CHANGED_MESSAGE]);
+    expect(harness.documents.calls).toEqual(renameCalls);
+  });
+
+  it("refuses to rename a source that disappeared from its parent", async () => {
+    const harness = withTree(createHarness());
+    beginRename(harness, "renamed.ts");
+    harness.files.setDirectoryListing(SRC, []);
+    const rename = vi.spyOn(harness.files, "renameWorkspaceEntry");
+
+    expect(await harness.actions.commitInlineEdit()).toBe("retained");
+
+    expect(rename).not.toHaveBeenCalled();
+    expect(harness.documents.renames).toEqual([]);
+    expect(harness.explorer.calls).toEqual([]);
+    expect(harness.dialogs.errors).toEqual([SOURCE_ENTRY_CHANGED_MESSAGE]);
+    expect(harness.documents.calls).toEqual(renameCalls);
+  });
+
+  it("refuses to rename a source whose kind changed", async () => {
+    const harness = withTree(createHarness());
+    beginRename(harness, "renamed.ts");
+    // A directory now occupies the path with a different token: the entry was
+    // replaced even though the path string is unchanged.
+    harness.files.setDirectoryListing(SRC, [
+      replacedEntry(FILE_A, "fake:replacement-directory", "directory"),
+    ]);
+    const rename = vi.spyOn(harness.files, "renameWorkspaceEntry");
+
+    expect(await harness.actions.commitInlineEdit()).toBe("retained");
+
+    expect(rename).not.toHaveBeenCalled();
+    expect(harness.explorer.calls).toEqual([]);
+    expect(harness.dialogs.errors).toEqual([SOURCE_ENTRY_CHANGED_MESSAGE]);
+  });
+
+  it("refuses to trash a target replaced while the user was deciding", async () => {
+    const harness = withTree(createHarness());
+    harness.explorer.selectPath(FILE_A);
+    harness.documents.sessions = [session(FILE_A, false, "doc-a")];
+
+    // The confirmation dialog is the awaited step the user decides in; the
+    // replacement lands before they answer.
+    const confirmDelete = harness.dialogs.confirmDelete.bind(harness.dialogs);
+    harness.dialogs.confirmDelete = async (request) => {
+      replaceSource(harness);
+      return confirmDelete(request);
+    };
+    const trash = vi.spyOn(harness.files, "trashWorkspaceEntry");
+
+    await harness.actions.delete();
+
+    expect(trash).not.toHaveBeenCalled();
+    // No session was removed and the Tree kept its node.
+    expect(harness.documents.removed).toEqual([]);
+    expect(harness.explorer.calls).toEqual([`select:${FILE_A}`]);
+    expect(harness.dialogs.errors).toEqual([SOURCE_ENTRY_CHANGED_MESSAGE]);
+    expect(harness.documents.calls).toEqual([
+      `reserve:${keyFor(FILE_A)}:none`,
+      "release",
+    ]);
+    expect(harness.files.directoryReads).toEqual([SRC]);
+  });
+
+  it("refuses both operations when the captured entry identity is unavailable", async () => {
+    const harness = withTree(createHarness());
+    // The platform supplied no token for the selected node, so continuity is
+    // unprovable even though the fresh listing would match by path and kind.
+    const anonymous = { ...fileNode(FILE_A), objectIdentity: null };
+    harness.explorer.nodes.set(FILE_A, anonymous);
+    harness.explorer.setChildren(SRC, [anonymous]);
+
+    beginRename(harness, "renamed.ts");
+    const rename = vi.spyOn(harness.files, "renameWorkspaceEntry");
+    expect(await harness.actions.commitInlineEdit()).toBe("retained");
+    expect(rename).not.toHaveBeenCalled();
+    expect(harness.dialogs.errors).toEqual([SOURCE_ENTRY_CHANGED_MESSAGE]);
+    expect(harness.explorer.calls).toEqual([]);
+
+    // Delete is refused the same way: the confirmation still runs (it is what
+    // the user asked for), but the destructive call does not.
+    const deleteHarness = withTree(createHarness());
+    deleteHarness.explorer.nodes.set(FILE_A, {
+      ...fileNode(FILE_A),
+      objectIdentity: null,
+    });
+    deleteHarness.explorer.selectedPath = FILE_A;
+    const trash = vi.spyOn(deleteHarness.files, "trashWorkspaceEntry");
+
+    await deleteHarness.actions.delete();
+
+    expect(trash).not.toHaveBeenCalled();
+    expect(deleteHarness.documents.removed).toEqual([]);
+    expect(deleteHarness.explorer.calls).toEqual([]);
+    expect(deleteHarness.dialogs.errors).toEqual([SOURCE_ENTRY_CHANGED_MESSAGE]);
+  });
+
+  it("refuses the mutation when the pre-mutation directory read fails", async () => {
+    const readError = {
+      code: "io_directory",
+      message: "Cannot read the directory",
+    } satisfies FileCommandError;
+
+    const renameHarness = withTree(createHarness());
+    beginRename(renameHarness, "renamed.ts");
+    renameHarness.files.directoryReadError = readError;
+    const rename = vi.spyOn(renameHarness.files, "renameWorkspaceEntry");
+
+    expect(await renameHarness.actions.commitInlineEdit()).toBe("retained");
+
+    expect(rename).not.toHaveBeenCalled();
+    expect(renameHarness.dialogs.errors).toEqual([readError.message]);
+    expect(renameHarness.explorer.calls).toEqual([]);
+    expect(renameHarness.documents.calls).toEqual(renameCalls);
+
+    const deleteHarness = withTree(createHarness());
+    deleteHarness.explorer.selectedPath = FILE_A;
+    deleteHarness.files.directoryReadError = readError;
+    const trash = vi.spyOn(deleteHarness.files, "trashWorkspaceEntry");
+
+    await deleteHarness.actions.delete();
+
+    expect(trash).not.toHaveBeenCalled();
+    expect(deleteHarness.documents.removed).toEqual([]);
+    expect(deleteHarness.explorer.calls).toEqual([]);
+    expect(deleteHarness.dialogs.errors).toEqual([readError.message]);
+  });
+
+  it("renames a stable source through the unchanged disk-first path", async () => {
+    const harness = withTree(createHarness());
+    beginRename(harness, "renamed.ts");
+    const rename = vi.spyOn(harness.files, "renameWorkspaceEntry");
+
+    expect(await harness.actions.commitInlineEdit()).toBe("committed");
+
+    const newPath = `${SRC}\\renamed.ts`;
+    expect(rename).toHaveBeenCalledWith({
+      sourcePath: FILE_A,
+      newName: "renamed.ts",
+    });
+    expect(harness.dialogs.errors).toEqual([]);
+    // Reservation first, then disk, then document paths, then the Tree.
+    expect(harness.documents.calls).toEqual([
+      `reserve:${keyFor(FILE_A)}:${keyFor(newPath)}`,
+      `commitRename:${newPath}`,
+      "release",
+    ]);
+    expect(harness.explorer.calls).toContain(
+      `applyRenamed:${FILE_A}->${newPath}`,
+    );
+    expect(harness.explorer.calls).toContain(`select:${newPath}`);
+    // The guard's one authoritative read was the source's parent, taken last.
+    expect(harness.files.directoryReads).toEqual([SRC]);
+    expect(childPaths(harness.explorer, SRC)).toEqual([newPath]);
+  });
+
+  it("trashes a stable target and keeps the 003 dirty warning semantics", async () => {
+    const harness = withTree(createHarness());
+    harness.explorer.selectPath(FILE_A);
+    harness.documents.sessions = [session(FILE_A, true, "doc-a")];
+    const trash = vi.spyOn(harness.files, "trashWorkspaceEntry");
+
+    await harness.actions.delete();
+
+    expect(trash).toHaveBeenCalledWith(FILE_A);
+    // One warning for a confirmed clean operation, and the dirty Tab is removed
+    // through the no-second-prompt API (FR-069, FR-071).
+    expect(harness.dialogs.prompts).toEqual([
+      { displayName: "a.ts", dirty: true, affectedDirtyNames: [] },
+    ]);
+    expect(harness.documents.removed).toEqual([["doc-a"]]);
+    expect(harness.explorer.calls).toContain(`applyDeleted:${FILE_A}`);
+    expect(harness.dialogs.errors).toEqual([]);
+    expect(harness.files.directoryReads).toEqual([SRC]);
+  });
+
+  it("converges to the on-disk listing after a rename and its watcher echoes", async () => {
+    const harness = withTree(createHarness());
+    beginRename(harness, "renamed.ts");
+
+    await harness.actions.commitInlineEdit();
+
+    const newPath = `${SRC}\\renamed.ts`;
+    expect(childPaths(harness.explorer, SRC)).toEqual([newPath]);
+
+    // The watcher later reports the very same on-disk structure, twice. A
+    // rename preserves the object's token, so this is the same entry, not a
+    // delete/recreate pair.
+    harness.files.setDirectoryListing(SRC, [movedEntry(FILE_A, newPath)]);
+    harness.explorer.echoDirectory(SRC, harness.files.directoryListing(SRC));
+    harness.explorer.echoDirectory(SRC, harness.files.directoryListing(SRC));
+
+    expect(childPaths(harness.explorer, SRC)).toEqual([newPath]);
+    expect(harness.explorer.childrenOf(SRC)).toHaveLength(1);
+  });
+
+  it("converges to the on-disk listing after a delete and its watcher echoes", async () => {
+    const harness = withTree(createHarness());
+    harness.explorer.selectPath("C:\\work\\notes.txt");
+
+    await harness.actions.delete();
+
+    expect(childPaths(harness.explorer, ROOT)).toEqual([SRC]);
+
+    // The echo repeats the current on-disk structure: the entry is gone.
+    harness.files.setDirectoryListing(ROOT, [listEntry(SRC, "directory")]);
+    harness.explorer.echoDirectory(ROOT, harness.files.directoryListing(ROOT));
+    harness.explorer.echoDirectory(ROOT, harness.files.directoryListing(ROOT));
+
+    expect(childPaths(harness.explorer, ROOT)).toEqual([SRC]);
+    expect(harness.explorer.childrenOf(ROOT)).toHaveLength(1);
+  });
+  it("prefers the exact leaf over a case-colliding sibling with the same identity", async () => {
+    const harness = withTree(createHarness());
+    beginRename(harness, "renamed.ts");
+
+    // A case-sensitive filesystem with two case-distinct hardlinks to one object:
+    // only the entry the user actually selected may be renamed.
+    harness.files.setDirectoryListing(SRC, [
+      movedEntry(FILE_A, FILE_A),
+      movedEntry(FILE_A, `${SRC}\\A.TS`),
+    ]);
+
+    expect(await harness.actions.commitInlineEdit()).toBe("committed");
+    expect(harness.files.calls).toContain(`rename:${FILE_A}:renamed.ts`);
+  });
+
+  it("refuses an ambiguous case-folded match instead of guessing", async () => {
+    const harness = withTree(createHarness());
+    beginRename(harness, "renamed.ts");
+
+    // The selected spelling is absent, and it folds onto two case-distinct
+    // entries that share one object identity: there is no way to tell which one
+    // the user meant, so the mutation is refused (Constitution I).
+    harness.files.setDirectoryListing(SRC, [
+      movedEntry("C:\\work\\src\\SHARED-X", `${SRC}\\A.TS`),
+      movedEntry("C:\\work\\src\\SHARED-X", `${SRC}\\a.ts`),
+    ]);
+    const rename = vi.spyOn(harness.files, "renameWorkspaceEntry");
+
+    expect(await harness.actions.commitInlineEdit()).toBe("retained");
+    expect(rename).not.toHaveBeenCalled();
+    expect(harness.dialogs.errors).toEqual([SOURCE_ENTRY_CHANGED_MESSAGE]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
 /* Refresh (FR-082, FR-083)                                                    */
 /* -------------------------------------------------------------------------- */
 
@@ -1701,5 +2282,49 @@ describe("ExplorerActions open (US3)", () => {
 
     expect(select).toHaveBeenCalledWith(FILE_A);
     expect(harness.documents.calls).toEqual([]);
+  });
+});
+
+describe("pre-mutation source check under the directory's case contract (T154, T156)", () => {
+  it("refuses a case-distinct same-identity sibling on a case-sensitive directory", async () => {
+    const harness = withTree(createHarness());
+    harness.explorer.inlineEdit = {
+      type: "rename",
+      sourcePath: FILE_A,
+      originalName: "a.ts",
+      draftName: "renamed.ts",
+    };
+
+    // The backend reports a case-sensitive directory, so `A.TS` is a *different*
+    // entry even though it resolves to the same filesystem object. Adopting it
+    // would rename an entry the user never selected (Constitution I, FR-066).
+    harness.files.setCaseSensitive(SRC);
+    harness.files.setDirectoryListing(SRC, [movedEntry(FILE_A, `${SRC}\\A.TS`)]);
+    const rename = vi.spyOn(harness.files, "renameWorkspaceEntry");
+
+    expect(await harness.actions.commitInlineEdit()).toBe("retained");
+
+    expect(rename).not.toHaveBeenCalled();
+    expect(harness.documents.renames).toEqual([]);
+    expect(harness.explorer.calls).toEqual([]);
+    expect(harness.dialogs.errors).toEqual([SOURCE_ENTRY_CHANGED_MESSAGE]);
+  });
+
+  it("still renames an exactly spelled entry on a case-sensitive directory", async () => {
+    const harness = withTree(createHarness());
+    harness.explorer.inlineEdit = {
+      type: "rename",
+      sourcePath: FILE_A,
+      originalName: "a.ts",
+      draftName: "renamed.ts",
+    };
+
+    // The same object under the very spelling the user selected needs no folded
+    // fallback at all, so a case-sensitive directory still works normally.
+    harness.files.setCaseSensitive(SRC);
+
+    expect(await harness.actions.commitInlineEdit()).toBe("committed");
+    expect(harness.files.calls).toContain(`rename:${FILE_A}:renamed.ts`);
+    expect(harness.dialogs.errors).toEqual([]);
   });
 });

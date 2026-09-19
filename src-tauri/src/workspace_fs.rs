@@ -60,6 +60,15 @@ pub struct WorkspaceDirectoryEntry {
     pub kind: WorkspaceEntryKind,
     /// Whether the entry itself is a link/reparse point.
     pub is_symlink: bool,
+    /// Opaque identity of the entry *itself* (006).
+    ///
+    /// Read from the entry's own metadata without following a final link, so it
+    /// describes the logical entry rather than the object a link points at. That
+    /// distinction is what lets 006 prove "this Explorer entry was renamed" while
+    /// keeping it strictly separate from the resolved-target identity a document
+    /// binding stores. It is `None` when the platform cannot supply one, and the
+    /// entry then simply falls back to remove/create semantics.
+    pub object_identity: Option<String>,
 }
 
 /// Result of reading one directory level.
@@ -72,6 +81,15 @@ pub struct WorkspaceDirectoryResult {
     pub canonical_path: String,
     /// Canonical comparison identity, used for ancestor-cycle checks.
     pub comparison_key: String,
+    /// Whether this directory's entries are compared case-sensitively.
+    ///
+    /// The frontend must not guess the platform: a pre-mutation check that falls
+    /// back to a differently-cased spelling may only do so where the filesystem
+    /// really treats the two spellings as one entry. This field reports the
+    /// platform rule, strengthened by direct evidence when the listing itself
+    /// contains two names that differ only by case (which only a case-sensitive
+    /// directory can produce).
+    pub case_sensitive: bool,
     /// Direct children only; never a recursive listing.
     pub entries: Vec<WorkspaceDirectoryEntry>,
 }
@@ -178,8 +196,40 @@ pub fn read_directory(requested_path: &str) -> Result<WorkspaceDirectoryResult, 
         requested_path: requested_path.to_string(),
         canonical_path: canonical.to_string_lossy().to_string(),
         comparison_key: comparison_key(&canonical),
+        case_sensitive: directory_comparison_contract(&canonical, &entries),
         entries,
     })
+}
+
+/// The comparison contract of one directory: what the filesystem itself says,
+/// made stricter by direct evidence from the listing.
+///
+/// The rule is asked of the filesystem ([`file_identity::directory_case_sensitive`])
+/// instead of being inferred from the platform, because Windows can enable case
+/// sensitivity for a single directory and the directory is the only thing that
+/// knows. Direct evidence from the listing can only ever make the answer
+/// stricter: two names that differ by case alone cannot coexist in a
+/// case-insensitive directory, so observing such a pair proves case-sensitive
+/// comparison even where the platform refused to say (FR-038, FR-066).
+fn directory_comparison_contract(
+    canonical: &Path,
+    entries: &[WorkspaceDirectoryEntry],
+) -> bool {
+    file_identity::directory_case_sensitive(canonical) || has_case_colliding_names(entries)
+}
+
+/// Whether a listing itself proves that its directory compares case-sensitively.
+///
+/// The converse is deliberately not concluded: a case-sensitive directory may
+/// simply contain no such pair, so an absence of evidence never narrows the
+/// contract.
+fn has_case_colliding_names(entries: &[WorkspaceDirectoryEntry]) -> bool {
+    let mut folded: Vec<String> = entries
+        .iter()
+        .map(|entry| file_identity::folded_name(&entry.name))
+        .collect();
+    folded.sort();
+    folded.windows(2).any(|pair| pair[0] == pair[1])
 }
 
 /// Creates one empty file or one directory without overwriting anything.
@@ -293,12 +343,26 @@ pub fn rename_entry(request: &RenameEntryRequest) -> Result<RenamedEntry, FileCo
 /// Whether `destination` is the source entry re-spelled with different case.
 ///
 /// Only a spelling change may reuse an existing destination, and the test is
-/// deliberately two-sided: the two names must differ by case alone *and* both
-/// paths must still resolve to the same object. A destination link or hard link
-/// that merely resolves to the source has a name of its own, so it is a
+/// deliberately two-sided: the containing directory must really compare names
+/// case-insensitively (the one shared contract, not a fold invented here) *and*
+/// both paths must still resolve to the same object. A destination link or hard
+/// link that merely resolves to the source has a name of its own, so it is a
 /// distinct entry and is never authorized here (plan decision 9, US6
 /// acceptance 5).
 fn is_case_only_respelling(source: &Path, destination: &Path) -> bool {
+    is_case_only_respelling_with(&file_identity::PlatformCaseComparator, source, destination)
+}
+
+/// [`is_case_only_respelling`] against an injected comparison contract.
+///
+/// The seam exists so both answers can be pinned: a directory that really
+/// compares names case-insensitively keeps the spelling change working, and a
+/// directory that reports case-sensitive comparison refuses the very same paths.
+fn is_case_only_respelling_with(
+    comparator: &impl file_identity::CaseComparator,
+    source: &Path,
+    destination: &Path,
+) -> bool {
     let (source_name, destination_name) = match (source.file_name(), destination.file_name()) {
         (Some(source_name), Some(destination_name)) => (source_name, destination_name),
         _ => return false,
@@ -308,9 +372,22 @@ fn is_case_only_respelling(source: &Path, destination: &Path) -> bool {
         return false;
     }
 
-    let source_spelling = source_name.to_string_lossy().to_lowercase();
-    let destination_spelling = destination_name.to_string_lossy().to_lowercase();
-    if source_spelling != destination_spelling {
+    // The names must differ by case alone: `real` versus `alias` is never a
+    // re-spelling, however the two paths happen to resolve.
+    if file_identity::folded_name(&source_name.to_string_lossy())
+        != file_identity::folded_name(&destination_name.to_string_lossy())
+    {
+        return false;
+    }
+
+    // In a case-sensitive directory the two spellings are two entries by
+    // definition, so an existing destination is a different entry and the rename
+    // must refuse it instead of stepping aside.
+    let parent = match destination.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    if file_identity::directory_case_sensitive_with(comparator, parent) {
         return false;
     }
 
@@ -504,6 +581,10 @@ fn describe_entry(
         path: path.to_string_lossy().to_string(),
         kind,
         is_symlink,
+        // The *entry's* own identity, without following a final link: no second
+        // directory listing, no directory recursion and no file content is
+        // involved in obtaining 006's entry token.
+        object_identity: file_identity::object_identity(&path, false),
     })
 }
 
@@ -519,9 +600,12 @@ pub fn sort_entries(entries: &mut [WorkspaceDirectoryEntry]) {
         right_directory
             .cmp(&left_directory)
             .then_with(|| {
-                left.name
-                    .to_lowercase()
-                    .cmp(&right.name.to_lowercase())
+                // Display ordering only: this is the Explorer's presentation rule,
+                // not an identity or comparison contract (which lives in
+                // `file_identity`), so it may fold more aggressively than the
+                // filesystem itself does.
+                file_identity::folded_name(&left.name)
+                    .cmp(&file_identity::folded_name(&right.name))
             })
             .then_with(|| left.name.cmp(&right.name))
     });
@@ -664,6 +748,54 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The comparison contract the pre-mutation source check relies on: the
+    /// filesystem's own answer for the directory, strengthened only by direct
+    /// evidence from the listing.
+    #[test]
+    fn read_directory_reports_the_case_comparison_contract() {
+        let dir = work_dir("read-case-contract");
+        fs::write(dir.join("notes.txt"), b"x").expect("write fixture");
+
+        let result = read_directory(&display(&dir)).expect("read the root");
+
+        // No case-distinct pair in this listing, so the directory's own rule is
+        // the whole contract (T156).
+        assert_eq!(
+            result.case_sensitive,
+            file_identity::directory_case_sensitive(Path::new(&result.canonical_path)),
+            "without direct evidence the directory's own comparison rule is the contract"
+        );
+
+        // A case-distinct pair cannot exist in a case-insensitive directory, so
+        // observing one is proof of a case-sensitive directory on any platform.
+        let colliding = vec![
+            WorkspaceDirectoryEntry {
+                name: "Alpha".to_string(),
+                path: display(&dir.join("Alpha")),
+                kind: WorkspaceEntryKind::File,
+                is_symlink: false,
+                object_identity: None,
+            },
+            WorkspaceDirectoryEntry {
+                name: "alpha".to_string(),
+                path: display(&dir.join("alpha")),
+                kind: WorkspaceEntryKind::File,
+                is_symlink: false,
+                object_identity: None,
+            },
+        ];
+        assert!(
+            has_case_colliding_names(&colliding),
+            "a case-distinct pair proves case-sensitive comparison"
+        );
+        assert!(
+            directory_comparison_contract(Path::new(&result.canonical_path), &colliding),
+            "the contract can only become stricter, never looser"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// The JSON shapes the frontend's Workspace DTOs read.
     #[test]
     fn read_directory_matches_the_ipc_contract_shape() {
@@ -673,10 +805,14 @@ mod tests {
 
         let value = to_json(&read_directory(&display(&dir)).expect("read the root"));
 
-        assert_eq!(value.as_object().expect("object").len(), 4);
+        assert_eq!(value.as_object().expect("object").len(), 5);
         assert!(value["requestedPath"].is_string());
         assert!(value["canonicalPath"].is_string());
         assert!(value["comparisonKey"].is_string());
+        assert!(
+            value["caseSensitive"].is_boolean(),
+            "the platform comparison contract is part of the wire shape"
+        );
         assert!(value.get("requested_path").is_none());
 
         let entries = value["entries"].as_array().expect("entry array");
@@ -687,10 +823,15 @@ mod tests {
         assert_eq!(entries[1]["kind"], json!("file"));
         assert_eq!(
             entries[0].as_object().expect("object").len(),
-            4,
-            "a directory entry carries exactly name/path/kind/isSymlink"
+            5,
+            "a directory entry carries exactly name/path/kind/isSymlink/objectIdentity"
+        );
+        assert!(
+            entries[0]["objectIdentity"].is_string(),
+            "a listed entry carries the opaque 006 entry identity"
         );
         assert!(entries[0].get("is_symlink").is_none());
+        assert!(entries[0].get("object_identity").is_none());
 
         // The entry path is built from the requested parent, so it is what the
         // user selected rather than an internal canonical spelling.
@@ -734,6 +875,141 @@ mod tests {
             WorkspaceEntryKind::File
         );
         assert_eq!(kind_of(&result, "targets"), WorkspaceEntryKind::Directory);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 006: one-level reads carry a usable identity for every entry that the
+    /// platform can identify, and reading the directory twice reports the same
+    /// token — without ever reading a descendant level.
+    #[test]
+    fn read_directory_reports_a_stable_object_identity_per_entry() {
+        let dir = work_dir("read-object-identity");
+        fs::write(dir.join("a.txt"), b"x").expect("write fixture file");
+        fs::create_dir_all(dir.join("src").join("deep")).expect("create nested dirs");
+        fs::write(dir.join("src").join("deep").join("hidden.ts"), b"x").expect("write nested file");
+
+        let first = read_directory(&display(&dir)).expect("read the root");
+        let second = read_directory(&display(&dir)).expect("read the root again");
+
+        for (entry, again) in first.entries.iter().zip(second.entries.iter()) {
+            assert_eq!(entry.name, again.name);
+            assert_eq!(
+                entry.object_identity, again.object_identity,
+                "{} must report a stable identity across reads",
+                entry.name
+            );
+        }
+
+        for name in ["a.txt", "src"] {
+            let entry = first
+                .entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .expect("the entry must be listed");
+            assert!(
+                entry.object_identity.is_some(),
+                "{name} must carry an object identity on a platform that provides one"
+            );
+        }
+
+        // The nested file is never part of a one-level read, so no recursion
+        // happened to produce these identities.
+        assert!(
+            !names(&first).contains(&"hidden.ts".to_string()),
+            "a one-level read must not enumerate descendants"
+        );
+
+        // Recreating the entry produces a different object, so the identity is
+        // not merely a hash of the path.
+        let before = first
+            .entries
+            .iter()
+            .find(|entry| entry.name == "a.txt")
+            .expect("the file must be listed")
+            .object_identity
+            .clone();
+        fs::remove_file(dir.join("a.txt")).expect("delete the fixture file");
+        fs::write(dir.join("a.txt"), b"x").expect("recreate the fixture file");
+        let after = read_directory(&display(&dir))
+            .expect("read the root after the replacement")
+            .entries
+            .iter()
+            .find(|entry| entry.name == "a.txt")
+            .expect("the file must be listed")
+            .object_identity
+            .clone();
+
+        if let (Some(before), Some(after)) = (before, after) {
+            assert_ne!(before, after, "a recreated entry is a different object");
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 006 keeps the two identity domains apart: a link entry is identified by
+    /// its own reparse point, not by the directory it resolves to.
+    #[test]
+    fn read_directory_identifies_a_link_entry_itself() {
+        let dir = work_dir("read-link-identity");
+        let target = dir.join("targets");
+        fs::create_dir_all(&target).expect("create target dir");
+
+        let link = dir.join("linked");
+        if !test_support::create_directory_link(&target, &link) {
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let result = read_directory(&display(&dir)).expect("read the root");
+        let link_entry = result
+            .entries
+            .iter()
+            .find(|entry| entry.name == "linked")
+            .expect("the link must be listed");
+        let target_entry = result
+            .entries
+            .iter()
+            .find(|entry| entry.name == "targets")
+            .expect("the target must be listed");
+
+        assert!(link_entry.is_symlink);
+        if let (Some(link_identity), Some(target_identity)) =
+            (&link_entry.object_identity, &target_entry.object_identity)
+        {
+            assert_ne!(
+                link_identity, target_identity,
+                "a link entry must not simply borrow its target's identity"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A broken link still carries the identity of the entry that exists, which
+    /// is what lets 006 reconcile its removal or replacement.
+    #[test]
+    fn read_directory_identifies_a_broken_link_entry() {
+        let dir = work_dir("read-broken-link-identity");
+        let link = dir.join("dangling");
+
+        if !test_support::create_file_link(&dir.join("absent.txt"), &link) {
+            let _ = fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let result = read_directory(&display(&dir)).expect("read the root");
+        let entry = result
+            .entries
+            .iter()
+            .find(|entry| entry.name == "dangling")
+            .expect("the broken link must be listed");
+
+        assert!(entry.is_symlink);
+        assert!(
+            entry.object_identity.is_some(),
+            "the entry itself exists, so its identity is available"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1041,6 +1317,63 @@ mod tests {
             Some(std::ffi::OsStr::new("CASE.TXT"))
         );
         assert!(dir.join("CASE.TXT").is_file());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A comparison contract that reports one fixed answer for every directory.
+    #[cfg(windows)]
+    struct FixedCaseContract {
+        case_sensitive: bool,
+    }
+
+    #[cfg(windows)]
+    impl file_identity::CaseComparator for FixedCaseContract {
+        fn case_sensitivity(&self, _directory: &Path) -> Option<bool> {
+            Some(self.case_sensitive)
+        }
+    }
+
+    /// T156: the directory's reported contract is what decides whether a
+    /// case-only re-spelling names the same entry. The very same paths must be
+    /// accepted where the directory is case-insensitive and refused where it is
+    /// not, so a case-sensitive directory can never let a rename step aside onto
+    /// a differently-cased entry (Constitution I, FR-066).
+    #[test]
+    #[cfg(windows)]
+    fn a_case_sensitive_directory_refuses_a_case_only_respelling() {
+        let dir = work_dir("rename-case-contract");
+        let source = dir.join("case.txt");
+        fs::write(&source, b"x").expect("write fixture");
+        let destination = dir.join("CASE.TXT");
+
+        // On a case-insensitive filesystem both spellings really name one entry,
+        // so nothing but the reported contract can decide.
+        assert!(
+            source.exists() && destination.exists(),
+            "the fixture must name one existing entry under both spellings"
+        );
+
+        assert!(
+            is_case_only_respelling_with(
+                &FixedCaseContract {
+                    case_sensitive: false,
+                },
+                &source,
+                &destination,
+            ),
+            "a case-insensitive directory keeps the spelling-only rename working"
+        );
+        assert!(
+            !is_case_only_respelling_with(
+                &FixedCaseContract {
+                    case_sensitive: true,
+                },
+                &source,
+                &destination,
+            ),
+            "a case-sensitive directory must treat it as a different entry"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

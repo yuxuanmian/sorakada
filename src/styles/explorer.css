@@ -132,10 +132,21 @@
   color: var(--color-text);
 }
 
+/*
+ * A load notice is still a row, but its text is a sentence rather than a name, so
+ * it grows instead of being clipped to the 22px row height. With a fixed height,
+ * a long localized failure message painted over the rows above and below it.
+ */
 .explorer-row--notice {
+  height: auto;
+  min-height: 22px;
+  align-items: flex-start;
+  padding-top: 2px;
+  padding-bottom: 2px;
   color: var(--color-text-subtle);
   font-style: italic;
   white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .explorer-row__chevron {

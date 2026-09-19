@@ -142,6 +142,7 @@ class FakeWorkspaceService {
       requestedPath: path,
       canonicalPath: canonical,
       comparisonKey: keyFor(canonical),
+      caseSensitive: false,
       entries,
     });
   }
@@ -245,6 +246,7 @@ function entry(
     path,
     kind,
     isSymlink: false,
+    objectIdentity: `fake:${path.toLowerCase()}`,
   };
 }
 
@@ -979,6 +981,7 @@ describe("Workspace relation derivation (T100)", () => {
         comparisonKey: `${WORK_A}\\lib`.toLowerCase(),
         kind: "directory",
         diskRevision: null,
+        objectIdentity: "fake:directory-object",
       },
     });
 

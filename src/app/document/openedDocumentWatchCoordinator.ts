@@ -27,6 +27,7 @@
 import type { FileCommandError, ResolvedPathIdentity } from "../../services/fileService";
 import type {
   FilesystemWatcherService,
+  WatchEventPayload,
   WatchScope,
   WatchSubscriptionHandle,
 } from "../../services/filesystemWatcher";
@@ -98,9 +99,9 @@ export interface OpenedDocumentWatchCoordinatorDeps {
   /** Injected timer, so no test depends on real event timing. */
   scheduler?: HintScheduler;
   /**
-   * 005 always watches non-recursively through the file's parent directory; the
-   * scope stays configurable because the backend already supports the recursive
-   * mode 006 will use.
+   * 005 always watches non-recursively through the file's parent directory. The
+   * scope stays configurable because the shared backend supports the recursive
+   * mode 006's Workspace subscription uses on the same directory.
    */
   scope?: WatchScope;
 }
@@ -144,11 +145,33 @@ interface Interest {
  * subscription is already gone.
  *
  * It is not an identity system: the authoritative key is the canonical
- * comparison key carried by the interest, and this merely matches the case
- * folding the backend itself applies on Windows.
+ * comparison key carried by the interest. Folding case here only ever matches
+ * *more* directories than the backend would (an extra, always-safe 005
+ * revalidation), never fewer, and the backend's per-directory comparison
+ * contract stays the only authority on whether two names can be one entry
+ * (T156).
  */
 function canonicalLookupKey(canonicalPath: string): string {
   return canonicalPath.toLowerCase();
+}
+
+/**
+ * The parent directory of a canonical path, as the backend would watch it.
+ *
+ * 005 subscribes non-recursively through the bound file's parent, so this is the
+ * directory an interest would be served by even before its subscription exists.
+ * A path with no final component (a volume root) has no parent and only matches
+ * itself.
+ */
+function parentWatchPath(canonicalPath: string): string {
+  const trimmed = canonicalPath.replace(/[\\/]+$/, "");
+  const index = Math.max(trimmed.lastIndexOf("\\"), trimmed.lastIndexOf("/"));
+  if (index < 0) {
+    return canonicalPath;
+  }
+
+  const parent = trimmed.slice(0, index);
+  return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
 }
 
 /**
@@ -284,7 +307,12 @@ export class OpenedDocumentWatchCoordinator {
     this.starting = this.track(
       (async () => {
         const unlisten = await this.deps.watcher.listen((payload) => {
-          normalizer.push(payload);
+          // The Workspace consumer shares this channel, and an invalidation is
+          // emitted per *logical* scope, so a 006-only loss notice must not turn
+          // into a document validation sweep here (plan §2, T058).
+          if (this.acceptsPayload(payload)) {
+            normalizer.push(payload);
+          }
         });
         if (this.isStartSuperseded(epoch) || this.disposed) {
           // The listener arrived for a lifecycle that no longer exists, so it is
@@ -417,6 +445,63 @@ export class OpenedDocumentWatchCoordinator {
     }
   }
 
+  /**
+   * Whether a payload may reach this consumer's normalizer.
+   *
+   * 005 is interested in two things only: its own change hints (which carry a
+   * subscription) and a loss of completeness that could affect a path it watches.
+   * 006's recursive Workspace invalidation is *not* one of them unless it names
+   * the directory one of this consumer's subscriptions actually watches, so a
+   * Workspace-wide overflow no longer forces every opened document to revalidate
+   * (FR-010, plan §2).
+   */
+  private acceptsPayload(payload: WatchEventPayload): boolean {
+    if (payload.type !== "invalidated") {
+      return true;
+    }
+    if (payload.watchedPath === null) {
+      // A backend-global loss notice names nothing, so every live consumer has to
+      // revalidate: 005 included.
+      return true;
+    }
+    if (payload.scope !== "recursive") {
+      // A non-recursive notice is this consumer's own scope by construction.
+      return true;
+    }
+
+    return this.watchesDirectory(payload.watchedPath);
+  }
+
+  /**
+   * Whether any live interest is served by a backend watch on `watchedPath`.
+   *
+   * Both sides are Rust-canonical watch directories, and the case folding in
+   * [`canonicalLookupKey`] can only widen the match — this is a question about a
+   * *subscription* and never a Tree or document path lookup.
+   */
+  private watchesDirectory(watchedPath: string): boolean {
+    const wanted = canonicalLookupKey(watchedPath);
+
+    for (const interest of this.interests.values()) {
+      const handlePath = interest.handle?.watchedPath;
+      if (
+        handlePath !== undefined &&
+        canonicalLookupKey(handlePath) === wanted
+      ) {
+        return true;
+      }
+
+      // An interest whose subscription is not established yet (or was refused)
+      // still matters: the parent directory of the bound file is exactly the
+      // directory 005 would watch for it.
+      if (canonicalLookupKey(parentWatchPath(interest.canonicalPath)) === wanted) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   /* ---------------------------------------------------------------------- */
   /* Validation triggers                                                    */
   /* ---------------------------------------------------------------------- */
@@ -495,15 +580,27 @@ export class OpenedDocumentWatchCoordinator {
     }
 
     const existing = this.interests.get(change.documentId);
+
+    // 006: a rebound the manager marked as an external relocation must not be
+    // trusted as "already validated". The destination's current metadata became
+    // the adopted baseline during the rebind, so only a forced snapshot read can
+    // tell whether the file still matches what this document holds (FR-061).
+    //
+    // It is decided *before* the same-comparison-key early return below, because
+    // a Windows case-only relocation keeps the key while still changing the bound
+    // path (FR-046).
+    const relocated =
+      change.type === "rebound" && change.cause === "external-relocation";
+
     if (existing !== undefined) {
-      if (existing.comparisonKey === change.identity.comparisonKey) {
+      if (existing.comparisonKey === change.identity.comparisonKey && !relocated) {
         // The same document on the same path: the interest is already live (or is
         // being established) and must not be torn down and recreated.
         return;
       }
-      // Save As / Rename migration: the old interest is retired *before* the new
-      // one is established, so an event for the old path can no longer reach the
-      // document once it is bound elsewhere (FR-004).
+      // Save As / Rename / relocation migration: the old interest is retired
+      // *before* the new one is established, so an event for the old path can no
+      // longer reach the document once it is bound elsewhere (FR-004).
       this.retireInterest(existing);
     }
 
@@ -529,7 +626,10 @@ export class OpenedDocumentWatchCoordinator {
       interest.documentId,
     );
 
-    await this.establishSubscription(interest);
+    await this.establishSubscription(
+      interest,
+      relocated ? "external-relocation" : "post-subscription",
+    );
   }
 
   private retireInterest(interest: Interest): void {
@@ -549,7 +649,10 @@ export class OpenedDocumentWatchCoordinator {
     }
   }
 
-  private async establishSubscription(interest: Interest): Promise<void> {
+  private async establishSubscription(
+    interest: Interest,
+    trigger: DiskValidationTrigger = "post-subscription",
+  ): Promise<void> {
     if (this.disposed) {
       return;
     }
@@ -579,8 +682,9 @@ export class OpenedDocumentWatchCoordinator {
     }
 
     // FR-044: without this, a change between the read that produced the baseline
-    // and the active subscription would stay invisible forever.
-    await this.validateInterest(interest, "post-subscription");
+    // and the active subscription would stay invisible forever. After an external
+    // relocation the same checkpoint additionally forces a content read (FR-061).
+    await this.validateInterest(interest, trigger);
   }
 
   /* ---------------------------------------------------------------------- */

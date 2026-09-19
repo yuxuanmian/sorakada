@@ -25,6 +25,16 @@ export interface WorkspaceDirectoryEntry {
   kind: WorkspaceEntryKind;
   /** Whether the entry is itself a link/reparse point. */
   isSymlink: boolean;
+  /**
+   * Opaque identity of the entry *itself* (006), or `null` when unavailable.
+   *
+   * Read without following a final link, so a symlink entry carries its own
+   * token rather than the target's. It proves that *this logical entry* was
+   * renamed/moved, and it is deliberately a different identity domain from the
+   * resolved-target token a document binding stores — the two are never
+   * substituted for one another. The frontend treats it as opaque.
+   */
+  objectIdentity: string | null;
 }
 
 /** Result of reading exactly one directory level. */
@@ -35,6 +45,18 @@ export interface ReadWorkspaceDirectoryResult {
   canonicalPath: string;
   /** Canonical identity used for ancestor-cycle checks. */
   comparisonKey: string;
+  /**
+   * Whether this directory compares entry names case-sensitively.
+   *
+   * The frontend must not infer the platform: a check that falls back to a
+   * differently-cased spelling may only do so where the filesystem really treats
+   * the two spellings as one entry. Rust reports the *directory's* own rule here
+   * (the per-directory case-sensitivity flag where the platform has one, and a
+   * conservative "case-sensitive" when it cannot be determined), strengthened by
+   * direct evidence when the listing itself contains two names that differ only
+   * by case.
+   */
+  caseSensitive: boolean;
   /** Direct children only; never a recursive listing. */
   entries: readonly WorkspaceDirectoryEntry[];
 }

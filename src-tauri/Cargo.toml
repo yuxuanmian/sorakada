@@ -35,8 +35,11 @@ notify = "8.2.0"
 # The final disk rename must not replace a destination that appeared after
 # validation. `std::fs::rename` always replaces on Windows, so the no-replace
 # move is issued through `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`.
+# 006 also reads the stable filesystem-object identity (volume + file index)
+# through `GetFileInformationByHandle`; `Win32_Security` is required because
+# `CreateFileW` takes a `SECURITY_ATTRIBUTES` pointer.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 # Used by the command-layer tests to assert the exact IPC wire shapes.

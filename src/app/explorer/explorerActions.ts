@@ -16,6 +16,7 @@ import { toFileCommandError, type FileCommandError } from "../../services/fileSe
 import type { FileService } from "../../services/fileService";
 import type {
   WorkspaceDirectoryEntry,
+  WorkspaceEntryKind,
   WorkspaceFileService,
 } from "../../services/workspaceFileService";
 import type { WorkspaceDialogService } from "../../services/workspaceDialogs";
@@ -168,6 +169,61 @@ export function parentPathOf(path: string): string {
   return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
 }
 
+/** The final path component of a logical path. */
+function leafNameOf(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const index = Math.max(trimmed.lastIndexOf("\\"), trimmed.lastIndexOf("/"));
+  return index < 0 ? trimmed : trimmed.slice(index + 1);
+}
+
+/**
+ * Whether two spellings name the same leaf under the directory's own rules.
+ *
+ * The comparison contract comes from the backend (`caseSensitive` on the
+ * directory read) instead of being inferred here: on a case-*sensitive*
+ * filesystem `Foo.ts` and `foo.ts` are two different entries, and treating them
+ * as one would let a Rename or Delete act on an entry the user never selected
+ * (Constitution I, FR-066).
+ */
+function sameLeafName(left: string, right: string, caseSensitive: boolean): boolean {
+  return caseSensitive ? left === right : left.toLowerCase() === right.toLowerCase();
+}
+
+/**
+ * The direct child of the re-read parent that the pre-mutation check is about.
+ *
+ * An exact leaf match always wins and works on every platform. A case-folded
+ * match is considered only when the directory itself compares case-insensitively
+ * *and* the match is unique, which keeps a case-only external rename recoverable
+ * on Windows while refusing anything ambiguous — and refusing any folded match at
+ * all on a case-sensitive directory.
+ */
+function findSourceEntry(
+  entries: readonly WorkspaceDirectoryEntry[],
+  sourcePath: string,
+  caseSensitive: boolean,
+): WorkspaceDirectoryEntry | undefined {
+  const parent = parentPathOf(sourcePath);
+  const leaf = leafNameOf(sourcePath);
+  const siblings = entries.filter((entry) =>
+    sameLeafName(parentPathOf(entry.path), parent, caseSensitive),
+  );
+
+  const exact = siblings.find((entry) => leafNameOf(entry.path) === leaf);
+  if (exact !== undefined) {
+    return exact;
+  }
+
+  if (caseSensitive) {
+    return undefined;
+  }
+
+  const folded = siblings.filter((entry) =>
+    sameLeafName(leafNameOf(entry.path), leaf, false),
+  );
+  return folded.length === 1 ? folded[0] : undefined;
+}
+
 /**
  * Derives the operation context from the active Workspace and the selection.
  *
@@ -296,6 +352,41 @@ type AffectedSessionsResult =
 type DescribeDeleteResult =
   | { status: "ok"; confirmation: DeleteConfirmation }
   | { status: "failed"; error: FileCommandError };
+
+/**
+ * The Explorer entry a destructive/path-changing operation was confirmed for.
+ *
+ * It is captured when the operation *begins* — before the first await, so before
+ * any confirmation, reservation or session identification — and compared against
+ * a fresh one-level read of the source's parent immediately before the Rust call.
+ * That is what proves the object at the source path is still the object the user
+ * selected, even when another process replaced it in between (006 plan §12).
+ */
+interface CapturedSourceEntry {
+  path: string;
+  kind: WorkspaceEntryKind;
+  /**
+   * The entry's own (no-follow) identity, or `null` when unavailable.
+   *
+   * A `null` here is not "no identity to compare" but "continuity cannot be
+   * proven", so the operation must refuse rather than guess.
+   */
+  objectIdentity: string | null;
+}
+
+/**
+ * Reported when an internal Rename/Delete cannot prove the source path still
+ * holds the entry the user selected (006 plan §12).
+ *
+ * One message covers every refusal — a replaced object, an entry that
+ * disappeared, a changed kind, and an identity the platform could not supply —
+ * because to the user they all mean the same thing: the operation was not
+ * performed and nothing was changed. It is surfaced through the existing
+ * localized operation-failure dialog, exactly like an `io_rename`/`io_trash`
+ * failure.
+ */
+export const SOURCE_ENTRY_CHANGED_MESSAGE =
+  "That entry could not be verified as unchanged on disk, so the operation was cancelled.";
 
 /**
  * Reserves, mutates and reconciles Explorer filesystem operations.
@@ -517,6 +608,11 @@ export class ExplorerActions {
       path: created.path,
       kind,
       isSymlink: false,
+      // The creation result already carries the identity of the entry that was
+      // just created, so the directly inserted Tree node is never temporarily
+      // identity-less: an immediate external rename of this brand-new entry can
+      // still be proven to be the same object (plan §3, FR-039).
+      objectIdentity: created.identity.objectIdentity,
     };
 
     // The Tree is only told about the new entry while it still shows the context
@@ -575,6 +671,15 @@ export class ExplorerActions {
       return "committed";
     }
 
+    // 006 plan §12: the object at the source path may be replaced between the
+    // moment the user selected it and the Rust call below, so the entry's own
+    // identity is captured before the first await of this operation. A Rename is
+    // committed from the inline editor, so the node is looked up by its source
+    // path rather than taken from a menu context.
+    const sourceEntry = this.captureSourceEntry(
+      this.deps.explorer.getNode(sourcePath),
+    );
+
     // The Workspace can be replaced while any of the awaits below is in flight,
     // so the context this rename belongs to is captured before the first one
     // (FR-030, FR-089).
@@ -629,6 +734,15 @@ export class ExplorerActions {
     const affectedIds = identified.sessions.map((session) => session.id);
 
     try {
+      // Last gate before the disk is touched. Everything that can widen the race
+      // — the dialog-free path resolution, the reservation and the session
+      // identification — has already settled, so the window between proving the
+      // source object and mutating it is as small as this design allows.
+      if (!(await this.sourceEntryIsUnchanged(sourcePath, sourceEntry))) {
+        await this.deps.dialogs.showError(SOURCE_ENTRY_CHANGED_MESSAGE);
+        return "retained";
+      }
+
       const renamed = await this.deps.workspaceFileService.renameWorkspaceEntry({
         sourcePath,
         newName,
@@ -683,6 +797,11 @@ export class ExplorerActions {
     if (targetPath === null) {
       return;
     }
+
+    // 006 plan §12: Delete already carries the selected node, so its own identity
+    // is captured here — before the confirmation and the path reservation below —
+    // and re-proven right before the trash call.
+    const sourceEntry = this.captureSourceEntry(context.selectedEntry);
 
     let targetIdentity;
     try {
@@ -750,6 +869,13 @@ export class ExplorerActions {
         escalated.length > 0 &&
         !(await this.deps.dialogs.confirmDelete(second.confirmation.request))
       ) {
+        return;
+      }
+
+      // Last gate before the destructive call, after every dialog, the
+      // reservation and both affected-session identifications have settled.
+      if (!(await this.sourceEntryIsUnchanged(targetPath, sourceEntry))) {
+        await this.deps.dialogs.showError(SOURCE_ENTRY_CHANGED_MESSAGE);
         return;
       }
 
@@ -862,6 +988,83 @@ export class ExplorerActions {
     return (
       state.contextId === origin.contextId &&
       state.generation === origin.generation
+    );
+  }
+
+  /** The comparable source identity of one visible entry, if it is known. */
+  private captureSourceEntry(
+    node: ExplorerNode | null,
+  ): CapturedSourceEntry | null {
+    if (node === null) {
+      return null;
+    }
+
+    return {
+      path: node.path,
+      kind: node.kind,
+      objectIdentity: node.objectIdentity,
+    };
+  }
+
+  /**
+   * Proves the source path still holds the entry the operation was confirmed for.
+   *
+   * The fresh read is the source's *parent* directory listing, not
+   * `FileService.inspectFilePath`: the latter follows the final symlink, so
+   * replacing one symlink entry with a different symlink pointing at the same
+   * target would look unchanged. A `WorkspaceDirectoryEntry` carries the
+   * no-follow identity of the entry *itself*, which is the only token that can
+   * distinguish those two objects (006 plan §12). Root is never renameable or
+   * deletable, so every allowed source has a readable parent.
+   *
+   * Returns `true` only when the registered entry still describes this entry
+   * with a fresh, non-null identity and the same kind. A missing child, a kind
+   * change, a different token, or a `null` on either side all mean continuity
+   * cannot be proven, and the conservative answer is to refuse the Rust
+   * mutation.
+   *
+   * The child is located by leaf name rather than by exact path text: the Tree's
+   * spelling can lag a case-only rename that has not been reconciled yet (or a
+   * degraded watcher left it stale), and refusing a legitimate Rename/Delete for
+   * that reason would be a false negative. Identity equality below is still the
+   * only thing that authorizes the mutation, so a case-insensitive name match can
+   * never act on a different object — and on a case-sensitive platform an entry
+   * that differs only by case simply is not the same entry, so its token will not
+   * match.
+   */
+  private async sourceEntryIsUnchanged(
+    sourcePath: string,
+    captured: CapturedSourceEntry | null,
+  ): Promise<boolean> {
+    if (
+      captured === null ||
+      captured.objectIdentity === null ||
+      // The captured record must describe the path this operation is about;
+      // anything else means the caller and the Tree disagree, which is not a
+      // fact to mutate a file on.
+      captured.path !== sourcePath
+    ) {
+      return false;
+    }
+
+    const listing = await this.deps.workspaceFileService.readWorkspaceDirectory(
+      parentPathOf(sourcePath),
+    );
+    const fresh = findSourceEntry(
+      listing.entries,
+      sourcePath,
+      listing.caseSensitive,
+    );
+
+    if (fresh === undefined || fresh.objectIdentity === null) {
+      return false;
+    }
+
+    return (
+      fresh.objectIdentity === captured.objectIdentity &&
+      // A kind change means the entry was replaced by a different object, even
+      // when a platform happened to reuse one token.
+      fresh.kind === captured.kind
     );
   }
 

@@ -193,6 +193,8 @@ interface FakeDocument {
   externalState: ExternalState;
   generation: number;
   revision: DiskRevision | null;
+  /** 006 object token carried by this binding (opaque to 005). */
+  objectIdentity: string | null;
 }
 
 /**
@@ -239,6 +241,7 @@ class FakeDocumentPort implements DocumentWatchPort {
         options.revision === undefined
           ? { size: text.length, modifiedTimeMillis: 0 }
           : options.revision,
+      objectIdentity: `fake:${key}`,
     };
     this.documents.set(document.id, document);
     return document;
@@ -255,7 +258,11 @@ class FakeDocumentPort implements DocumentWatchPort {
   }
 
   /** Migrates a document's path, as Save As / an internal Rename does. */
-  announceRebound(document: FakeDocument, path: string): void {
+  announceRebound(
+    document: FakeDocument,
+    path: string,
+    cause?: "external-relocation",
+  ): void {
     const previousPath = document.path;
     const previousIdentity = this.identityOf(document);
     const key = path.replace(/\\/g, "/").toLowerCase();
@@ -270,6 +277,7 @@ class FakeDocumentPort implements DocumentWatchPort {
       previousIdentity,
       path,
       identity: this.identityOf(document),
+      ...(cause === undefined ? {} : { cause }),
     });
   }
 
@@ -464,6 +472,9 @@ class FakeDocumentPort implements DocumentWatchPort {
       comparisonKey: document.comparisonKey,
       kind: "file",
       diskRevision: document.revision,
+      // 005 ignores the 006 object token; the fake reports the one its binding
+      // holds so the refreshed identity stays contract-complete.
+      objectIdentity: document.objectIdentity,
     };
   }
 
@@ -593,6 +604,7 @@ class FakeFilesystemWatcher implements FilesystemWatcherService {
     hint: "created" | "changed" | "removed" | "other",
     options: { renameTarget?: string | null } = {},
   ): void {
+    const renameTarget = options.renameTarget ?? null;
     this.emit({
       type: "change",
       subscriptionId: this.subscriptionIdFor(path),
@@ -600,7 +612,11 @@ class FakeFilesystemWatcher implements FilesystemWatcherService {
       watchedPath: path,
       path,
       hint,
-      renameTarget: options.renameTarget ?? null,
+      renameTarget,
+      // 005's subscription watches the parent directory, so the relative fields
+      // are present on the wire even though this consumer ignores them.
+      relativePath: null,
+      renameTargetRelativePath: null,
     });
   }
 
@@ -809,6 +825,8 @@ describe("OpenedDocumentWatchCoordinator event handling (US4, T041)", () => {
       path: "C:\\work\\a.txt",
       hint: "changed",
       renameTarget: null,
+      relativePath: null,
+      renameTargetRelativePath: null,
     });
     harness.scheduler.fire();
     await harness.coordinator.whenIdle();
@@ -1548,5 +1566,189 @@ describe("005 module boundaries (T051, T056, FR-040)", () => {
     expect(harness.port.documents.get(document.id)!.buffer).toBe(
       "changed while unlistened",
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Shared watcher channel: 006 invalidations and relocations (FR-010, FR-061)  */
+/* -------------------------------------------------------------------------- */
+
+describe("OpenedDocumentWatchCoordinator shared-channel scoping (006)", () => {
+  it("ignores a recursive Workspace invalidation that concerns no open document", async () => {
+    const harness = await createHarness();
+    await boundDocument(harness, "C:\\work\\a.txt", "alpha");
+    const inspectionsBefore = harness.disk.inspections.length;
+
+    // 006's Workspace root lost completeness. No document interest is served by
+    // that directory, so 005 must not revalidate anything for it.
+    harness.watcher.emitRaw({
+      type: "invalidated",
+      scope: "recursive",
+      watchedPath: "D:\\project",
+      reason: "watcher overflow",
+    });
+    harness.scheduler.fire();
+    await harness.coordinator.whenIdle();
+
+    expect(harness.disk.inspections.length).toBe(inspectionsBefore);
+  });
+
+  it("accepts a recursive invalidation for a directory it actually watches", async () => {
+    const harness = await createHarness();
+    await boundDocument(harness, "C:\\work\\a.txt", "alpha");
+    const inspectionsBefore = harness.disk.inspections.length;
+
+    // The recursive notice names the same directory this document's
+    // non-recursive interest is served by, so its completeness matters here.
+    harness.watcher.emitRaw({
+      type: "invalidated",
+      scope: "recursive",
+      watchedPath: "C:\\work",
+      reason: "watcher overflow",
+    });
+    harness.scheduler.fire();
+    await harness.coordinator.whenIdle();
+
+    expect(harness.disk.inspections.length).toBe(inspectionsBefore + 1);
+  });
+
+  it("still revalidates on its own non-recursive invalidation", async () => {
+    const harness = await createHarness();
+    await boundDocument(harness, "C:\\work\\a.txt", "alpha");
+    const inspectionsBefore = harness.disk.inspections.length;
+
+    harness.watcher.emitRaw({
+      type: "invalidated",
+      scope: "nonRecursive",
+      watchedPath: "C:\\work",
+      reason: "watcher overflow",
+    });
+    harness.scheduler.fire();
+    await harness.coordinator.whenIdle();
+
+    expect(harness.disk.inspections.length).toBe(inspectionsBefore + 1);
+  });
+});
+
+describe("OpenedDocumentWatchCoordinator post-relocation validation (006)", () => {
+  it("forces a content read after a confirmed external relocation", async () => {
+    const harness = await createHarness();
+    const document = await boundDocument(harness, "C:\\work\\a.txt", "alpha");
+
+    // The rebind adopted the destination's *current* metadata, so a cheap
+    // revision comparison would call this "unchanged" even though the move
+    // rewrote the content (plan §11). Only a forced read can tell.
+    const destination = "C:\\work\\b.txt";
+    harness.disk.write(destination, "alpha!");
+    harness.disk.setRevision(destination, {
+      size: 6,
+      modifiedTimeMillis: 0,
+    });
+    document.revision = { size: 6, modifiedTimeMillis: 0 };
+    harness.disk.remove("C:\\work\\a.txt");
+    const readsBefore = harness.disk.readCount();
+
+    harness.port.announceRebound(document, destination, "external-relocation");
+    await harness.coordinator.whenIdle();
+
+    expect(harness.disk.readCount()).toBe(readsBefore + 1);
+    const bound = harness.port.documents.get(document.id)!;
+    expect(bound.buffer).toBe("alpha!");
+    expect(bound.baseline).toBe("alpha!");
+    expect(bound.externalState).toBe("normal");
+  });
+
+  it("keeps a dirty buffer and reports a conflict when the new target diverged", async () => {
+    const harness = await createHarness();
+    const document = await boundDocument(harness, "C:\\work\\a.txt", "alpha");
+    document.dirty = true;
+    document.buffer = "alpha edited";
+
+    const destination = "C:\\work\\b.txt";
+    harness.disk.write(destination, "alpha!");
+    harness.disk.setRevision(destination, {
+      size: 6,
+      modifiedTimeMillis: 0,
+    });
+    document.revision = { size: 6, modifiedTimeMillis: 0 };
+    harness.disk.remove("C:\\work\\a.txt");
+
+    harness.port.announceRebound(document, destination, "external-relocation");
+    await harness.coordinator.whenIdle();
+
+    // FR-061: relocation may not clear a real content conflict, and it never
+    // replaces the buffer the user is editing.
+    const bound = harness.port.documents.get(document.id)!;
+    expect(bound.externalState).toBe("modified");
+    expect(bound.buffer).toBe("alpha edited");
+    expect(bound.dirty).toBe(true);
+  });
+
+  it("keeps the cheap path for an ordinary Save As rebound", async () => {
+    const harness = await createHarness();
+    const document = await boundDocument(harness, "C:\\work\\a.txt", "alpha");
+
+    const destination = "C:\\work\\b.txt";
+    harness.disk.write(destination, "alpha");
+    harness.disk.setRevision(destination, { size: 5, modifiedTimeMillis: 0 });
+    document.revision = { size: 5, modifiedTimeMillis: 0 };
+    harness.disk.remove("C:\\work\\a.txt");
+    const readsBefore = harness.disk.readCount();
+
+    harness.port.announceRebound(document, destination);
+    await harness.coordinator.whenIdle();
+
+    // Without the external-relocation cause the matching revision is still
+    // trusted, so an ordinary path change performs no content read (SC-008).
+    expect(harness.disk.readCount()).toBe(readsBefore);
+  });
+});
+
+describe("OpenedDocumentWatchCoordinator case-only relocation (FR-046, FR-061)", () => {
+  it("forces validation when a case-only move changed the content", async () => {
+    const harness = await createHarness();
+    const document = await boundDocument(harness, "C:\\work\\a.txt", "alpha");
+
+    // Windows: the spelling changed, the comparison key did not, and the rebind
+    // adopted the destination's own metadata — so a revision comparison would
+    // wrongly call this "unchanged" (plan §11).
+    const destination = "C:\\work\\A.TXT";
+    const revision = { size: 6, modifiedTimeMillis: 0 };
+    harness.disk.remove("C:\\work\\a.txt");
+    harness.disk.write(destination, "alpha!");
+    harness.disk.setRevision(destination, revision);
+    document.revision = revision;
+    const readsBefore = harness.disk.readCount();
+
+    harness.port.announceRebound(document, destination, "external-relocation");
+    await harness.coordinator.whenIdle();
+
+    expect(harness.disk.readCount()).toBe(readsBefore + 1);
+    const bound = harness.port.documents.get(document.id)!;
+    expect(bound.path).toBe(destination);
+    expect(bound.buffer).toBe("alpha!");
+    expect(bound.externalState).toBe("normal");
+  });
+
+  it("keeps a dirty buffer and reports modified when the case-only target diverged", async () => {
+    const harness = await createHarness();
+    const document = await boundDocument(harness, "C:\\work\\a.txt", "alpha");
+    document.dirty = true;
+    document.buffer = "alpha edited";
+
+    const destination = "C:\\work\\A.TXT";
+    const revision = { size: 6, modifiedTimeMillis: 0 };
+    harness.disk.remove("C:\\work\\a.txt");
+    harness.disk.write(destination, "alpha!");
+    harness.disk.setRevision(destination, revision);
+    document.revision = revision;
+
+    harness.port.announceRebound(document, destination, "external-relocation");
+    await harness.coordinator.whenIdle();
+
+    const bound = harness.port.documents.get(document.id)!;
+    expect(bound.externalState).toBe("modified");
+    expect(bound.buffer).toBe("alpha edited");
+    expect(bound.dirty).toBe(true);
   });
 });

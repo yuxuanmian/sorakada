@@ -357,6 +357,7 @@ class InMemoryFileService implements FileService {
         comparisonKey,
         kind: "directory",
         diskRevision: { size: 0, modifiedTimeMillis: 0 },
+        objectIdentity: `fake:${comparisonKey}`,
       });
     }
 
@@ -375,6 +376,7 @@ class InMemoryFileService implements FileService {
         comparisonKey,
         kind: "missing",
         diskRevision: null,
+        objectIdentity: null,
       });
     }
 
@@ -384,6 +386,7 @@ class InMemoryFileService implements FileService {
       comparisonKey,
       kind: "file",
       diskRevision: { size: text.length, modifiedTimeMillis: 0 },
+      objectIdentity: `fake:${comparisonKey}`,
     });
   }
 

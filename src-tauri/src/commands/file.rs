@@ -431,13 +431,17 @@ mod tests {
 
         assert_eq!(
             value.as_object().expect("object").len(),
-            5,
-            "ResolvedPathIdentity must carry exactly five fields"
+            6,
+            "ResolvedPathIdentity carries the 002 fields plus the 006 objectIdentity"
         );
         assert_eq!(value["requestedPath"], json!(path));
         assert_eq!(value["kind"], json!("file"));
         assert!(value["canonicalPath"].is_string());
         assert!(value["comparisonKey"].is_string());
+        assert!(
+            value["objectIdentity"].is_string(),
+            "an existing file carries the opaque 006 object identity"
+        );
 
         let revision = value["diskRevision"]
             .as_object()
@@ -450,6 +454,28 @@ mod tests {
         // without an explicit assertion.
         assert!(value.get("requested_path").is_none());
         assert!(value.get("disk_revision").is_none());
+        assert!(value.get("object_identity").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The 006 field is nullable rather than absent for a Save As candidate.
+    #[test]
+    fn inspect_file_path_serializes_a_null_object_identity_for_a_candidate() {
+        let dir = work_dir("inspect-shape-missing");
+        let missing = dir.join("brand-new.txt").to_string_lossy().to_string();
+
+        let value = to_json(
+            &inspect_file_path(InspectPathRequest {
+                path: missing,
+                allow_missing: true,
+            })
+            .expect("inspect should resolve the candidate"),
+        );
+
+        assert_eq!(value.as_object().expect("object").len(), 6);
+        assert_eq!(value["kind"], json!("missing"));
+        assert_eq!(value["objectIdentity"], json!(null));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

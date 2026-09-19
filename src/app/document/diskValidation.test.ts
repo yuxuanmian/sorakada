@@ -267,6 +267,8 @@ class FakeFileService implements FileService {
 const PATH = "D:\\project\\notes.txt";
 const KEY = "D:/project/notes.txt";
 const DOCUMENT_ID = "doc-1";
+/** The binding's 006 object token, carried through every refreshed identity. */
+const OBJECT_IDENTITY = "win:12345678:00000000000000ab";
 
 const REVISION_A: DiskRevision = {
   size: 12,
@@ -287,6 +289,9 @@ function expectedIdentity(revision: DiskRevision | null): ResolvedPathIdentity {
     comparisonKey: KEY,
     kind: "file",
     diskRevision: revision,
+    // 005's inspection carries no object token, so the validator reports the
+    // binding's own continuity evidence rather than inventing one.
+    objectIdentity: OBJECT_IDENTITY,
   };
 }
 
@@ -834,6 +839,7 @@ describe("refreshedIdentity", () => {
       comparisonKey: KEY,
       kind: "file",
       diskRevision: REVISION_B,
+      objectIdentity: OBJECT_IDENTITY,
     });
   });
 
@@ -854,6 +860,9 @@ describe("refreshedIdentity", () => {
       comparisonKey: "D:/real/notes.txt",
       kind: "file",
       diskRevision: REVISION_B,
+      // 005's inspection carries no object token, so the binding's own
+      // continuity evidence is carried through instead of being invented.
+      objectIdentity: OBJECT_IDENTITY,
     });
   });
 
@@ -872,5 +881,59 @@ describe("refreshedIdentity", () => {
 
     expect(identity.diskRevision).toBeNull();
     expect(revisionsMatch(identity.diskRevision, REVISION_A)).toBe(false);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Forced validation after an external relocation (006)                        */
+/* -------------------------------------------------------------------------- */
+
+describe("DiskValidator external relocation", () => {
+  it("reads the snapshot even when the revision matches the adopted baseline", async () => {
+    // FR-061 / plan §11: a confirmed external relocation adopts the *destination's*
+    // current metadata as the new baseline, so comparing that same revision back
+    // would report "unchanged" for content the move rewrote. The forced trigger
+    // therefore reads the supported snapshot instead of trusting the fast path.
+    const { files, validator } = setup();
+    files.addFile(PATH, REVISION_A, TEXT_B);
+
+    const result = await validator.validate(
+      requestFor(bindingFor(REVISION_A), "external-relocation"),
+    );
+
+    expect(result.outcome).toBe("changed");
+    expect(files.reads).toEqual([PATH]);
+  });
+
+  it("still reports unchanged for the ordinary triggers with the same revision", async () => {
+    // The fast path must stay intact for every other trigger: a focus sweep of
+    // unchanged documents still performs zero full-content reads (SC-008).
+    const { files, validator } = setup();
+    files.addFile(PATH, REVISION_A, TEXT_B);
+
+    const result = await validator.validate(
+      requestFor(bindingFor(REVISION_A), "post-subscription"),
+    );
+
+    expect(result).toEqual({
+      outcome: "unchanged",
+      identity: expectedIdentity(REVISION_A),
+    });
+    expect(files.reads).toEqual([]);
+  });
+
+  it("reports missing at the new binding without inventing content", async () => {
+    const { files, validator } = setup();
+    files.removeFile(PATH);
+
+    const result = await validator.validate(
+      requestFor(bindingFor(REVISION_A), "external-relocation"),
+    );
+
+    // A relocated binding whose destination vanished again is simply missing:
+    // 005's missing rules stay authoritative, and the forced read must not turn
+    // absence into a change.
+    expect(result).toEqual({ outcome: "missing" });
+    expect(files.reads).toEqual([]);
   });
 });

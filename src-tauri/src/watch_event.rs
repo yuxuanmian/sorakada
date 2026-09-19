@@ -68,9 +68,30 @@ pub struct WatchEvent {
     pub hint: WatchChangeHint,
     /// Rename destination when the backend reported a paired rename.
     ///
-    /// Preserved for future rename/move normalization; 005 never consumes it
-    /// and never infers a document path migration from it.
+    /// Preserved for the 006 Workspace consumer, which may offer a paired
+    /// source/target as a *candidate*; it is never rename proof and 005 never
+    /// infers a document path migration from it.
     pub rename_target: Option<String>,
+    /// `path` relative to this subscription's watched directory (006).
+    ///
+    /// The backend watches a canonical directory spelling that can differ from
+    /// the logical Workspace root the user chose (a junction, a `\\?\` prefix, a
+    /// case-only difference). Computing the relative path here — with the same
+    /// platform-aware containment helper the rest of the crate uses — is what
+    /// lets the Workspace consumer join it back onto its own logical root
+    /// instead of comparing raw watcher path text against Tree paths (FR-118).
+    ///
+    /// `None` means the event path is not inside the watched directory (which a
+    /// recursive subscription's own root-self event also is not). 005 ignores
+    /// this field entirely.
+    pub relative_path: Option<String>,
+    /// `rename_target` relative to this subscription's watched directory.
+    ///
+    /// `None` when there is no rename target *or* when the target lies outside
+    /// this subscription's watch — an outside target is a document-relocation
+    /// candidate only and must never be used as an Explorer path (FR-049,
+    /// FR-118).
+    pub rename_target_relative_path: Option<String>,
 }
 
 /// Notice that a watch can no longer be trusted to be complete.
@@ -156,6 +177,8 @@ mod tests {
             path: "C:\\work\\notes.txt".to_string(),
             hint: WatchChangeHint::Changed,
             rename_target: None,
+            relative_path: Some("notes.txt".to_string()),
+            rename_target_relative_path: None,
         });
 
         assert_eq!(
@@ -168,8 +191,73 @@ mod tests {
                 "path": "C:\\work\\notes.txt",
                 "hint": "changed",
                 "renameTarget": null,
+                "relativePath": "notes.txt",
+                "renameTargetRelativePath": null,
             })
         );
+    }
+
+    /// 006 maps a hinted path onto its logical root through the
+    /// subscription-relative fields, so both the inside and the outside forms
+    /// are pinned here: an outside rename target has no relative path while its
+    /// raw target is preserved for a document-only relocation candidate.
+    #[test]
+    fn change_payload_pins_the_subscription_relative_location_fields() {
+        let inside = WatchEventPayload::Change(WatchEvent {
+            subscription_id: 9,
+            scope: WatchScope::Recursive,
+            watched_path: "D:\\project".to_string(),
+            path: "D:\\project\\src\\renamed.ts".to_string(),
+            hint: WatchChangeHint::Removed,
+            rename_target: Some("D:\\project\\src\\target.ts".to_string()),
+            relative_path: Some("src\\renamed.ts".to_string()),
+            rename_target_relative_path: Some("src\\target.ts".to_string()),
+        });
+
+        let value = serde_json::to_value(&inside).expect("serialize the inside rename");
+        assert_eq!(value["relativePath"], json!("src\\renamed.ts"));
+        assert_eq!(value["renameTargetRelativePath"], json!("src\\target.ts"));
+
+        let outside = WatchEventPayload::Change(WatchEvent {
+            subscription_id: 9,
+            scope: WatchScope::Recursive,
+            watched_path: "D:\\project".to_string(),
+            path: "D:\\project\\moved.txt".to_string(),
+            hint: WatchChangeHint::Removed,
+            rename_target: Some("D:\\elsewhere\\moved.txt".to_string()),
+            relative_path: Some("moved.txt".to_string()),
+            rename_target_relative_path: None,
+        });
+
+        let value = serde_json::to_value(&outside).expect("serialize the outside rename");
+        assert_eq!(value["relativePath"], json!("moved.txt"));
+        assert_eq!(
+            value["renameTargetRelativePath"],
+            json!(null),
+            "an outside target has no relative path"
+        );
+        assert_eq!(
+            value["renameTarget"],
+            json!("D:\\elsewhere\\moved.txt"),
+            "the raw target survives for a document-only relocation candidate"
+        );
+
+        // The watched directory itself is not inside itself, so a root-self
+        // event carries no relative path either.
+        let root_self = WatchEventPayload::Change(WatchEvent {
+            subscription_id: 9,
+            scope: WatchScope::Recursive,
+            watched_path: "D:\\project".to_string(),
+            path: "D:\\project".to_string(),
+            hint: WatchChangeHint::Changed,
+            rename_target: None,
+            relative_path: None,
+            rename_target_relative_path: None,
+        });
+
+        let value = serde_json::to_value(&root_self).expect("serialize the root-self event");
+        assert_eq!(value["relativePath"], json!(null));
+        assert_eq!(value["renameTargetRelativePath"], json!(null));
     }
 
     /// Pins the invalidation payload, including both of its identifying fields:

@@ -39,7 +39,9 @@ import {
 import {
   isWithinDirectory,
   joinPath,
+  pathComponents,
   relativeWithinDirectory,
+  separatorFor,
 } from "../workspace/workContext";
 import type {
   DiskValidationResult,
@@ -248,6 +250,60 @@ export interface CommittedPathRename {
 const MAX_MUTATION_WAITS = 8;
 
 /**
+ * A confirmed external rename/move of a Workspace entry (006).
+ *
+ * The two identity domains are named explicitly and are never interchangeable:
+ * `entryObjectIdentity` describes the Explorer *entry* (without following a
+ * final link) and is what proved the Tree relocation, while the document's own
+ * continuity evidence is the `resolvedTargetObjectIdentity` the binding stores
+ * and this class re-inspects at the destination. For a symlink they legitimately
+ * differ, so nothing here compares one with the other (FR-067, plan §10).
+ */
+export interface ExternalRelocationRequest {
+  /** Logical path of the Workspace entry before the move. */
+  oldPath: string;
+  /** Logical path of the same entry after the move. */
+  newPath: string;
+  /** Whether the moved entry is a file or a directory whose open documents move. */
+  kind: "file" | "directory";
+  /**
+   * No-follow object identity of the relocated Explorer entry.
+   *
+   * Recorded for diagnostics and for the caller's own Tree bookkeeping; it is
+   * deliberately not used as the document's expected target identity.
+   */
+  entryObjectIdentity: string | null;
+}
+
+/**
+ * Why one document could not follow an external relocation.
+ *
+ * A rejected document keeps its previous binding, so 005's existing
+ * missing/conflict validation remains authoritative for it (FR-063, FR-064).
+ */
+export type ExternalRelocationRejection =
+  /** No live session is bound to the affected path any more. */
+  | "stale-binding"
+  /** The destination could not be inspected (gone, locked, unreadable). */
+  | "destination-unavailable"
+  /** Another live session, reservation or mutation owns the destination. */
+  | "destination-owned"
+  /** The platform gave no object identity for the destination or the binding. */
+  | "identity-unavailable"
+  /** The destination is provably a different filesystem object. */
+  | "identity-mismatch";
+
+/** The structured per-document outcome of one external relocation attempt. */
+export interface ExternalRelocationOutcome {
+  documentId: DocumentId;
+  status: "adopted" | "rejected";
+  /** The path the document is bound to after the attempt. */
+  path: string;
+  /** Present only when `status` is `rejected`. */
+  reason?: ExternalRelocationRejection;
+}
+
+/**
  * How many times a completed write may be re-proved while its own notifications
  * are still arriving (T064).
  *
@@ -258,6 +314,29 @@ const MAX_MUTATION_WAITS = 8;
  * genuine outside one.
  */
 const MAX_SETTLEMENT_RECHECKS = 3;
+
+/**
+ * Whether a relocation suffix stays inside the destination it is rebased onto.
+ *
+ * A suffix is a relative path by construction, so the only thing that can make it
+ * escape is a `..` component; refusing it keeps a crafted or mis-resolved
+ * relation from rebasing a document outside the entry that moved.
+ */
+function isSafeRelocationSuffix(suffix: string): boolean {
+  return !pathComponents(suffix).some((part) => part === "..");
+}
+
+/**
+ * Re-spells a canonical suffix with the separator of the logical destination.
+ *
+ * The suffix comes from canonical comparison keys, whose separator is whatever
+ * the backend produced; the destination is a logical path carrying the user's own
+ * spelling. Re-joining the components keeps the resulting path consistent instead
+ * of mixing separators, and an empty suffix stays empty.
+ */
+function respellSuffix(suffix: string, destination: string): string {
+  return pathComponents(suffix).join(separatorFor(destination));
+}
 
 /**
  * The parent directory of a user-facing path, or `null` when there is none.
@@ -399,6 +478,16 @@ export type WatchInterestChange =
       previousIdentity: ResolvedPathIdentity;
       path: string;
       identity: ResolvedPathIdentity;
+      /**
+       * Why the binding moved (006).
+       *
+       * `external-relocation` means 006 proved the entry moved on disk. The
+       * opened-document consumer must then validate the new target's *content*
+       * instead of trusting the freshly adopted metadata as an already-adopted
+       * baseline (FR-061). Save As and internal Rename leave this unset, so their
+       * existing registration behaviour is unchanged.
+       */
+      cause?: "external-relocation";
     }
   | {
       type: "unbound";
@@ -1337,6 +1426,7 @@ export class DocumentManager {
    */
   private async confirmWrittenSnapshot(
     request: WriteTextFileRequest,
+    previousIdentity: ResolvedPathIdentity | null,
   ): Promise<WrittenState> {
     let inspection: DocumentPathInspection;
     try {
@@ -1356,6 +1446,17 @@ export class DocumentManager {
             comparisonKey: inspection.comparisonKey,
             kind: "file",
             diskRevision: inspection.diskRevision,
+            // `inspect_document_path` deliberately reports no object token (005's
+            // wire shape is unchanged), so the one this binding already proved is
+            // carried over — but only while the identity still names the same
+            // canonical path. A Save As writes a *different* object, and claiming
+            // the old token there would assert continuity nothing proved
+            // (FR-041, FR-067).
+            objectIdentity:
+              previousIdentity !== null &&
+              previousIdentity.comparisonKey === inspection.comparisonKey
+                ? previousIdentity.objectIdentity
+                : null,
           }
         : null;
 
@@ -1427,7 +1528,10 @@ export class DocumentManager {
     let rechecks = 0;
     for (;;) {
       capturedBefore = this.internalFsOperations.capturedHintCountFor(claimKey);
-      proof = await this.confirmWrittenSnapshot(request);
+      proof = await this.confirmWrittenSnapshot(
+        request,
+        this.sessions.get(id)?.pathIdentity ?? null,
+      );
       const capturedAfter =
         this.internalFsOperations.capturedHintCountFor(claimKey);
 
@@ -2128,6 +2232,11 @@ export class DocumentManager {
         comparisonKey: joinPath(request.newIdentity.comparisonKey, keySuffix),
         kind: identity.kind,
         diskRevision: identity.diskRevision,
+        // Only the path moved: rebasing a path prefix does not replace the
+        // object behind it, so the target identity this binding already proved
+        // still describes the same file (FR-045, FR-067). It stays supplemental —
+        // ownership is still decided by `comparisonKey` alone.
+        objectIdentity: identity.objectIdentity,
       };
 
       this.openPathIndex.delete(identity.comparisonKey);
@@ -2152,6 +2261,256 @@ export class DocumentManager {
     });
 
     return affected;
+  }
+
+  /**
+   * Adopts a confirmed external rename/move for every open document it affects
+   * (006 US2).
+   *
+   * This is the *only* way an external relocation may reach a document, and it
+   * keeps the two halves of the problem separate:
+   *
+   * - the caller has already proven the **Tree entry** moved (that is what
+   *   `entryObjectIdentity` is), and
+   * - this method independently proves the **document target** at the proposed
+   *   destination: it derives the expected continuity from the still-current
+   *   binding's own `resolvedTargetObjectIdentity`, inspects the destination, and
+   *   adopts only when the two agree.
+   *
+   * Only then are path, display name, path ownership and the binding generation
+   * committed together, and only for that document. A descendant that conflicts
+   * keeps its previous binding and stays subject to 005 validation, so one
+   * unadoptable file never blocks its siblings and never creates a second owner
+   * for one canonical destination (FR-062–FR-065).
+   *
+   * Nothing here walks the filesystem: candidates come from the sessions that are
+   * already open, and each destination is inspected once.
+   */
+  async adoptExternalRelocation(
+    request: ExternalRelocationRequest,
+  ): Promise<readonly ExternalRelocationOutcome[]> {
+    const outcomes: ExternalRelocationOutcome[] = [];
+
+    // Containment is decided on *canonical* keys, produced by the backend's own
+    // path-comparison rule: the old source is resolved through the existing
+    // platform-aware identity primitive, and each session is located by its own
+    // binding key. The frontend never folds case, so a spelling that only differs
+    // by case is contained exactly when the filesystem says it is — and a
+    // same-tail entry in another directory, or the same object reached through a
+    // hard link, is not a candidate at all (FR-045, FR-056, FR-058).
+    const sourceKey = await this.resolveRelocationSourceKey(request.oldPath);
+    if (sourceKey === null) {
+      return outcomes;
+    }
+
+    const candidates: Array<{ id: DocumentId; suffix: string }> = [];
+    for (const session of this.listSessions()) {
+      const sessionKey = session.pathIdentity?.comparisonKey;
+      if (sessionKey === undefined) {
+        continue;
+      }
+
+      const suffix = relativeWithinDirectory(sourceKey, sessionKey);
+      if (suffix === null || !isSafeRelocationSuffix(suffix)) {
+        continue;
+      }
+
+      candidates.push({ id: session.id, suffix });
+    }
+
+    for (const candidate of candidates) {
+      const outcome = await this.adoptOneRelocation(
+        request,
+        candidate.id,
+        candidate.suffix,
+      );
+      if (outcome !== null) {
+        outcomes.push(outcome);
+      }
+    }
+
+    // A successful adoption changed a Tab's path and display name, so the UI has
+    // to be told: without this the Tab keeps the previous file name until some
+    // unrelated edit or Tab switch happens to emit (FR-057).
+    if (outcomes.some((outcome) => outcome.status === "adopted")) {
+      this.emitSnapshot();
+    }
+
+    return outcomes;
+  }
+
+  /**
+   * The canonical comparison key the relocated entry had before it moved.
+   *
+   * `inspectFilePath(..., allowMissing)` is the existing platform-aware resolver:
+   * for a path that no longer exists it still derives the identity from the
+   * canonicalized parent joined with the requested leaf, which is exactly the key
+   * the entry carried while it was there. A resolution failure means the relation
+   * cannot be *proven*, and the relocation is then applied to no document at all
+   * rather than to a guessed one (FR-042, FR-045).
+   */
+  private async resolveRelocationSourceKey(
+    oldPath: string,
+  ): Promise<string | null> {
+    try {
+      const identity = await this.fileService.inspectFilePath(oldPath, true);
+      return identity.comparisonKey;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Adopts (or refuses) the relocation of one session.
+   *
+   * Returns `null` when the session stopped being a candidate while the
+   * operation was waiting, which is not a rejection the caller can act on.
+   */
+  private async adoptOneRelocation(
+    request: ExternalRelocationRequest,
+    documentId: DocumentId,
+    suffix: string,
+  ): Promise<ExternalRelocationOutcome | null> {
+    const binding = this.getBinding(documentId);
+    if (binding === null) {
+      return null;
+    }
+
+    const session = this.sessions.get(documentId);
+    if (session === undefined || session.path === null) {
+      return null;
+    }
+
+    // Compatible in-flight Open/Save/Save As work for the source path is settled
+    // first, so its completion cannot restore the old path after this adoption
+    // (FR-065, FR-110). This deliberately does not create a mutation claim: an
+    // external relocation is *not* a Sorakada mutation, so its notifications must
+    // never be reconciled as "ours" (FR-027, FR-111).
+    await this.waitForPathActivity(binding.comparisonKey, null, null);
+
+    // Waiting is asynchronous, so the binding is re-read: a Save As, a rename or
+    // a close that happened meanwhile owns the document now.
+    if (!this.isBindingCurrent(binding)) {
+      return {
+        documentId,
+        status: "rejected",
+        path: session.path,
+        reason: "stale-binding",
+      };
+    }
+
+    const expectedTargetIdentity = binding.identity.objectIdentity;
+    const nextPath = joinPath(request.newPath, respellSuffix(suffix, request.newPath));
+
+    let destination: ResolvedPathIdentity;
+    try {
+      destination = await this.fileService.inspectFilePath(nextPath, false);
+    } catch {
+      return {
+        documentId,
+        status: "rejected",
+        path: session.path,
+        reason: "destination-unavailable",
+      };
+    }
+
+    if (!this.isBindingCurrent(binding)) {
+      return {
+        documentId,
+        status: "rejected",
+        path: session.path,
+        reason: "stale-binding",
+      };
+    }
+
+    if (expectedTargetIdentity === null || destination.objectIdentity === null) {
+      // Without both tokens continuity cannot be *proven*, and guessing is
+      // forbidden: the document stays where it was and 005 decides what the old
+      // path means (FR-042).
+      return {
+        documentId,
+        status: "rejected",
+        path: session.path,
+        reason: "identity-unavailable",
+      };
+    }
+
+    if (destination.objectIdentity !== expectedTargetIdentity) {
+      // The destination is a different filesystem object (a replacement, or a
+      // symlink whose entry moved while its target did not), so no continuity may
+      // be claimed (FR-039, FR-041).
+      return {
+        documentId,
+        status: "rejected",
+        path: session.path,
+        reason: "identity-mismatch",
+      };
+    }
+
+    const conflict = this.describeDestinationConflict(
+      documentId,
+      binding.comparisonKey,
+      destination.comparisonKey,
+    );
+    if (conflict !== null) {
+      return {
+        documentId,
+        status: "rejected",
+        path: session.path,
+        reason: conflict,
+      };
+    }
+
+    // Commit: the destination is proven, unowned and unreserved, so path
+    // ownership and the binding generation move together — exactly once.
+    this.openPathIndex.delete(binding.comparisonKey);
+    this.openPathIndex.set(destination.comparisonKey, documentId);
+    this.applyPath(session, nextPath, destination, "external-relocation");
+
+    return { documentId, status: "adopted", path: nextPath };
+  }
+
+  /**
+   * Why `destinationKey` may not be adopted, or `null` when it is free.
+   *
+   * One canonical destination may be owned by at most one live session
+   * (FR-062), and a pending reservation or mutation is treated as ownership
+   * because it is about to become one.
+   */
+  private describeDestinationConflict(
+    documentId: DocumentId,
+    sourceKey: string,
+    destinationKey: string,
+  ): ExternalRelocationRejection | null {
+    if (destinationKey === sourceKey) {
+      // A case-only spelling change: the document already owns this key.
+      return null;
+    }
+
+    const owner = this.openPathIndex.get(destinationKey);
+    if (owner !== undefined && owner !== documentId) {
+      return "destination-owned";
+    }
+
+    if (this.pendingPathClaims.has(destinationKey)) {
+      return "destination-owned";
+    }
+
+    // An in-flight Open is about to commit exactly this key: waiting for it
+    // cannot change the outcome, because a successful Open registers itself as
+    // the canonical owner of `destinationKey`. Rejecting here is what keeps one
+    // canonical path owned by at most one live session regardless of which
+    // operation finishes first (FR-062, FR-065, FR-110).
+    if (this.pendingOpens.has(destinationKey)) {
+      return "destination-owned";
+    }
+
+    const covering = this.mutationCovering(destinationKey);
+    if (covering !== null && covering.sourceKey !== sourceKey) {
+      return "destination-owned";
+    }
+
+    return null;
   }
 
   /**
@@ -2226,6 +2585,7 @@ export class DocumentManager {
     session: DocumentSession,
     path: string,
     identity: ResolvedPathIdentity,
+    cause?: "external-relocation",
   ): void {
     const previousPath = session.path;
     const previousIdentity = session.pathIdentity;
@@ -2250,7 +2610,13 @@ export class DocumentManager {
       return;
     }
 
-    if (previousIdentity.comparisonKey !== identity.comparisonKey) {
+    // A rebound is announced whenever the *path* changed, not only when its
+    // canonical comparison key did. On Windows a case-only relocation
+    // (`foo.ts` -> `Foo.ts`) keeps the same key, and the opened-document consumer
+    // must still learn that the binding moved so it can force the post-relocation
+    // content validation instead of trusting the destination's fresh metadata
+    // (FR-046, FR-061).
+    if (previousPath !== path || previousIdentity.comparisonKey !== identity.comparisonKey) {
       this.notifyWatchInterest({
         type: "rebound",
         documentId: session.id,
@@ -2258,6 +2624,7 @@ export class DocumentManager {
         previousIdentity,
         path,
         identity,
+        ...(cause === undefined ? {} : { cause }),
       });
     }
   }
@@ -2406,7 +2773,7 @@ export class DocumentManager {
   private async waitForPathActivity(
     sourceKey: string,
     destinationKey: string | null,
-    own: PathMutationClaim,
+    own: PathMutationClaim | null,
   ): Promise<void> {
     const waits: Promise<unknown>[] = [];
     const collect = (key: string): void => {
@@ -2451,7 +2818,7 @@ export class DocumentManager {
     }
 
     for (const claim of this.pathMutations.values()) {
-      if (claim.id === own.id) {
+      if (own !== null && claim.id === own.id) {
         continue;
       }
       if (isWithinDirectory(sourceKey, claim.sourceKey)) {
