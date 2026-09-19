@@ -47,6 +47,17 @@ export interface CloseRequestDeps {
   destroyWindow(): Promise<void>;
 }
 
+/** Optional hooks for failures that must not break the lifecycle. */
+export interface WindowLifecycleOptions {
+  /**
+   * Reports a cosmetic failure — a title write the runtime refused, for example.
+   *
+   * It is a report, never a control flow decision: the lifecycle continues so the
+   * close guard is still installed.
+   */
+  onError?(error: unknown): void;
+}
+
 /**
  * `Untitled1 - Sorakada`, `foo.txt - Sorakada`, `*foo.txt - Sorakada`, or plain
  * `Sorakada` while no document is open.
@@ -91,18 +102,33 @@ export async function handleCloseRequested(
 /**
  * Wires window-title synchronisation and close interception to a native window.
  * Returns the disposer that unsubscribes both.
+ *
+ * The unsaved-work guard is the part that must exist, so every title write is
+ * best-effort: a refused or failed `setTitle` is reported through `onError` and
+ * the lifecycle continues. Aborting here used to be able to leave a window with
+ * *no* close interception at all, which is the one failure this module cannot
+ * accept (FR-008).
  */
 export async function installWindowLifecycle(
   source: WindowLifecycleSource,
   appWindow: AppWindowLike,
+  options: WindowLifecycleOptions = {},
 ): Promise<() => void> {
   const syncTitle = (): void => {
     // Title feedback is cosmetic: a failure here must not break the lifecycle.
     void appWindow
       .setTitle(formatWindowTitle(source.getActiveSession()))
-      .catch(() => {});
+      .catch((error: unknown) => {
+        options.onError?.(error);
+      });
   };
-  await appWindow.setTitle(formatWindowTitle(source.getActiveSession()));
+
+  try {
+    await appWindow.setTitle(formatWindowTitle(source.getActiveSession()));
+  } catch (error) {
+    // Reported, not fatal: the close guard below is installed regardless.
+    options.onError?.(error);
+  }
 
   const unsubscribe = source.subscribe(syncTitle);
 

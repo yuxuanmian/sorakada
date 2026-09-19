@@ -1,9 +1,133 @@
 /*
- * Shell layout: Sidebar, Editor Area, Empty State and shared controls.
+ * Shell geometry: TopBar, MainArea, Sidebar, Editor Workspace/Group and Footer.
  *
- * Every colour, radius and spacing value comes from the theme tokens in
- * `global.css`, so the shell introduces no palette of its own (FR-095).
+ * Every colour, radius, spacing and structural metric comes from the tokens in
+ * `global.css` (palette/typography) and `density.css` (structural metrics), so the
+ * shell declares no palette of its own (FR-017..FR-019).
+ *
+ * The regions are one flex column; `min-width: 0`/`min-height: 0` is enforced at
+ * every flex/scroll boundary, which is what keeps a wide Tree or a long Tab strip
+ * from pushing Editor or Footer out of the window (FR-010, FR-078, T052).
  */
+
+/* ------------------------------------------------------------------------- */
+/* TopBar (T042, T053)                                                        */
+/* ------------------------------------------------------------------------- */
+
+.top-bar {
+  display: flex;
+  flex: 0 0 var(--topbar-height);
+  align-items: stretch;
+  min-width: 0;
+  border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-bg-raised);
+  user-select: none;
+}
+
+/*
+ * The gesture surface. It spans the whole strip so the empty area behaves like a
+ * title bar, and the gesture handler ignores presses that landed on an
+ * interactive descendant (FR-006, FR-007).
+ */
+.top-bar__drag {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+}
+
+.top-bar__menu {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 100%;
+}
+
+/* The draggable, non-interactive remainder of the strip. */
+.top-bar__drag-fill {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: var(--space-3);
+}
+
+.top-bar__window-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+}
+
+.top-bar__control {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--topbar-control-width);
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: default;
+}
+
+.top-bar__control:hover {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+.top-bar__control--close:hover {
+  background-color: var(--color-danger);
+  color: var(--color-text);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Compact App Menu trigger (T061)                                            */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The trigger is part of the TopBar strip, so it keeps the strip's height and
+ * introduces no box of its own beyond its hit area. `data-popup-open` is a
+ * documented state attribute of the headless primitive, used here only through a
+ * Sorakada class (T015).
+ */
+.compact-app-menu__trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 100%;
+  padding: 0 var(--space-2);
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  cursor: default;
+}
+
+.compact-app-menu__trigger:hover,
+.compact-app-menu__trigger[data-popup-open] {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+.compact-app-menu__name {
+  letter-spacing: 0.04em;
+}
+
+.compact-app-menu__chevron {
+  color: inherit;
+}
+
+/* ------------------------------------------------------------------------- */
+/* MainArea: Sidebar next to the Editor Workspace                             */
+/* ------------------------------------------------------------------------- */
+
+.app__main-area {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: stretch;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
 
 .sidebar {
   position: relative;
@@ -27,7 +151,7 @@
   position: absolute;
   top: 0;
   right: calc(var(--sidebar-resizer-width) / -2);
-  z-index: 2;
+  z-index: var(--layer-transient);
   width: var(--sidebar-resizer-width);
   height: 100%;
   cursor: col-resize;
@@ -39,12 +163,21 @@
 }
 
 /*
- * The Editor Area keeps the Tab strip above the editor host. It is the
- * positioning context for the drag/drop affordance, so the overlay can never
- * cover the Tab strip.
+ * The Editor Workspace keeps the frozen minimum width from `layoutMetrics.ts`
+ * (the same 320 logical pixels), so a Sidebar clamp that went wrong could never
+ * paint over the editor (FR-083, SC-005).
  */
-.editor-area {
+.editor-workspace {
   position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: var(--min-editor-width);
+  min-height: 0;
+}
+
+/* One editor group: its Tab strip above its host (FR-002). */
+.editor-group {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -52,13 +185,86 @@
   min-height: 0;
 }
 
-.editor-host-area {
+.editor-group__host {
   position: relative;
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Footer (T049, FR-073, FR-078)                                              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A thin full-width region *below* MainArea. It is a flex sibling, not an
+ * overlay, so it can never cover CodeMirror or the Sidebar (FR-073).
+ */
+.footer-bar {
+  display: flex;
+  flex: 0 0 var(--footer-height);
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 0 var(--space-2);
+  border-top: 1px solid var(--color-border);
+  background-color: var(--color-bg-raised);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  user-select: none;
+}
+
+.footer-bar__left {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.footer-bar__right {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+
+/*
+ * Breadcrumb priority (FR-078, T174): the earlier path components shrink and
+ * truncate first, the file name and the right-hand status items do not. That way a
+ * narrow window loses low-priority context instead of forcing the application
+ * wider or covering MainArea.
+ */
+.footer-bar__context {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.footer-bar__crumb {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.footer-bar__crumb--name {
+  flex: 0 0 auto;
+}
+
+.footer-bar__separator {
+  padding: 0 2px;
+  color: var(--color-text-subtle);
+}
+
+.footer-bar__status {
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Shared surfaces                                                            */
+/* ------------------------------------------------------------------------- */
 
 /*
  * Drag-over affordance. It is only rendered while a native drag is active and
@@ -71,7 +277,7 @@
   border: 2px dashed var(--color-caret);
 }
 
-/* The zero-document Editor Area state (FR-016). */
+/* The zero-document Editor Area state (FR-003). */
 .empty-state {
   display: flex;
   flex: 1 1 auto;

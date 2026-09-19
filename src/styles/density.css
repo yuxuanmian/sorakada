@@ -1,0 +1,77 @@
+/*
+ * Density token sets (007 T023, FR-080, FR-081).
+ *
+ * Three coordinated structural presets — Compact, Default and Comfortable —
+ * drive Tree row metrics, Tab metrics, menu/control heights and spacing. The
+ * active preset is selected by the root `data-density` attribute that
+ * `UiPreferencesStore` publishes (T034); no physical display resolution is ever
+ * inspected (FR-082).
+ *
+ * Density is deliberately *not* typography: font family and font size are owned
+ * by `global.css` and do not change here (FR-081, FR-160).
+ *
+ * The numeric values are the CSS side of a two-sided contract: the same table
+ * lives in `src/app/shell/density.ts` for the virtualizer's row metrics, and
+ * `density.test.ts` fails if the two ever disagree.
+ */
+
+:root {
+  /* Default preset, so the shell is coherent before the preference is applied. */
+  --tree-row-height: 22px;
+  --tree-indent: 14px;
+  --tree-chevron-size: 16px;
+  --tab-height: 30px;
+  --tab-min-width: 72px;
+  --tab-max-width: 220px;
+  --menu-item-height: 26px;
+  --control-height: 24px;
+  --topbar-height: 34px;
+  --sidebar-default-width: 260px;
+  --footer-height: 22px;
+  --ui-gap: 4px;
+}
+
+[data-density="compact"] {
+  --tree-row-height: 20px;
+  --tree-indent: 12px;
+  --tree-chevron-size: 14px;
+  --tab-height: 26px;
+  --tab-min-width: 64px;
+  --tab-max-width: 200px;
+  --menu-item-height: 22px;
+  --control-height: 22px;
+  --topbar-height: 30px;
+  --sidebar-default-width: 240px;
+  --footer-height: 20px;
+  --ui-gap: 3px;
+}
+
+[data-density="default"] {
+  --tree-row-height: 22px;
+  --tree-indent: 14px;
+  --tree-chevron-size: 16px;
+  --tab-height: 30px;
+  --tab-min-width: 72px;
+  --tab-max-width: 220px;
+  --menu-item-height: 26px;
+  --control-height: 24px;
+  --topbar-height: 34px;
+  --sidebar-default-width: 260px;
+  --footer-height: 22px;
+  --ui-gap: 4px;
+}
+
+[data-density="comfortable"] {
+  --tree-row-height: 26px;
+  --tree-indent: 18px;
+  --tree-chevron-size: 18px;
+  --tab-height: 34px;
+  --tab-min-width: 84px;
+  --tab-max-width: 260px;
+  --menu-item-height: 30px;
+  --control-height: 28px;
+  --topbar-height: 38px;
+  --sidebar-default-width: 300px;
+  --footer-height: 26px;
+  --ui-gap: 6px;
+}

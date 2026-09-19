@@ -1,52 +1,24 @@
 /**
- * The single icon set the shell and Explorer draw from.
+ * The single glyph renderer.
  *
- * Icons are decorative stroke paths using `currentColor`, so colors come from
- * the shared CSS tokens instead of being hard-coded per component (FR-095,
- * FR-096). Keeping them here rather than inline in each component means a new
- * Explorer surface cannot fork its own copy of a file/folder glyph.
+ * Icons are decorative stroke paths using `currentColor`, so colours come from
+ * the shared CSS tokens instead of being hard-coded per component (FR-017, T193).
+ * 007 splits the *decision* about which glyph to draw into the icon providers and
+ * keeps only the *rendering* here, so no component can fork its own copy of a
+ * file/folder/window-control glyph.
  */
 
 import type { ReactElement } from "react";
 
-/** Every glyph the 003 shell needs. */
-export type AppIconName =
-  | "file"
-  | "folder"
-  | "folder-open"
-  | "chevron-right"
-  | "chevron-down"
-  | "new-file"
-  | "new-folder"
-  | "refresh"
-  | "rename"
-  | "delete"
-  | "link"
-  | "plus"
-  | "close";
+import { ICON_GLYPHS } from "../icons/glyphs";
+import type { IconDescriptor, IconId } from "../icons/iconTypes";
 
-const ICON_PATHS: Readonly<Record<AppIconName, readonly string[]>> = {
-  file: ["M4 1.5h4.5L12 5v9.5H4z", "M8.5 1.5V5H12"],
-  folder: ["M1.5 4h4l1.5 2h7.5v8h-13z"],
-  "folder-open": ["M1.5 4h4l1.5 2h7.5v1.5", "M1.5 7.5h13l-1.5 6.5h-13z"],
-  "chevron-right": ["M6 3.5L10 8l-4 4.5"],
-  "chevron-down": ["M3.5 6L8 10.5 12.5 6"],
-  "new-file": ["M4 1.5h4.5L12 5v9.5H4z", "M8.5 1.5V5H12", "M8 8v4", "M6 10h4"],
-  "new-folder": ["M1.5 4h4l1.5 2h7.5v8h-13z", "M8 8v4", "M6 10h4"],
-  refresh: ["M13 8a5 5 0 1 1-1.6-3.7", "M13 1.5V5h-3.5"],
-  rename: ["M2 13l1-3 7.5-7.5 2 2L5 12z", "M9.5 3.5l2 2"],
-  delete: ["M2.5 4h11", "M6 4V2h4v2", "M4 4l1 10h6l1-10"],
-  link: [
-    "M6.5 9.5a2.5 2.5 0 0 1 0-3.5l1.5-1.5a2.5 2.5 0 0 1 3.5 3.5",
-    "M9.5 6.5a2.5 2.5 0 0 1 0 3.5L8 11.5A2.5 2.5 0 0 1 4.5 8",
-  ],
-  plus: ["M8 3v10", "M3 8h10"],
-  close: ["M4 4l8 8", "M12 4l-8 8"],
-};
+/** An icon id, kept as the historical name for component props. */
+export type AppIconName = IconId;
 
 export interface AppIconProps {
   /** Which glyph to render. */
-  name: AppIconName;
+  name: IconId;
   /** Extra class names for sizing/state. */
   className?: string;
   /**
@@ -57,12 +29,18 @@ export interface AppIconProps {
   title?: string;
 }
 
-/** Renders one shared glyph. */
-export function AppIcon({
-  name,
-  className,
-  title,
-}: AppIconProps): ReactElement {
+export interface IconGlyphProps {
+  /** A provider's answer: which glyph, and whether it is announced. */
+  descriptor: IconDescriptor;
+  /** Extra class names for sizing/state. */
+  className?: string;
+}
+
+function renderGlyph(
+  id: IconId,
+  className: string | undefined,
+  title: string | undefined,
+): ReactElement {
   const classes = className === undefined ? "app-icon" : `app-icon ${className}`;
 
   return (
@@ -81,9 +59,27 @@ export function AppIcon({
       role={title === undefined ? undefined : "img"}
     >
       {title === undefined ? null : <title>{title}</title>}
-      {ICON_PATHS[name].map((path) => (
+      {ICON_GLYPHS[id].map((path) => (
         <path key={path} d={path} />
       ))}
     </svg>
   );
+}
+
+/** Renders one shared glyph by id. */
+export function AppIcon({ name, className, title }: AppIconProps): ReactElement {
+  return renderGlyph(name, className, title);
+}
+
+/**
+ * Renders whatever an icon provider resolved.
+ *
+ * Components that own a `FileIconProvider`/`UiIconProvider` use this, so a
+ * descriptor from either provider reaches the same single renderer.
+ */
+export function IconGlyph({
+  descriptor,
+  className,
+}: IconGlyphProps): ReactElement {
+  return renderGlyph(descriptor.id, className, descriptor.title);
 }

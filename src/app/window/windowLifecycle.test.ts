@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EditorState, Text } from "@codemirror/state";
 
+import { NEW_DOCUMENT_FORMAT, type DocumentManagerSnapshot, type DocumentSession } from "../document/documentSession";
 import {
-  NEW_DOCUMENT_FORMAT,
-  type DocumentManagerSnapshot,
-  type DocumentSession,
-} from "../document/documentSession";
+  createTauriWindowChromeAdapter,
+  createWindowChromeController,
+} from "../shell/windowChrome";
 import {
   formatWindowTitle,
   handleCloseRequested,
@@ -25,6 +25,11 @@ class FakeWindow implements AppWindowLike {
   unlistenCount = 0;
   handler: ((event: CloseRequestedLike) => void | Promise<void>) | null = null;
 
+  /** Native window-chrome calls, in order (007 custom TopBar). */
+  readonly chromeCalls: string[] = [];
+  /** The event the last native close request passed to the listener. */
+  lastCloseEvent: FakeCloseEvent | null = null;
+
   async setTitle(title: string): Promise<void> {
     this.titles.push(title);
   }
@@ -40,6 +45,35 @@ class FakeWindow implements AppWindowLike {
     return () => {
       this.unlistenCount += 1;
     };
+  }
+
+  async startDragging(): Promise<void> {
+    this.chromeCalls.push("startDragging");
+  }
+
+  async minimize(): Promise<void> {
+    this.chromeCalls.push("minimize");
+  }
+
+  async toggleMaximize(): Promise<void> {
+    this.chromeCalls.push("toggleMaximize");
+  }
+
+  async isMaximized(): Promise<boolean> {
+    return false;
+  }
+
+  /**
+   * The native close request.
+   *
+   * It hands the close event to the installed listener exactly as Tauri does,
+   * which is what makes the interception path — not just the mapping — testable.
+   */
+  async close(): Promise<void> {
+    this.chromeCalls.push("close");
+    const event = new FakeCloseEvent();
+    this.lastCloseEvent = event;
+    await this.handler?.(event);
   }
 }
 
@@ -345,5 +379,136 @@ describe("installWindowLifecycle", () => {
     // The lifecycle itself never closes a Tab; it only destroys the window.
     expect(source.getActiveSession()?.id).toBe(before);
     expect(appWindow.destroyCount).toBe(1);
+  });
+});
+
+/**
+ * The unsaved-work guard must survive a cosmetic failure.
+ *
+ * A refused title write (for example a `core:window:allow-set-title` permission
+ * that is missing or out of scope) used to reject out of
+ * `installWindowLifecycle()` *before* `onCloseRequested` was registered, which
+ * silently left the window with no dirty-close interception at all.
+ */
+describe("window lifecycle resilience", () => {
+  class TitleFailingWindow extends FakeWindow {
+    override async setTitle(): Promise<void> {
+      throw new Error('window.set_title not allowed on window "main"');
+    }
+  }
+
+  it("still installs the close guard when the title write is refused", async () => {
+    const onError = vi.fn();
+    const source = new FakeSource(createSession({ displayName: "foo.txt" }));
+    const appWindow = new TitleFailingWindow();
+
+    const dispose = await installWindowLifecycle(source, appWindow, {
+      onError,
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(appWindow.handler).not.toBeNull();
+
+    // The guard is live: a dirty close still runs prepareCloseAll exactly once.
+    const dirty = createSession({ dirty: true });
+    source.dirtyDocuments = [dirty];
+    source.closeAllResult = false;
+
+    const event = new FakeCloseEvent();
+    await appWindow.handler?.(event);
+
+    expect(event.preventDefaultCount).toBe(1);
+    expect(source.closeAllCalls).toBe(1);
+    expect(appWindow.destroyCount).toBe(0);
+
+    dispose();
+    expect(appWindow.unlistenCount).toBe(1);
+  });
+
+  it("reports an asynchronous title failure from a later sync too", async () => {
+    const onError = vi.fn();
+    const source = new FakeSource(createSession());
+    const appWindow = new TitleFailingWindow();
+
+    await installWindowLifecycle(source, appWindow, { onError });
+    onError.mockClear();
+
+    source.update(createSession({ displayName: "next.txt" }));
+    await Promise.resolve();
+
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("works without an error hook", async () => {
+    const source = new FakeSource(createSession());
+    const appWindow = new TitleFailingWindow();
+
+    await expect(installWindowLifecycle(source, appWindow)).resolves.toBeTypeOf(
+      "function",
+    );
+    expect(appWindow.handler).not.toBeNull();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 007 custom Close control (T046, FR-008, SC-008)                             */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The visual Close control must be indistinguishable from a native one.
+ *
+ * These tests drive the real path end to end — `window.close` command →
+ * `WindowChromeController.requestClose()` → the native close request → the
+ * installed close-requested listener — because the risk FR-008 names is a
+ * *second*, unsafe close path that bypasses `prepareCloseAll()`.
+ */
+describe("custom window chrome close path", () => {
+  function wire(appWindow: FakeWindow) {
+    return {
+      chrome: createWindowChromeController({
+        adapter: createTauriWindowChromeAdapter(appWindow),
+      }),
+    };
+  }
+
+  it("keeps the window open when a dirty document cancels the close", async () => {
+    const dirty = createSession({ dirty: true });
+    const source = new FakeSource(dirty);
+    source.dirtyDocuments = [dirty];
+    source.closeAllResult = false;
+    const appWindow = new FakeWindow();
+    await installWindowLifecycle(source, appWindow);
+
+    await wire(appWindow).chrome.requestClose();
+
+    expect(appWindow.chromeCalls).toEqual(["close"]);
+    expect(appWindow.lastCloseEvent?.preventDefaultCount).toBe(1);
+    expect(source.closeAllCalls).toBe(1);
+    expect(appWindow.destroyCount).toBe(0);
+  });
+
+  it("destroys only after the guard approved the close", async () => {
+    const dirty = createSession({ dirty: true });
+    const source = new FakeSource(dirty);
+    source.dirtyDocuments = [dirty];
+    const appWindow = new FakeWindow();
+    await installWindowLifecycle(source, appWindow);
+
+    await wire(appWindow).chrome.requestClose();
+
+    expect(source.closeAllCalls).toBe(1);
+    expect(appWindow.destroyCount).toBe(1);
+  });
+
+  it("lets a clean window close without running the guard", async () => {
+    const source = new FakeSource(createSession());
+    const appWindow = new FakeWindow();
+    await installWindowLifecycle(source, appWindow);
+
+    await wire(appWindow).chrome.requestClose();
+
+    expect(appWindow.lastCloseEvent?.preventDefaultCount).toBe(0);
+    expect(source.closeAllCalls).toBe(0);
+    expect(appWindow.destroyCount).toBe(0);
   });
 });

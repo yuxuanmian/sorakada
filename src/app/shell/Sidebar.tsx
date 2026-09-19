@@ -1,35 +1,23 @@
 /**
  * The Sidebar container.
  *
- * It is a *generic* horizontal panel: 003 puts the Explorer in it, but nothing
- * here is Explorer-specific, so a later Sidebar view can replace the content
- * without touching this layout (FR-091). Width and visibility are transient and
- * process-local — 003 deliberately persists neither (FR-094).
+ * It is a *generic* horizontal panel: 007 puts the Explorer in it, but nothing
+ * here is Explorer-specific (FR-026). Width and visibility are owned by
+ * `UiPreferencesStore`; this component only renders the width it is given and
+ * reports drag requests.
+ *
+ * The Sidebar deliberately does **not** clamp: the bounds are a property of the
+ * MainArea, and `AppShell`/`layoutMetrics` own them. A drag therefore reports the
+ * raw request, and rendering decides how much of it fits (FR-084).
  */
 
 import { useEffect, useState, type ReactNode } from "react";
 
-/** Narrowest width the Sidebar may be dragged to. */
-export const SIDEBAR_MIN_WIDTH = 160;
-/** Widest width the Sidebar may be dragged to. */
-export const SIDEBAR_MAX_WIDTH = 640;
-
-/** Constrains a requested Sidebar width to the supported range. */
-export function clampSidebarWidth(width: number): number {
-  if (!Number.isFinite(width)) {
-    return SIDEBAR_MIN_WIDTH;
-  }
-  return Math.min(
-    SIDEBAR_MAX_WIDTH,
-    Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)),
-  );
-}
-
 export interface SidebarProps {
-  /** Current width in CSS pixels. */
+  /** Rendered width in CSS logical pixels, already clamped by the caller. */
   width: number;
-  /** Reports a dragged width, already clamped by the caller. */
-  onResize(width: number): void;
+  /** Reports a dragged width request; the caller clamps and stores it. */
+  onResize(requestedWidth: number): void;
   /** Accessible name for the panel; supplied by whichever view is hosted. */
   label: string;
   /** The hosted view. */
@@ -53,7 +41,7 @@ export function Sidebar({ width, onResize, label, children }: SidebarProps) {
     }
 
     const onMove = (event: PointerEvent): void => {
-      onResize(clampSidebarWidth(drag.startWidth + event.clientX - drag.startX));
+      onResize(drag.startWidth + event.clientX - drag.startX);
     };
     const onEnd = (): void => {
       setDrag(null);
@@ -82,6 +70,7 @@ export function Sidebar({ width, onResize, label, children }: SidebarProps) {
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize sidebar"
+        data-sora-interactive=""
         onPointerDown={(event) => {
           event.preventDefault();
           setDrag({ startX: event.clientX, startWidth: width });

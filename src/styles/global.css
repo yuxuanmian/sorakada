@@ -1,12 +1,19 @@
 /*
- * Global application styles: theme tokens, reset and the app shell.
- * Replace the token values below to re-skin the application.
+ * Global application tokens, reset and shared primitives.
+ *
+ * 007 keeps this file as the *single* central token layer: palette literals exist
+ * here and nowhere else, and every component consumes semantic variables
+ * (FR-017..FR-019). Structural metrics that change per density live in
+ * `density.css`; typography deliberately does not (FR-081, FR-160).
+ *
+ * This is temporary/default styling only: 007 does not build a theme engine,
+ * Light/Dark switcher or appearance system (FR-020).
  */
 
 :root {
   color-scheme: dark;
 
-  /* Palette */
+  /* Palette — the only place a literal colour is declared. */
   --color-bg: #16181d;
   --color-bg-raised: #1c1f26;
   --color-border: #2a2e37;
@@ -17,21 +24,41 @@
   --color-selection: #2b4a75;
   --color-caret: #7cb0ff;
 
-  /* Interaction states shared by every 003 surface */
+  /* Interaction states shared by every surface. */
   --color-hover: #23262e;
   --color-active: #2b303b;
   --color-focus-ring: #3b6ea8;
+  /* Destructive hover, used by the window Close control only. */
+  --color-danger: #b0403a;
 
-  /* Typography */
+  /*
+   * Explicit stacking layers (FR-015, plan §20).
+   *
+   * Every floating surface uses a named layer instead of an ad-hoc z-index, and
+   * the shared overlay root lives on the popup layer, so a popup can never be
+   * clipped by a Sidebar/Editor overflow container.
+   */
+  --layer-content: 0;
+  --layer-window-chrome: 10;
+  --layer-transient: 20;
+  --layer-popup: 30;
+  --layer-modal: 40;
+
+  /* Typography — owned by typography, not by density (FR-081). */
   --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
   --font-size-ui: 13px;
   --font-size-editor: 14px;
 
   /* Layout */
-  --app-header-height: 34px;
   --sidebar-resizer-width: 4px;
-  --sidebar-default-width: 260px;
+  /*
+   * The Editor Workspace minimum, shared with `layoutMetrics.MIN_EDITOR_WIDTH`.
+   * It is a layout boundary, not a display heuristic (FR-083, FR-084).
+   */
+  --min-editor-width: 320px;
+  /* Window-control hit area in the TopBar (T053). */
+  --topbar-control-width: 46px;
 
   /* Spacing and shape */
   --space-1: 4px;
@@ -39,7 +66,7 @@
   --space-3: 12px;
   --radius-sm: 3px;
   --radius-md: 5px;
-  --control-height: 24px;
+
   /* Popup elevation, shared by every floating surface. */
   --shadow-popup: 0 6px 18px rgb(0 0 0 / 45%);
 }
@@ -66,39 +93,14 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* The shell root: three stacked structural regions (TopBar/MainArea/Footer). */
 .app {
   display: flex;
   flex-direction: column;
   height: 100%;
-}
-
-.app__header {
-  display: flex;
-  flex: 0 0 var(--app-header-height);
-  align-items: center;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--color-border);
-  background-color: var(--color-bg-raised);
-  user-select: none;
-}
-
-.app__wordmark {
-  color: var(--color-text-muted);
-  font-size: 12px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-/*
- * Sidebar and Editor Area side by side. The Body is the horizontal axis of the
- * shell; each side owns its own vertical layout.
- */
-.app__body {
-  display: flex;
-  flex: 1 1 auto;
-  align-items: stretch;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 /* Shared glyph sizing; colours always come from `currentColor`. */

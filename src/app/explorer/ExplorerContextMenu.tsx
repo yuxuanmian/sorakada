@@ -1,153 +1,127 @@
 /**
- * The Explorer's context menu.
+ * The Explorer's context menu (007 T066, T069).
  *
- * It is intentionally small and fixed: 003 requires a working menu, not a
- * pluggable menu framework (FR-081). Which items appear is decided entirely by
- * the shared `FileOperationContext`, so the menu cannot offer an action the
- * command registry would refuse (FR-078, FR-080).
+ * 004/003 semantics are preserved on purpose while the *surface* changes:
  *
- * The creation group is the one deliberate exception. It asks the
- * context-menu-specific predicate, because 004 hides New File/New Folder in a
- * file's menu while the shared commands and their selected-file parent target
- * stay exactly as 003 defined them (FR-006, FR-010).
+ * - the menu still offers creation for root/directory contexts, Rename/Delete for
+ *   an entry and Refresh for root/directory contexts, all through the same
+ *   `ExplorerMenuAction` command ids as before (T066, T067);
+ * - the operation context is still captured at the moment of the gesture, and a
+ *   right click still selects the logical row first (T068);
+ * - there is still exactly **one** controlled menu surface for the whole Tree.
+ *   The trigger covers the Tree body and reports the pointer target, so no
+ *   recyclable row ever owns authoritative popup state (T069).
+ *
+ * Keyboard navigation, focus handling, outside-press dismissal and portal
+ * placement now come from the Sorakada `SoraContextMenu` wrapper instead of the
+ * hand-written outside-click/z-index code 003 had (T070..T072).
  */
 
-import { useEffect, useRef } from "react";
+import type { ReactNode } from "react";
 
-import { AppIcon, type AppIconName } from "../shell/AppIcon";
+import type { CommandId } from "../commands/commandIds";
+import { IconGlyph } from "../shell/AppIcon";
+import { uiIcon } from "../icons/uiIconProvider";
+import type { UiIconId } from "../icons/iconTypes";
+import { SoraContextMenu, type SoraContextTarget } from "../../ui/context-menu/SoraContextMenu";
+import type { SoraMenuItem } from "../../ui/menu/menuModel";
+import { activateMenuItem } from "../menu/menuActivation";
+import type { FileOperationContext } from "./explorerActions";
 import {
-  isContextMenuCreateAvailable,
-  isContextMenuRefreshAvailable,
-  isDeleteAvailable,
-  isRenameAvailable,
-  type FileOperationContext,
-} from "./explorerActions";
-import type { MenuPosition } from "./ExplorerTree";
+  buildExplorerMenuModel,
+  type ExplorerMenuAction,
+} from "./explorerMenuModel";
 
-/** The actions the menu can dispatch, all through shared command ids. */
-export type ExplorerMenuAction =
-  | "explorer.newFile"
-  | "explorer.newFolder"
-  | "explorer.rename"
-  | "explorer.delete"
-  | "explorer.refresh";
+export type { ExplorerMenuAction };
+
+/** The glyph each context action displays. */
+const ACTION_ICONS: Readonly<Record<ExplorerMenuAction, UiIconId>> = {
+  "explorer.newFile": "new-file",
+  "explorer.newFolder": "new-folder",
+  "explorer.rename": "rename",
+  "explorer.delete": "delete",
+  "explorer.refresh": "refresh",
+};
+
+function isExplorerMenuAction(value: string): value is ExplorerMenuAction {
+  return value in ACTION_ICONS;
+}
 
 export interface ExplorerContextMenuProps {
-  /** Viewport position the menu was requested at. */
-  position: MenuPosition;
-  /** The context derived when the menu opened. */
-  context: FileOperationContext;
+  /** The region that opens the menu: the Tree body, blank space included. */
+  children: ReactNode;
+  /**
+   * The operation context currently targeted, or `null` when no gesture has
+   * targeted anything yet.
+   */
+  context: FileOperationContext | null;
+  /** Reports the gesture target so the caller can capture the logical row. */
+  onTarget(target: SoraContextTarget): void;
   /** Dispatches the chosen command through the shared registry. */
   onAction(action: ExplorerMenuAction): void;
-  /** Closes the menu without dispatching anything. */
-  onClose(): void;
+  /** Reports open/closed transitions, so a closed menu drops its target. */
+  onOpenChange?(open: boolean): void;
+  /** Whether a command is currently available in the shared registry. */
+  isEnabled(commandId: CommandId): boolean;
+  /**
+   * Whether the popup is suppressed while gestures are still reported (T229).
+   *
+   * The development-only Tree fixture has no filesystem operations to offer: it
+   * keeps the right-click *target* inside its own UI state but must not present a
+   * menu whose every item would act on the real Workspace behind it.
+   */
+  suppressPopup?: boolean;
 }
 
-interface MenuItem {
-  action: ExplorerMenuAction;
-  label: string;
-  icon: AppIconName;
-}
-
-/**
- * Renders the context menu.
- *
- * It closes on an outside pointer press and on Escape, which are the two
- * dismissals a desktop context menu is expected to support.
- */
+/** Renders the Explorer's single controlled context menu over its trigger. */
 export function ExplorerContextMenu({
-  position,
+  children,
   context,
+  onTarget,
   onAction,
-  onClose,
+  onOpenChange,
+  isEnabled,
+  suppressPopup = false,
 }: ExplorerContextMenuProps) {
-  const menuRef = useRef<HTMLDivElement>(null);
+  const model =
+    context === null ? [] : buildExplorerMenuModel(context, { isEnabled });
 
-  useEffect(() => {
-    const onPointerDown = (event: globalThis.PointerEvent): void => {
-      if (menuRef.current?.contains(event.target as Node) === true) {
-        return;
-      }
-      onClose();
-    };
-    const onKeyDown = (event: globalThis.KeyboardEvent): void => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    };
-
-    window.addEventListener("pointerdown", onPointerDown, true);
-    window.addEventListener("keydown", onKeyDown, true);
-
-    return () => {
-      window.removeEventListener("pointerdown", onPointerDown, true);
-      window.removeEventListener("keydown", onKeyDown, true);
-    };
-  }, [onClose]);
-
-  const groups: MenuItem[][] = [];
-
-  // Creation is offered for the root and directory contexts only: a file's menu
-  // reads as file-local actions, even though the header still creates beside a
-  // selected file through the shared target rule (FR-006, FR-007, SR-002).
-  if (isContextMenuCreateAvailable(context)) {
-    groups.push([
-      { action: "explorer.newFile", label: "New File", icon: "new-file" },
-      { action: "explorer.newFolder", label: "New Folder", icon: "new-folder" },
-    ]);
-  }
-
-  const entryItems: MenuItem[] = [];
-  if (isRenameAvailable(context)) {
-    entryItems.push({ action: "explorer.rename", label: "Rename", icon: "rename" });
-  }
-  if (isDeleteAvailable(context)) {
-    entryItems.push({ action: "explorer.delete", label: "Delete", icon: "delete" });
-  }
-  if (entryItems.length > 0) {
-    groups.push(entryItems);
-  }
-
-  // Refresh belongs to the root and directory contexts; a file context offers
-  // Rename and Delete only (plan decision 12, FR-006).
-  if (isContextMenuRefreshAvailable(context)) {
-    groups.push([
-      { action: "explorer.refresh", label: "Refresh", icon: "refresh" },
-    ]);
-  }
+  // Icons are presentation, so they are attached here rather than in the pure
+  // model: the grouping/target rules stay testable without React.
+  const withIcons = model.map((section) => ({
+    ...section,
+    items: section.items.map((entry) => ({
+      ...entry,
+      icon: isExplorerMenuAction(entry.id) ? (
+        <IconGlyph descriptor={uiIcon(ACTION_ICONS[entry.id])} />
+      ) : undefined,
+    })),
+  }));
 
   return (
-    <div
-      ref={menuRef}
-      className="explorer-menu"
-      role="menu"
-      style={{ left: `${position.x}px`, top: `${position.y}px` }}
-      // The menu itself must not be treated as Explorer blank space.
-      onContextMenu={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
+    <SoraContextMenu
+      // The trigger is a `display: contents` region (`ui.css`), so the Tree's own
+      // scroll viewport stays a direct flex child of the Explorer region rather
+      // than being wrapped in an extra box (T099).
+      model={withIcons}
+      ariaLabel="Explorer actions"
+      // Controlled closed while suppressed, so an empty popup is never shown and
+      // the gesture target is still reported (T229).
+      open={suppressPopup ? false : undefined}
+      onTarget={onTarget}
+      onOpenChange={onOpenChange}
+      onAction={(entry: SoraMenuItem) => {
+        const dispatched = activateMenuItem(entry, (id) => {
+          if (isExplorerMenuAction(id)) {
+            onAction(id);
+          }
+        });
+        if (dispatched === undefined) {
+          return;
+        }
       }}
     >
-      {groups.map((group, index) => (
-        <div className="explorer-menu__group" key={group[0].action}>
-          {index > 0 ? <div className="explorer-menu__separator" role="separator" /> : null}
-          {group.map((item) => (
-            <button
-              key={item.action}
-              type="button"
-              role="menuitem"
-              className="explorer-menu__item"
-              onClick={() => {
-                onAction(item.action);
-              }}
-            >
-              <AppIcon name={item.icon} className="explorer-menu__icon" />
-              <span>{item.label}</span>
-            </button>
-          ))}
-        </div>
-      ))}
-    </div>
+      {children}
+    </SoraContextMenu>
   );
 }

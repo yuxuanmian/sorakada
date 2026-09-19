@@ -1,8 +1,10 @@
 /*
- * Explorer tree, inline editor and context menu.
+ * Explorer Tree, inline editor and Tree geometry.
  *
- * Colours, spacing and shape come from the theme tokens in `global.css`
- * (FR-095); the Explorer never declares its own palette.
+ * Colours, spacing, shape and every structural metric come from the tokens in
+ * `global.css` (palette/typography) and `density.css` (row height, indent,
+ * chevron size), so the Explorer declares no palette and no row-height constant of
+ * its own (FR-017..FR-019, T094).
  */
 
 .explorer {
@@ -11,11 +13,6 @@
   flex-direction: column;
   min-height: 0;
   outline: none;
-}
-
-.explorer:focus-visible {
-  outline: 1px solid var(--color-focus-ring);
-  outline-offset: -1px;
 }
 
 .explorer--empty {
@@ -34,7 +31,7 @@
   flex: 0 0 auto;
   align-items: center;
   gap: var(--space-2);
-  height: 28px;
+  height: var(--control-height);
   padding: 0 var(--space-1) 0 var(--space-2);
   border-bottom: 1px solid var(--color-border);
   user-select: none;
@@ -55,15 +52,43 @@
 .explorer__actions {
   display: flex;
   flex: 0 0 auto;
+  justify-content: flex-end;
   gap: 2px;
+  /*
+   * A fixed hit area for the three Header actions: entering or leaving the
+   * transient search must not move Locate/Collapse/More horizontally (FR-027).
+   */
+  min-width: calc(var(--control-height) * 3 + 4px);
+}
+
+/* The transient search input, shown in the Header's left half (FR-027, T108). */
+.explorer__search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: calc(var(--control-height) - 4px);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-focus-ring);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  outline: none;
+}
+
+.explorer__search-count {
+  flex: 0 0 auto;
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .explorer__action {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: var(--control-height);
+  height: var(--control-height);
   padding: 0;
   border: none;
   border-radius: var(--radius-sm);
@@ -89,31 +114,65 @@
   color: var(--color-text-muted);
 }
 
+/* ------------------------------------------------------------------------- */
+/* The one Tree scroll viewport (T099)                                        */
+/* ------------------------------------------------------------------------- */
+
 /*
- * The Body is the one scrollable region and always fills the remaining Sidebar
- * height, so the area below the last rendered row belongs to it rather than to
- * the tree. That is what the blank-space context menu relies on: rows stop
- * propagation, and everything that reaches the Body is genuinely blank space
- * and therefore Workspace-root context (FR-077).
+ * The body is the *only* vertical/horizontal Tree scroller, and the Header is
+ * deliberately outside it. Horizontal overflow is enabled only through the
+ * modifier class, which the Tree adds when the computed materialized content is
+ * actually wider than the viewport — so a rounded measurement can never produce a
+ * permanent stray scrollbar.
  */
 .explorer__body {
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   scrollbar-width: thin;
+  outline: none;
 }
 
+.explorer__body--overflow-x {
+  overflow-x: auto;
+}
+
+/* The stable focus owner: the keyboard scope survives any row being recycled. */
+.explorer__body:focus-visible {
+  outline: 1px solid var(--color-focus-ring);
+  outline-offset: -1px;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Virtual content layer                                                      */
+/* ------------------------------------------------------------------------- */
+
+/* Height and width are computed; the layer only positions its rows. */
 .explorer-tree {
+  position: relative;
   padding: var(--space-1) 0;
   user-select: none;
 }
 
-/* One visible row: chevron, glyph, label. */
+/*
+ * One mounted row. Absolute + translated positioning is what the virtualizer
+ * drives, so the row elements carry no layout of their own.
+ */
+.explorer-tree__row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+/* One visible row: guides, chevron, glyph, label. */
 .explorer-row {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
-  height: 22px;
+  gap: var(--ui-gap);
+  height: var(--tree-row-height);
   padding-right: var(--space-2);
   color: var(--color-text-muted);
   white-space: nowrap;
@@ -133,29 +192,110 @@
 }
 
 /*
- * A load notice is still a row, but its text is a sentence rather than a name, so
- * it grows instead of being clipped to the 22px row height. With a fixed height,
- * a long localized failure message painted over the rows above and below it.
+ * A load/error/cycle sentinel keeps the same fixed height as every other row
+ * (FR-040): its message truncates, and the full text is available through the
+ * row's tooltip. Letting a long OS message grow the row used to paint over the
+ * rows above and below it.
  */
 .explorer-row--notice {
-  height: auto;
-  min-height: 22px;
-  align-items: flex-start;
-  padding-top: 2px;
-  padding-bottom: 2px;
   color: var(--color-text-subtle);
   font-style: italic;
-  white-space: normal;
-  overflow-wrap: anywhere;
 }
+
+.explorer-row--notice .explorer-row__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explorer-row--notice-error .explorer-row__label,
+.explorer-row--notice-cycle .explorer-row__label {
+  color: var(--color-text-subtle);
+}
+
+/* Development-only row outline (T181). */
+.explorer-row[data-row-bounds] {
+  outline: 1px dashed var(--color-focus-ring);
+  outline-offset: -1px;
+}
+
+/*
+ * Development-only counters (T181). The element is not rendered at all unless a
+ * diagnostic is enabled, so it can never change Tree geometry when hidden.
+ */
+.explorer__debug {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--space-2);
+  padding: 2px var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-caret);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Indent guides (T093)                                                       */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Guides are slots inside one row, never nested ancestor containers: each slot is
+ * one indent step wide and draws its own line, which keeps the Tree flat no
+ * matter how deep a node is.
+ */
+.explorer-row__indent {
+  display: flex;
+  flex: 0 0 auto;
+  align-self: stretch;
+}
+
+.explorer-row__guide {
+  position: relative;
+  flex: 0 0 var(--tree-indent);
+  width: var(--tree-indent);
+}
+
+.explorer-row__guide::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--tree-indent) / 2);
+  width: 1px;
+  background-color: var(--color-border);
+}
+
+/* An ancestor whose last child is above this row stops at its own level. */
+.explorer-row__guide--gap::before {
+  display: none;
+}
+
+/* The level immediately above the row ends with an elbow into the row. */
+.explorer-row__guide--elbow::before {
+  bottom: 50%;
+}
+
+.explorer-row__guide--elbow::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: calc(var(--tree-indent) / 2);
+  width: calc(var(--tree-indent) / 2);
+  height: 1px;
+  background-color: var(--color-border);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Row parts                                                                  */
+/* ------------------------------------------------------------------------- */
 
 .explorer-row__chevron {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: var(--tree-chevron-size);
+  height: var(--tree-chevron-size);
   padding: 0;
   border: none;
   background: transparent;
@@ -176,7 +316,10 @@
   color: inherit;
 }
 
-/* FR-033: long names truncate instead of widening the Sidebar. */
+/*
+ * FR-045: long names truncate inside the Tree region. Horizontal scrolling is the
+ * Tree's own fallback, and a name never expands over the Editor on hover.
+ */
 .explorer-row__label {
   flex: 1 1 auto;
   min-width: 0;
@@ -192,7 +335,7 @@
 .explorer-inline-input {
   flex: 1 1 auto;
   min-width: 0;
-  height: 18px;
+  height: calc(var(--tree-row-height) - 4px);
   padding: 0 var(--space-1);
   border: 1px solid var(--color-focus-ring);
   border-radius: var(--radius-sm);
@@ -201,45 +344,4 @@
   font-family: inherit;
   font-size: var(--font-size-ui);
   outline: none;
-}
-
-/* The functional, non-extensible context menu (FR-081). */
-.explorer-menu {
-  position: fixed;
-  z-index: 10;
-  min-width: 160px;
-  padding: var(--space-1) 0;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background-color: var(--color-bg-raised);
-  box-shadow: var(--shadow-popup);
-}
-
-.explorer-menu__separator {
-  height: 1px;
-  margin: var(--space-1) 0;
-  background-color: var(--color-border);
-}
-
-.explorer-menu__item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  padding: var(--space-1) var(--space-3);
-  border: none;
-  background: transparent;
-  color: var(--color-text);
-  font-family: inherit;
-  font-size: var(--font-size-ui);
-  text-align: left;
-  cursor: default;
-}
-
-.explorer-menu__item:hover {
-  background-color: var(--color-active);
-}
-
-.explorer-menu__icon {
-  color: var(--color-text-muted);
 }

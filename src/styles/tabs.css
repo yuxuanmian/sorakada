@@ -1,12 +1,16 @@
 /*
- * Tab strip layout.
+ * Tab strip layout (007 T134, T143, FR-064..FR-068).
  *
- * Colours come from the theme tokens declared in `global.css`; no palette value
- * is hard-coded here, so re-skinning the application does not require touching
- * the Tab strip.
+ * Colours come from the theme tokens in `global.css`; every structural metric
+ * (Tab height, minimum width, maximum width, spacing) comes from the density
+ * tokens in `density.css`, so the strip introduces neither a palette nor a Tab
+ * dimension of its own.
+ *
+ * Exactly one temporary appearance exists: there is no theme selector, no accent
+ * setting and no per-Tab colour (FR-072, T143).
  */
 
-.tab-bar {
+.tab-strip {
   display: flex;
   flex: 0 0 auto;
   align-items: stretch;
@@ -17,10 +21,10 @@
 }
 
 /*
- * Only the Tab strip scrolls, and the New control is its last item, so the `+`
- * follows the last Tab and may scroll out of view with it (FR-018, FR-020).
+ * Only the document Tabs scroll, and only horizontally: the strip never wraps to
+ * a second row (FR-064).
  */
-.tab-bar__scroll {
+.tab-strip__viewport {
   display: flex;
   flex: 1 1 auto;
   align-items: stretch;
@@ -31,27 +35,15 @@
 }
 
 /*
- * The trailing New control inside the scroll strip: it keeps its 30px size and
- * does not shrink, so it stays exactly one Tail item. It carries no separator
- * border of its own — the final Tab already draws the strip's right edge.
+ * The fixed action region. It is a sibling of the scroll viewport rather than a
+ * child, which is what keeps New (`+`) and the Overview entry reachable at any
+ * scroll offset and with zero Tabs (FR-067, FR-068, SR-001).
  */
-.tab-bar__new {
+.tab-strip__actions {
   display: flex;
   flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--color-text-muted);
-  cursor: default;
-}
-
-.tab-bar__new:hover {
-  background-color: var(--color-hover);
-  color: var(--color-text);
+  align-items: stretch;
+  border-left: 1px solid var(--color-border);
 }
 
 .tab {
@@ -59,8 +51,9 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 6px;
-  max-width: 220px;
-  height: 30px;
+  height: var(--tab-height);
+  min-width: var(--tab-min-width);
+  max-width: var(--tab-max-width);
   padding: 0 4px 0 10px;
   border-right: 1px solid var(--color-border);
   color: var(--color-text-muted);
@@ -80,13 +73,21 @@
   box-shadow: inset 0 2px 0 var(--color-caret);
 }
 
+/*
+ * The label takes the Tab's remaining width, so when a Tab is wider than its text
+ * — a name shorter than the minimum, or a uniform squeeze — the close button stays
+ * at the Tab's right edge instead of leaving a dead gap after it. Long names
+ * truncate here (FR-065, FR-045).
+ */
 .tab__label {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .tab__dirty {
+  flex: 0 0 auto;
   color: var(--color-caret);
   font-size: 10px;
   line-height: 1;
@@ -95,12 +96,13 @@
 /*
  * External disk state (005, FR-041).
  *
- * Deliberately minimal: a small glyph plus a tooltip, using the existing theme
- * tokens. No notification framework, no dialog and no new palette entry is
- * introduced for it, and the dirty marker above keeps its own colour so the two
- * orthogonal states (FR-009) stay distinguishable at a glance.
+ * A small glyph plus a tooltip, using the existing theme tokens. The marker keeps
+ * its own colour so the two orthogonal states (dirty vs external) stay
+ * distinguishable, and it survives the narrowest Tab because it never shrinks
+ * (T135).
  */
 .tab__external {
+  flex: 0 0 auto;
   font-size: 11px;
   line-height: 1;
 }
@@ -115,13 +117,14 @@
 
 .tab__close {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   width: 18px;
   height: 18px;
   padding: 0;
   border: none;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
   font-family: inherit;
@@ -133,4 +136,102 @@
 .tab__close:hover {
   background-color: var(--color-border);
   color: var(--color-text);
+}
+
+/* The fixed actions share one hit area, so they never move as Tabs scroll. */
+.tab-strip__action {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-height);
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: default;
+}
+
+.tab-strip__action:hover,
+.tab-strip__action[data-popup-open] {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Tab Overview (T139..T142)                                                  */
+/* ------------------------------------------------------------------------- */
+
+.tab-overview {
+  min-width: 260px;
+}
+
+.tab-overview__filter {
+  flex: 0 0 auto;
+  height: var(--control-height);
+  margin-bottom: var(--space-1);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-focus-ring);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  outline: none;
+}
+
+.tab-overview__list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: thin;
+}
+
+.tab-overview__item {
+  display: flex;
+}
+
+.tab-overview__entry {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--ui-gap);
+  min-width: 0;
+  min-height: var(--menu-item-height);
+  padding: 0 var(--space-2);
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  text-align: left;
+  cursor: default;
+}
+
+.tab-overview__entry:hover {
+  background-color: var(--color-active);
+}
+
+.tab-overview__entry--active {
+  color: var(--color-caret);
+}
+
+.tab-overview__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-overview__empty {
+  margin: 0;
+  padding: var(--space-2);
+  color: var(--color-text-subtle);
+  font-size: 11px;
 }

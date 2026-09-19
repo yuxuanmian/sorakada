@@ -55,11 +55,12 @@ export default defineConfig({
     },
   },
 
-  // Vitest only picks up the pure TypeScript lifecycle/command tests. The
-  // production Vite pipeline above is untouched: browser/native behaviour is
-  // validated manually with `specs/001-single-file-editing/quickstart.md`.
+  // Vitest picks up the pure TypeScript lifecycle/command tests plus the 007
+  // static audits. `css: true` is what lets the CSS-contract audit read the real
+  // stylesheet text (`?raw`) instead of Vitest's stubbed empty CSS module.
   test: {
     environment: "node",
+    css: true,
     include: ["src/**/*.test.ts"],
   },
 });

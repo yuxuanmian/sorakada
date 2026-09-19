@@ -49,6 +49,10 @@ import {
   type InlineEditState,
 } from "./explorerModel";
 import {
+  flattenVisibleExplorerRows,
+  inlineEditRowKey,
+} from "./explorerProjection";
+import {
   reconcileDirectorySnapshots,
   rebasePathUnder,
   type ConfirmedExplorerRelocation,
@@ -566,6 +570,89 @@ export class ExplorerController {
     while (this.inFlight.size > 0) {
       await Promise.all([...this.inFlight]);
     }
+  }
+
+  /**
+   * Whether any represented directory below the root is currently expanded.
+   *
+   * Collapse All's availability predicate: the operation is meaningful exactly
+   * when there is expansion to remove, and it is derived from represented state
+   * only, so asking cannot start a read (T112, T124).
+   */
+  hasExpandedDescendants(): boolean {
+    const root = this.state.root;
+    if (root === null) {
+      return false;
+    }
+
+    const walk = (node: ExplorerDirectoryNode): boolean => {
+      for (const child of node.children ?? []) {
+        if (child.kind !== "directory") {
+          continue;
+        }
+        if (child.expanded || walk(child)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    return walk(root);
+  }
+
+  /**
+   * Collapses every represented directory below the root (007 T112, FR-054).
+   *
+   * Only expansion changes. Cached child data and load state are deliberately
+   * left alone, so re-expanding a directory renders its previous contents
+   * immediately; the logical selection is left alone too, because 007 does not
+   * rewrite document or selection state for a view operation. The root keeps its
+   * expansion, since it is the stable Tree anchor (FR-041).
+   *
+   * An inline editor whose row the collapse just hid is cancelled: the user
+   * explicitly dismissed the row the draft belonged to, which is the same rule
+   * that cancels a draft when its target disappears. Leaving it active would keep
+   * an editor alive that nothing can render.
+   *
+   * Returns whether anything was actually collapsed.
+   */
+  collapseAll(): boolean {
+    const root = this.state.root;
+    if (root === null) {
+      return false;
+    }
+
+    let changed = false;
+    const collapseDescendants = (node: ExplorerDirectoryNode): void => {
+      for (const child of node.children ?? []) {
+        if (child.kind !== "directory") {
+          continue;
+        }
+        if (child.expanded) {
+          child.expanded = false;
+          changed = true;
+        }
+        collapseDescendants(child);
+      }
+    };
+    collapseDescendants(root);
+
+    if (!changed) {
+      return false;
+    }
+
+    const edit = this.state.inlineEdit;
+    if (edit !== null) {
+      const visibleKeys = new Set(
+        flattenVisibleExplorerRows(this.state).map((row) => row.key),
+      );
+      if (!visibleKeys.has(inlineEditRowKey(edit))) {
+        this.state.inlineEdit = null;
+      }
+    }
+
+    this.emit();
+    return true;
   }
 
   /* ---------------------------------------------------------------------- */

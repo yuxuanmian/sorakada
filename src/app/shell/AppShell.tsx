@@ -1,76 +1,117 @@
 /**
- * The application shell layout.
+ * The application shell layout (007 T050, T052, T054, T152).
  *
- * `AppShell` is composition, not a framework: a Header, a Body, and inside the
- * Body a generic Sidebar next to the Editor Area. It owns the shell's *layout
- * model* — the transient Sidebar visibility/width state and its bounds — while
- * the state itself lives in `App`, which also has to toggle it from the View
- * menu (FR-090, FR-092, FR-093).
+ * `AppShell` is composition, not a framework:
+ *
+ * ```text
+ * AppShell
+ * ├── TopBar
+ * ├── MainArea
+ * │   ├── Sidebar
+ * │   └── EditorWorkspace (EditorGroup -> TabStrip + EditorHost)
+ * └── FooterBar
+ * ```
+ *
+ * It owns the *layout* facts — Sidebar visibility, the user's preferred Sidebar
+ * width, and the measurement that turns that preference into a rendered width —
+ * while the persisted preference itself lives in `UiPreferencesStore` (FR-085) and
+ * document/Workspace/Explorer state stays with its own owners.
+ *
+ * The MainArea is measured with a `ResizeObserver`, so the Sidebar bound is
+ * recomputed when the window is resized *or* moved to a display with a different
+ * logical viewport (FR-084, T152). The measurement only ever clamps what is
+ * *rendered*; the preference keeps the user's number (T153, T161).
  */
 
-import type { ReactNode } from "react";
-import {
-  clampSidebarWidth,
-  SIDEBAR_MAX_WIDTH,
-  SIDEBAR_MIN_WIDTH,
-  Sidebar,
-} from "./Sidebar";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+
+import { renderSidebarWidth } from "./layoutMetrics";
+import { Sidebar } from "./Sidebar";
 
 import "../../styles/shell.css";
 
-export { SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, clampSidebarWidth };
-
-/** The transient shell layout state. Never persisted in 003. */
-export interface UiLayoutState {
-  /** Whether the Sidebar is shown. */
-  sidebarVisible: boolean;
-  /** Sidebar width in CSS pixels. */
-  sidebarWidth: number;
-}
-
-/** The layout a launch starts with. */
-export const DEFAULT_UI_LAYOUT: UiLayoutState = {
-  sidebarVisible: true,
-  sidebarWidth: 260,
-};
-
 export interface AppShellProps {
-  /** Sidebar content, or `null` when the Sidebar is hidden. */
+  /** The window-level region. */
+  topBar: ReactNode;
+  /** Explorer (or another tool view) content, or `null` when hidden. */
   sidebar: ReactNode;
-  /** The Editor Area: TabBar plus EditorHost or Empty State. */
-  editorArea: ReactNode;
-  /** Whether the Sidebar is currently shown (FR-092). */
+  /** The Editor Workspace. */
+  editor: ReactNode;
+  /** The application Footer. */
+  footer: ReactNode;
+  /** Whether the Sidebar region is shown (FR-085). */
   sidebarVisible: boolean;
-  /** Current Sidebar width. */
+  /** The user's preferred Sidebar width in CSS logical pixels. */
   sidebarWidth: number;
-  /** Reports a dragged Sidebar width. */
-  onSidebarWidthChange(width: number): void;
+  /**
+   * Reports a dragged Sidebar width.
+   *
+   * The value is the *request*, not the rendered width: the preference owner
+   * stores what the user asked for and rendering applies the layout clamp.
+   */
+  onSidebarWidthChange(requestedWidth: number): void;
 }
 
-/**
- * Renders the shell.
- *
- * Hiding the Sidebar keeps its content mounted nowhere and removes it from the
- * layout, while the Editor Area keeps whatever document/Explorer state the
- * application owns — nothing here holds document state of its own.
- */
+/** Renders the shell. */
 export function AppShell({
+  topBar,
   sidebar,
-  editorArea,
+  editor,
+  footer,
   sidebarVisible,
   sidebarWidth,
   onSidebarWidthChange,
 }: AppShellProps) {
+  const mainAreaRef = useRef<HTMLDivElement>(null);
+  const [mainAreaWidth, setMainAreaWidth] = useState(0);
+
+  useEffect(() => {
+    const element = mainAreaRef.current;
+    if (element === null) {
+      return;
+    }
+
+    const measure = (): void => {
+      setMainAreaWidth(element.clientWidth);
+    };
+    measure();
+
+    // `ResizeObserver` is the primary signal because it also fires when the
+    // WebView's logical viewport changes without a window resize event (a DPI or
+    // monitor change). The window listener is only a fallback for a runtime that
+    // does not provide it.
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", measure);
+      return () => {
+        window.removeEventListener("resize", measure);
+      };
+    }
+
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  /*
+   * Before the first measurement the layout bound is unknown. Rendering the
+   * preferred width then is the only answer that cannot be wrong, because a
+   * bound computed from "0 available pixels" would briefly force the minimum.
+   */
+  const renderedSidebarWidth =
+    mainAreaWidth === 0
+      ? sidebarWidth
+      : renderSidebarWidth(sidebarWidth, mainAreaWidth);
+
   return (
     <div className="app">
-      <header className="app__header">
-        <span className="app__wordmark">Sorakada</span>
-      </header>
+      {topBar}
 
-      <div className="app__body">
+      <div className="app__main-area" ref={mainAreaRef}>
         {sidebarVisible ? (
           <Sidebar
-            width={clampSidebarWidth(sidebarWidth)}
+            width={renderedSidebarWidth}
             onResize={onSidebarWidthChange}
             label="Explorer"
           >
@@ -78,8 +119,10 @@ export function AppShell({
           </Sidebar>
         ) : null}
 
-        <main className="editor-area">{editorArea}</main>
+        {editor}
       </div>
+
+      {footer}
     </div>
   );
 }

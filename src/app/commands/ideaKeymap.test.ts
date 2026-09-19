@@ -104,7 +104,7 @@ describe("IDEA M1 keymap profile", () => {
 });
 
 describe("CommandId catalogue", () => {
-  it("exposes the M1 document commands and the 003 Workspace commands", () => {
+  it("exposes the M1 document commands, the 003 Workspace commands and the 007 UI commands", () => {
     expect(COMMAND_IDS).toEqual([
       "file.new",
       "file.open",
@@ -121,8 +121,46 @@ describe("CommandId catalogue", () => {
       "explorer.rename",
       "explorer.delete",
       "explorer.refresh",
+      "explorer.locateCurrentFile",
+      "explorer.collapseAll",
       "view.toggleExplorer",
+      "view.resetSidebarWidth",
+      "view.densityCompact",
+      "view.densityDefault",
+      "view.densityComfortable",
+      "view.toggleVirtualRange",
+      "view.toggleTreeRowBounds",
+      "view.debugLargeTree",
+      "view.debugManyTabs",
+      "window.minimize",
+      "window.toggleMaximize",
+      "window.close",
     ]);
+  });
+
+  it("gives every 007 command a stable id but no accidental global shortcut (T031)", () => {
+    // 007 changes presentation only: the IDEA profile above is untouched, so a
+    // new visible control cannot silently steal a keystroke from the editor.
+    const commands007 = [
+      "explorer.locateCurrentFile",
+      "explorer.collapseAll",
+      "view.resetSidebarWidth",
+      "view.densityCompact",
+      "view.densityDefault",
+      "view.densityComfortable",
+      "view.toggleVirtualRange",
+      "view.toggleTreeRowBounds",
+      "view.debugLargeTree",
+      "view.debugManyTabs",
+      "window.minimize",
+      "window.toggleMaximize",
+      "window.close",
+    ] as const;
+
+    for (const id of commands007) {
+      expect(COMMAND_IDS).toContain(id);
+      expect(acceleratorFor(id)).toBeUndefined();
+    }
   });
 });
 
@@ -153,12 +191,16 @@ describe("Explorer keyboard scope (US8)", () => {
   });
 
   it("never binds a Workspace or Explorer command to a global accelerator", () => {
-    // Only the document/editor commands carry IDE accelerators in 003.
+    // Only the document/editor commands carry IDE accelerators. The 007 Explorer
+    // navigation commands are deliberately in the same group: Locate and Collapse
+    // All are Header/More actions, not IDEA keystrokes.
     expect(acceleratorFor("explorer.rename")).toBeUndefined();
     expect(acceleratorFor("explorer.delete")).toBeUndefined();
     expect(acceleratorFor("explorer.refresh")).toBeUndefined();
     expect(acceleratorFor("explorer.newFile")).toBeUndefined();
     expect(acceleratorFor("explorer.newFolder")).toBeUndefined();
+    expect(acceleratorFor("explorer.locateCurrentFile")).toBeUndefined();
+    expect(acceleratorFor("explorer.collapseAll")).toBeUndefined();
     expect(acceleratorFor("workspace.openFolder")).toBeUndefined();
     expect(acceleratorFor("workspace.closeFolder")).toBeUndefined();
     expect(acceleratorFor("view.toggleExplorer")).toBeUndefined();
