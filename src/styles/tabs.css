@@ -17,8 +17,8 @@
 }
 
 /*
- * Only the Tab area scrolls. The New button lives outside it, so the `+` stays
- * visible with zero Tabs and while the strip overflows (FR-018).
+ * Only the Tab strip scrolls, and the New control is its last item, so the `+`
+ * follows the last Tab and may scroll out of view with it (FR-018, FR-020).
  */
 .tab-bar__scroll {
   display: flex;
@@ -30,6 +30,11 @@
   scrollbar-width: thin;
 }
 
+/*
+ * The trailing New control inside the scroll strip: it keeps its 30px size and
+ * does not shrink, so it stays exactly one Tail item. It carries no separator
+ * border of its own — the final Tab already draws the strip's right edge.
+ */
 .tab-bar__new {
   display: flex;
   flex: 0 0 auto;
@@ -39,7 +44,6 @@
   height: 30px;
   padding: 0;
   border: none;
-  border-left: 1px solid var(--color-border);
   background: transparent;
   color: var(--color-text-muted);
   cursor: default;

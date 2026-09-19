@@ -5,18 +5,35 @@
  * reports the path the user acted on. It never reads the filesystem and never
  * decides which document becomes active.
  *
- * Three interaction rules are deliberate:
+ * The 004 interaction rules are deliberate:
  *
- * - single-clicking a **file** selects it without opening it (FR-035);
- * - single-clicking a **directory** selects it *and* toggles its expansion,
- *   while the chevron toggles expansion alone (FR-037, US3 acceptance 3);
+ * - single-clicking a **file** row selects it without opening it (FR-001), and
+ *   double-clicking it opens the file through the shared document pipeline
+ *   (FR-002);
+ * - single-clicking a **directory** row selects it *only*: it never changes the
+ *   expanded state and therefore never starts a lazy child read
+ *   (FR-003, SR-001);
+ * - double-clicking a **directory** row toggles its expansion exactly once for
+ *   that gesture (FR-004);
+ * - the directory **chevron** toggles expansion alone, never changes the
+ *   selection, and stops its own events — including double-click — from reaching
+ *   the row handlers (FR-005);
  * - clicking a row moves keyboard focus into the Explorer, which is what scopes
  *   the F2/Delete handler to the Explorer (FR-079).
+ *
+ * The component only maps gestures onto callbacks; which directory gets read and
+ * how its children are cached stays with the controller (FR-026).
  */
 
-import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
+import {
+  useRef,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 
 import { AppIcon, type AppIconName } from "../shell/AppIcon";
+import type { InlineCommitResult } from "./explorerActions";
 import type {
   ExplorerDirectoryNode,
   ExplorerNode,
@@ -43,9 +60,14 @@ export interface ExplorerTreeProps {
   onContextMenu(node: ExplorerNode | null, position: MenuPosition): void;
   /** Records an inline editor keystroke. */
   onInlineDraftChange(name: string): void;
-  /** Commits the inline editor (Enter). */
-  onInlineCommit(): void;
-  /** Cancels the inline editor (Escape). */
+  /**
+   * Commits the inline editor (Enter).
+   *
+   * The promise resolves with the action's outcome, so the input can tell a
+   * closed editor from a draft that is still its own to edit (FR-015, FR-016).
+   */
+  onInlineCommit(): Promise<InlineCommitResult>;
+  /** Cancels the inline editor (Escape, or an ordinary blur). */
   onInlineCancel(): void;
 }
 
@@ -115,15 +137,20 @@ function NodeRow({
         title={node.path}
         onClick={(event: MouseEvent<HTMLDivElement>) => {
           event.currentTarget.focus();
+          // Selection is the ordinary single-click outcome for every row kind.
+          // A directory is deliberately *not* toggled here, so selecting it
+          // cannot expand it or start a read (FR-001, FR-003, SR-001).
           props.onSelect(node.path);
-          // A directory toggles from the row as well as from its chevron.
-          if (node.kind === "directory") {
-            props.onToggleDirectory(node.path);
-          }
         }}
         onDoubleClick={() => {
           if (node.kind === "file") {
             props.onOpenFile(node.path);
+            return;
+          }
+          if (node.kind === "directory") {
+            // The row-level toggle, and the only one: the single clicks of this
+            // same gesture select without toggling (FR-004).
+            props.onToggleDirectory(node.path);
           }
         }}
         onContextMenu={(event) => {
@@ -141,6 +168,12 @@ function NodeRow({
               // The chevron toggles expansion only; selection is unchanged.
               event.stopPropagation();
               props.onToggleDirectory(node.path);
+            }}
+            onDoubleClick={(event: MouseEvent) => {
+              // The chevron's own clicks already performed the toggles; letting
+              // the double-click bubble would add a row-level toggle on top
+              // (FR-005).
+              event.stopPropagation();
             }}
           >
             <AppIcon name={node.expanded ? "chevron-down" : "chevron-right"} />
@@ -240,7 +273,16 @@ function DirectoryChildren({
   return <>{rows}</>;
 }
 
-/** The shared inline text editor used by both create and rename. */
+/**
+ * The shared inline text editor used by both create and rename.
+ *
+ * 004 adds one piece of local coordination: an Enter press marks a commit
+ * attempt as *in flight* before the asynchronous filesystem work starts, so a
+ * blur caused by that work — a native error dialog stealing focus, for example —
+ * cannot cancel an operation the user already confirmed. The flag is a DOM
+ * concern of this input, held in a ref rather than in application state
+ * (FR-013, FR-016).
+ */
 function InlineEditorInput({
   edit,
   label,
@@ -254,8 +296,12 @@ function InlineEditorInput({
   ExplorerTreeProps,
   "onInlineDraftChange" | "onInlineCommit" | "onInlineCancel"
 >) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const commitInFlight = useRef(false);
+
   return (
     <input
+      ref={inputRef}
       className="explorer-inline-input"
       // Exactly one inline editor exists at a time, so it always takes focus.
       autoFocus
@@ -277,11 +323,53 @@ function InlineEditorInput({
         event.stopPropagation();
         if (event.key === "Enter") {
           event.preventDefault();
-          onInlineCommit();
+          if (commitInFlight.current) {
+            // The attempt is already running: a repeated Enter must not start a
+            // second create/rename (FR-013).
+            return;
+          }
+
+          // Commit intent is established synchronously, before the action gets
+          // the chance to await anything, so a blur that arrives while the
+          // filesystem work is in flight is not a dismissal (FR-013).
+          commitInFlight.current = true;
+          void (async () => {
+            let result: InlineCommitResult = "retained";
+            try {
+              result = await onInlineCommit();
+            } catch {
+              // A rejected commit leaves the draft where it was; the flag still
+              // has to be cleared so this input stays dismissible.
+              result = "retained";
+            } finally {
+              commitInFlight.current = false;
+            }
+
+            if (result === "retained") {
+              // The draft survived, so editing resumes here. A WorkContext that
+              // replaced this input has already unmounted it, which makes the
+              // ref null and this a no-op (FR-016).
+              inputRef.current?.focus();
+            }
+          })();
         } else if (event.key === "Escape") {
           event.preventDefault();
+          if (commitInFlight.current) {
+            // An operation that already started cannot be retroactively
+            // cancelled by dismissing the input (FR-014).
+            return;
+          }
           onInlineCancel();
         }
+      }}
+      onBlur={() => {
+        if (commitInFlight.current) {
+          // The commit owns the editor now; this blur is not a dismissal.
+          return;
+        }
+        // An ordinary blur discards only the transient draft and touches no
+        // filesystem entry (FR-011, FR-012, SC-004).
+        onInlineCancel();
       }}
     />
   );

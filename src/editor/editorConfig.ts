@@ -32,19 +32,36 @@ const editorTheme = EditorView.theme(
       border: "none",
       paddingRight: "4px",
     },
+    // `drawSelection` paints the selection into its own layer, which sits *below*
+    // the line elements, so an opaque active-line background would paint over the
+    // selected characters. Mixing the token with transparency keeps the active
+    // line visible without hiding or replacing the selection underneath it
+    // (FR-024, SC-007).
     ".cm-activeLine": {
-      backgroundColor: "var(--color-line-active)",
+      backgroundColor:
+        "color-mix(in srgb, var(--color-line-active) 45%, transparent)",
     },
     ".cm-activeLineGutter": {
-      backgroundColor: "var(--color-line-active)",
+      backgroundColor:
+        "color-mix(in srgb, var(--color-line-active) 45%, transparent)",
       color: "var(--color-text)",
     },
 
-    // basicSetup installs `drawSelection()`, which paints its own selection layer.
-    ".cm-selectionBackground, &.cm-focused .cm-selectionBackground, .cm-content ::selection":
+    // basicSetup installs `drawSelection()`, which paints the selection into its
+    // own layer. The base theme colours that layer through a rule that names the
+    // focused layer path, `.cm-dark.cm-focused > .cm-scroller >
+    // .cm-selectionLayer .cm-selectionBackground`, which is more specific than a
+    // short application selector. The drawn focused selection would therefore
+    // keep CodeMirror's built-in dark colour and the application token would
+    // never apply. Naming the editor root, the focused state and the layer path
+    // keeps the application colour authoritative (FR-023, FR-025).
+    "&.cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground":
       {
         backgroundColor: "var(--color-selection)",
       },
+    "&.cm-editor .cm-selectionBackground, .cm-content ::selection": {
+      backgroundColor: "var(--color-selection)",
+    },
     ".cm-cursor, .cm-dropCursor": {
       borderLeftColor: "var(--color-caret)",
       borderLeftWidth: "2px",

@@ -5,14 +5,19 @@
  * pluggable menu framework (FR-081). Which items appear is decided entirely by
  * the shared `FileOperationContext`, so the menu cannot offer an action the
  * command registry would refuse (FR-078, FR-080).
+ *
+ * The creation group is the one deliberate exception. It asks the
+ * context-menu-specific predicate, because 004 hides New File/New Folder in a
+ * file's menu while the shared commands and their selected-file parent target
+ * stay exactly as 003 defined them (FR-006, FR-010).
  */
 
 import { useEffect, useRef } from "react";
 
 import { AppIcon, type AppIconName } from "../shell/AppIcon";
 import {
+  isContextMenuCreateAvailable,
   isContextMenuRefreshAvailable,
-  isCreateAvailable,
   isDeleteAvailable,
   isRenameAvailable,
   type FileOperationContext,
@@ -83,7 +88,10 @@ export function ExplorerContextMenu({
 
   const groups: MenuItem[][] = [];
 
-  if (isCreateAvailable(context)) {
+  // Creation is offered for the root and directory contexts only: a file's menu
+  // reads as file-local actions, even though the header still creates beside a
+  // selected file through the shared target rule (FR-006, FR-007, SR-002).
+  if (isContextMenuCreateAvailable(context)) {
     groups.push([
       { action: "explorer.newFile", label: "New File", icon: "new-file" },
       { action: "explorer.newFolder", label: "New Folder", icon: "new-folder" },
@@ -102,7 +110,7 @@ export function ExplorerContextMenu({
   }
 
   // Refresh belongs to the root and directory contexts; a file context offers
-  // creation, Rename and Delete only (plan decision 12).
+  // Rename and Delete only (plan decision 12, FR-006).
   if (isContextMenuRefreshAvailable(context)) {
     groups.push([
       { action: "explorer.refresh", label: "Refresh", icon: "refresh" },

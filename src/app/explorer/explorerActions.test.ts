@@ -31,6 +31,7 @@ import { displayNameForWorkspaceRoot } from "../workspace/workContext";
 import {
   ExplorerActions,
   deriveFileOperationContext,
+  isContextMenuCreateAvailable,
   isCreateAvailable,
   isDeleteAvailable,
   isRefreshAvailable,
@@ -595,6 +596,73 @@ describe("ExplorerActions context menus (FR-076, FR-077)", () => {
 });
 
 /* -------------------------------------------------------------------------- */
+/* Context-menu creation scope (FR-006..FR-010, SR-002)                        */
+/* -------------------------------------------------------------------------- */
+
+describe("isContextMenuCreateAvailable (US2)", () => {
+  it("offers nothing without a Workspace", () => {
+    const result = deriveFileOperationContext(null, null);
+
+    expect(isContextMenuCreateAvailable(result)).toBe(false);
+  });
+
+  it("offers creation for the Workspace root and for blank space", () => {
+    // No concrete selection is the blank-space / root context.
+    expect(
+      isContextMenuCreateAvailable(deriveFileOperationContext(context(), null)),
+    ).toBe(true);
+
+    // The root node itself is still the root context.
+    expect(
+      isContextMenuCreateAvailable(
+        deriveFileOperationContext(context(), directoryNode(ROOT)),
+      ),
+    ).toBe(true);
+  });
+
+  it("offers creation for a selected directory", () => {
+    const result = deriveFileOperationContext(context(), directoryNode(SRC));
+
+    expect(isContextMenuCreateAvailable(result)).toBe(true);
+    expect(result.createParentPath).toBe(SRC);
+  });
+
+  it("hides creation for a selected file but keeps the shared parent target", () => {
+    const result = deriveFileOperationContext(context(), fileNode(FILE_A));
+
+    // Only the file context-menu surface loses the two creation items...
+    expect(isContextMenuCreateAvailable(result)).toBe(false);
+    // ...while 003's target model is untouched: the selected file's parent stays
+    // the creation target for the Explorer header (FR-009, SR-002).
+    expect(result.createParentPath).toBe(parentPathOf(FILE_A));
+    expect(isCreateAvailable(result)).toBe(true);
+  });
+
+  it("separates the menu surface from the header surface", () => {
+    const harness = withTree(createHarness());
+
+    // Directory and root contexts keep creation in the menu.
+    expect(
+      isContextMenuCreateAvailable(
+        harness.actions.handleContextMenu(directoryNode(SRC)),
+      ),
+    ).toBe(true);
+    expect(
+      isContextMenuCreateAvailable(harness.actions.handleContextMenu(null)),
+    ).toBe(true);
+
+    // Right-clicking a file selects it and hides creation from its menu.
+    const fileContext = harness.actions.handleContextMenu(fileNode(FILE_A));
+    expect(harness.explorer.selectedPath).toBe(FILE_A);
+    expect(isContextMenuCreateAvailable(fileContext)).toBe(false);
+
+    // The header keeps both its availability rule and its parent target.
+    expect(harness.actions.isCreateAvailable()).toBe(true);
+    expect(harness.actions.contextFor().createParentPath).toBe(SRC);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
 /* Create (FR-054..FR-057)                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -758,6 +826,167 @@ describe("ExplorerActions create (US5)", () => {
 
     expect(harness.explorer.inlineEdit).toBeNull();
     expect(harness.explorer.calls).toEqual([]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* Inline commit results (FR-013..FR-016)                                      */
+/* -------------------------------------------------------------------------- */
+
+describe("ExplorerActions inline commit results (US3)", () => {
+  it("retains an empty create draft without a filesystem call", async () => {
+    const harness = withTree(createHarness());
+    harness.explorer.inlineEdit = {
+      type: "create-file",
+      parentPath: SRC,
+      draftName: "   ",
+    };
+
+    const result = await harness.actions.commitInlineEdit();
+
+    expect(result).toBe("retained");
+    expect(harness.files.calls).toEqual([]);
+    expect(harness.documents.calls).toEqual([]);
+    expect(harness.explorer.inlineEdit).not.toBeNull();
+  });
+
+  it("retains the draft when creation fails on disk", async () => {
+    const harness = withTree(createHarness());
+    harness.files.createError = {
+      code: "io_create",
+      message: "Already exists: C:\\work\\src\\taken.ts",
+    };
+    harness.explorer.inlineEdit = {
+      type: "create-file",
+      parentPath: SRC,
+      draftName: "taken.ts",
+    };
+
+    const result = await harness.actions.commitInlineEdit();
+
+    expect(result).toBe("retained");
+    // The failure path still reserves and releases the destination, so the
+    // result signal cannot have short-circuited the existing orchestration.
+    expect(harness.documents.calls).toEqual([
+      `reserve:${keyFor(`${SRC}\\taken.ts`)}:none`,
+      "release",
+    ]);
+    expect(harness.explorer.inlineEdit).not.toBeNull();
+    expect(harness.explorer.calls).not.toContain("cancelInlineEdit");
+  });
+
+  it("reports a successful create as committed", async () => {
+    const harness = withTree(createHarness());
+    harness.explorer.inlineEdit = {
+      type: "create-file",
+      parentPath: SRC,
+      draftName: "fresh.ts",
+    };
+
+    const result = await harness.actions.commitInlineEdit();
+
+    const createdPath = `${SRC}\\fresh.ts`;
+    expect(result).toBe("committed");
+    expect(harness.documents.calls).toEqual([
+      `reserve:${keyFor(createdPath)}:none`,
+      "release",
+      `open:${createdPath}`,
+    ]);
+    expect(harness.explorer.calls).toContain("cancelInlineEdit");
+    expect(harness.explorer.inlineEdit).toBeNull();
+  });
+
+  it("retains the draft when the rename fails on disk", async () => {
+    const harness = withTree(createHarness());
+    harness.files.renameError = {
+      code: "io_rename",
+      message: "Already exists: C:\\work\\src\\taken.ts",
+    };
+    harness.explorer.inlineEdit = {
+      type: "rename",
+      sourcePath: FILE_A,
+      originalName: "a.ts",
+      draftName: "taken.ts",
+    };
+
+    const result = await harness.actions.commitInlineEdit();
+
+    expect(result).toBe("retained");
+    expect(harness.documents.calls).toEqual([
+      `reserve:${keyFor(FILE_A)}:${keyFor(`${SRC}\\taken.ts`)}`,
+      "release",
+    ]);
+    expect(harness.explorer.inlineEdit).not.toBeNull();
+  });
+
+  it("reports a successful rename as committed", async () => {
+    const harness = withTree(createHarness());
+    harness.explorer.inlineEdit = {
+      type: "rename",
+      sourcePath: FILE_A,
+      originalName: "a.ts",
+      draftName: "renamed.ts",
+    };
+
+    const result = await harness.actions.commitInlineEdit();
+
+    const newPath = `${SRC}\\renamed.ts`;
+    expect(result).toBe("committed");
+    expect(harness.documents.calls).toEqual([
+      `reserve:${keyFor(FILE_A)}:${keyFor(newPath)}`,
+      `commitRename:${newPath}`,
+      "release",
+    ]);
+    expect(harness.explorer.calls).toContain(
+      `applyRenamed:${FILE_A}->${newPath}`,
+    );
+  });
+
+  it("reports an unchanged or empty rename as committed because the editor closes", async () => {
+    const harness = withTree(createHarness());
+    harness.explorer.inlineEdit = {
+      type: "rename",
+      sourcePath: FILE_A,
+      originalName: "a.ts",
+      draftName: "a.ts",
+    };
+
+    expect(await harness.actions.commitInlineEdit()).toBe("committed");
+    expect(harness.files.calls).toEqual([]);
+    expect(harness.explorer.inlineEdit).toBeNull();
+
+    harness.explorer.inlineEdit = {
+      type: "rename",
+      sourcePath: FILE_A,
+      originalName: "a.ts",
+      draftName: "  ",
+    };
+
+    expect(await harness.actions.commitInlineEdit()).toBe("committed");
+    expect(harness.files.calls).toEqual([]);
+    expect(harness.explorer.inlineEdit).toBeNull();
+  });
+
+  it("retains the draft when the destination is already reserved", async () => {
+    const harness = withTree(createHarness());
+    harness.documents.reserveResult = {
+      status: "failed",
+      error: {
+        code: "path_resolution",
+        message: "That destination is already being changed by another operation.",
+      },
+    };
+    harness.explorer.inlineEdit = {
+      type: "create-folder",
+      parentPath: SRC,
+      draftName: "nested",
+    };
+
+    const result = await harness.actions.commitInlineEdit();
+
+    expect(result).toBe("retained");
+    expect(harness.files.calls).toEqual([]);
+    expect(harness.explorer.inlineEdit).not.toBeNull();
   });
 });
 

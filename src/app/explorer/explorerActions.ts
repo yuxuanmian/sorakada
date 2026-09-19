@@ -66,6 +66,17 @@ interface ExplorerOrigin {
   generation: number;
 }
 
+/**
+ * How an inline commit ended, as the inline editor needs to know it.
+ *
+ * `committed` means the editor is no longer expected to stay editable — a
+ * successful create/rename, or the existing no-op rename that 003 closes without
+ * mutating anything. `retained` means no commit was completed and the current
+ * draft is still the active inline edit, so the caller may restore focus to it
+ * (FR-015, FR-016).
+ */
+export type InlineCommitResult = "committed" | "retained";
+
 /** The document-side surface the Explorer mutates through. */
 export interface ExplorerDocumentPort {
   openPath(path: string): Promise<OpenPathResult>;
@@ -201,6 +212,26 @@ export function deriveFileOperationContext(
 /** Whether Explorer creation can run for this context (FR-049, FR-053). */
 export function isCreateAvailable(context: FileOperationContext): boolean {
   return context.workContext !== null && context.createParentPath !== null;
+}
+
+/**
+ * Whether the Explorer *context menu* may offer New File/New Folder
+ * (FR-006, FR-007, SR-002).
+ *
+ * This is a surface rule, not a target rule. 003's `deriveFileOperationContext`
+ * stays the single source of truth for *where* creation happens, including the
+ * selected-file-parent case, so the Explorer header keeps offering creation
+ * beside the selected file (FR-008, FR-009). Only the file context menu — where
+ * New File/New Folder would read as operations on the file itself — omits them.
+ */
+export function isContextMenuCreateAvailable(
+  context: FileOperationContext,
+): boolean {
+  if (!isCreateAvailable(context)) {
+    return false;
+  }
+
+  return context.selectedEntry?.kind !== "file";
 }
 
 /** Whether Rename can run for this context: a selected non-root entry (FR-058). */
@@ -385,19 +416,30 @@ export class ExplorerActions {
   /* Inline commit                                                          */
   /* ---------------------------------------------------------------------- */
 
-  /** Commits the active inline create or rename editor. */
-  async commitInlineEdit(): Promise<void> {
+  /**
+   * Commits the active inline create or rename editor.
+   *
+   * The result tells the inline input whether its draft was closed or retained,
+   * which is the only new signal 004 adds: the disk-first orchestration below is
+   * the existing 003 flow, and every failure path still reports its error before
+   * answering `retained` (FR-015, FR-016).
+   */
+  async commitInlineEdit(): Promise<InlineCommitResult> {
     const edit = this.deps.explorer.getInlineEdit();
     if (edit === null) {
-      return;
+      // There is no draft left to keep editable, so nothing is retained.
+      return "committed";
     }
 
     if (edit.type === "rename") {
-      await this.commitRename(edit.sourcePath, edit.originalName, edit.draftName);
-      return;
+      return await this.commitRename(
+        edit.sourcePath,
+        edit.originalName,
+        edit.draftName,
+      );
     }
 
-    await this.commitCreate(
+    return await this.commitCreate(
       edit.type === "create-file" ? "file" : "directory",
       edit.parentPath,
       edit.draftName,
@@ -408,12 +450,12 @@ export class ExplorerActions {
     kind: CreateEntryKind,
     parentPath: string,
     draftName: string,
-  ): Promise<void> {
+  ): Promise<InlineCommitResult> {
     const name = draftName.trim();
     if (name === "") {
       // Nothing was named, so nothing may be created. The editor stays open so
       // the user can either type a name or cancel explicitly (FR-054).
-      return;
+      return "retained";
     }
 
     // Everything below is awaited, so the Workspace can be replaced before the
@@ -434,7 +476,7 @@ export class ExplorerActions {
       );
     } catch (error) {
       await this.reportError(error, "path_resolution");
-      return;
+      return "retained";
     }
 
     const reservation = await this.deps.documents.reservePathMutation({
@@ -442,7 +484,7 @@ export class ExplorerActions {
     });
     if (reservation.status === "failed") {
       await this.deps.dialogs.showError(reservation.error.message);
-      return;
+      return "retained";
     }
 
     let created;
@@ -456,7 +498,7 @@ export class ExplorerActions {
       // The failure is reported and the draft is kept: no Tree node may appear
       // for an entry that does not exist (FR-057).
       await this.reportError(error, "io_create");
-      return;
+      return "retained";
     } finally {
       // The claim is given back as soon as the create attempt is over, on both
       // outcomes. It is not held through the Open below, because that Open
@@ -488,6 +530,10 @@ export class ExplorerActions {
       // pipeline; a new folder is selected only (FR-056).
       await this.deps.documents.openPath(created.path);
     }
+
+    // The entry exists on disk and the inline editor was closed by the existing
+    // success reconciliation above, so nothing is left to retain.
+    return "committed";
   }
 
   /* ---------------------------------------------------------------------- */
@@ -516,13 +562,14 @@ export class ExplorerActions {
     sourcePath: string,
     originalName: string,
     draftName: string,
-  ): Promise<void> {
+  ): Promise<InlineCommitResult> {
     const newName = draftName.trim();
     if (newName === "" || newName === originalName) {
       // An unchanged name is not a rename; cancelling keeps the filesystem and
-      // the document paths untouched.
+      // the document paths untouched. The editor closes, so the caller has
+      // nothing left to retain (FR-015).
       this.deps.explorer.cancelInlineEdit();
-      return;
+      return "committed";
     }
 
     // The Workspace can be replaced while any of the awaits below is in flight,
@@ -545,7 +592,7 @@ export class ExplorerActions {
       );
     } catch (error) {
       await this.reportError(error, "path_resolution");
-      return;
+      return "retained";
     }
 
     const reservation = await this.deps.documents.reservePathMutation({
@@ -554,7 +601,7 @@ export class ExplorerActions {
     });
     if (reservation.status === "failed") {
       await this.deps.dialogs.showError(reservation.error.message);
-      return;
+      return "retained";
     }
 
     // Identified before the disk operation and under the reservation, so the
@@ -570,7 +617,7 @@ export class ExplorerActions {
       // documents that the disk rename just moved (FR-062, FR-103).
       await this.deps.dialogs.showError(identified.error.message);
       reservation.reservation.release();
-      return;
+      return "retained";
     }
     const affectedIds = identified.sessions.map((session) => session.id);
 
@@ -609,9 +656,13 @@ export class ExplorerActions {
       // FR-064: the disk rename failed, so neither document paths nor Tree
       // state may change — and the draft stays for correction.
       await this.reportError(error, "io_rename");
+      return "retained";
     } finally {
       reservation.reservation.release();
     }
+
+    // The draft was adopted by the disk rename and the editor closed with it.
+    return "committed";
   }
 
   /* ---------------------------------------------------------------------- */

@@ -28,22 +28,37 @@ export interface TabBarProps {
  * document id the user acted on. It never reads document text, and it never
  * decides which document becomes active.
  *
- * The strip is split into a scrolling Tab area and a fixed New button, so the
- * `+` stays reachable when the Tabs overflow and is present with zero Tabs
- * (FR-018).
+ * The New control is the trailing item *inside* the scrolling Tab strip, so it
+ * follows the last Tab in Tab order and may scroll out of view with the Tabs
+ * (FR-018, FR-020, SR-003).
  */
 export function TabBar({ tabs, onSelect, onClose, onNew }: TabBarProps) {
   const activeTabRef = useRef<HTMLDivElement>(null);
+  const newButtonRef = useRef<HTMLButtonElement>(null);
   const activeId = tabs.find((tab) => tab.active)?.id;
+  const activeIndex = tabs.findIndex((tab) => tab.active);
+  const activeIsFinal = activeIndex >= 0 && activeIndex === tabs.length - 1;
 
   // When the strip overflows, the active Tab has to be brought back into view.
-  // Only the scrolling area moves; the New button is outside it.
+  // Activating the *final* Tab additionally has to reveal the trailing `+`, so
+  // the New control stays reachable without the `+` ever moving beside an older
+  // active Tab (FR-021).
   useEffect(() => {
+    if (activeIsFinal) {
+      // The `+` ends the strip, so aligning its end edge reveals the final Tab
+      // and the `+` together.
+      newButtonRef.current?.scrollIntoView({
+        block: "nearest",
+        inline: "end",
+      });
+      return;
+    }
+
     activeTabRef.current?.scrollIntoView({
       block: "nearest",
       inline: "nearest",
     });
-  }, [activeId]);
+  }, [activeId, activeIsFinal]);
 
   return (
     <div className="tab-bar">
@@ -83,17 +98,18 @@ export function TabBar({ tabs, onSelect, onClose, onNew }: TabBarProps) {
             </button>
           </div>
         ))}
-      </div>
 
-      <button
-        type="button"
-        className="tab-bar__new"
-        aria-label="New document"
-        title="New (Ctrl+N)"
-        onClick={onNew}
-      >
-        <AppIcon name="plus" />
-      </button>
+        <button
+          ref={newButtonRef}
+          type="button"
+          className="tab-bar__new"
+          aria-label="New document"
+          title="New (Ctrl+N)"
+          onClick={onNew}
+        >
+          <AppIcon name="plus" />
+        </button>
+      </div>
     </div>
   );
 }

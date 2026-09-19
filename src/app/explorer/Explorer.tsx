@@ -178,7 +178,9 @@ export function Explorer({
             controller.updateInlineDraft(name);
           }}
           onInlineCommit={() => {
-            void actions.commitInlineEdit();
+            // The commit result travels back to the inline input: that is what
+            // lets a retained draft become editable and focused again (FR-016).
+            return actions.commitInlineEdit();
           }}
           onInlineCancel={() => {
             controller.cancelInlineEdit();
