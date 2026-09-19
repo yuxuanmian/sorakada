@@ -27,6 +27,10 @@ serde = { version = "1", features = ["derive"] }
 # crate's optional `TrashItem` timestamps, so the default feature is dropped and
 # the Windows COM apartment is pinned explicitly.
 trash = { version = "5", default-features = false, features = ["coinit_apartmentthreaded"] }
+# Event-driven native filesystem watching for opened documents (005) and the
+# future recursive Workspace watch (006). `notify` must stay the only watcher
+# stack: no polling loop and no second watcher framework may be added beside it.
+notify = "8.2.0"
 
 # The final disk rename must not replace a destination that appeared after
 # validation. `std::fs::rename` always replaces on Windows, so the no-replace

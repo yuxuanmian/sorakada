@@ -13,7 +13,9 @@ import type {
 } from "../../services/workspaceFileService";
 import type { WorkspaceDialogService } from "../../services/workspaceDialogs";
 import type { ResolveWorkspaceRelationResult } from "../../services/workspaceFileService";
+import { DiskValidator } from "../document/diskValidation";
 import { DocumentManager } from "../document/documentManager";
+import { InternalFsOperationGuard } from "../document/internalFsOperationGuard";
 import { NEW_DOCUMENT_FORMAT } from "../document/documentSession";
 import { WorkContextManager } from "./workContextManager";
 import {
@@ -328,7 +330,15 @@ function createDocumentHarness() {
     },
   } as unknown as FileDialogService;
 
-  const manager = new DocumentManager({ editor, fileService, dialogs });
+  const manager = new DocumentManager({
+    editor,
+    fileService,
+    dialogs,
+    // These tests exercise Workspace identity and 003 path migration, so the 005
+    // collaborators are wired to the same fake filesystem and stay out of the way.
+    diskValidator: new DiskValidator({ fileService }),
+    internalFsOperations: new InternalFsOperationGuard(),
+  });
 
   return {
     manager,

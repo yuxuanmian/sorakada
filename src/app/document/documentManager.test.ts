@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { EditorState, Text, type Extension } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
+import { undoDepth } from "@codemirror/commands";
 
 import type { EditorHandle, StateUpdateListener } from "../../editor/editorHandle";
 import type {
+  DocumentPathInspection,
   FileCommandError,
   FileService,
   OpenTextFileResult,
@@ -11,16 +13,23 @@ import type {
   WriteTextFileRequest,
 } from "../../services/fileService";
 import type {
+  ExternalConflictChoice,
   FileDialogService,
   UnsavedChoice,
 } from "../../services/fileDialogs";
+import { DiskValidator } from "./diskValidation";
+import type { DiskValidationResult, DiskValidationTrigger } from "./diskValidation";
 import { DocumentManager } from "./documentManager";
+import type { WatchInterestChange } from "./documentManager";
+import { InternalFsOperationGuard } from "./internalFsOperationGuard";
+import type { CapturedWatchHint } from "./internalFsOperationGuard";
 import {
   NEW_DOCUMENT_FORMAT,
   type DocumentId,
   type DocumentManagerSnapshot,
   type DocumentSession,
   type DocumentViewState,
+  type TabSnapshot,
   type TextFormat,
 } from "./documentSession";
 
@@ -48,6 +57,8 @@ class FakeEditor implements EditorHandle {
 
   readonly setStateCalls: Array<{ documentId: DocumentId; state: EditorState }> = [];
   readonly restoredViewStates: DocumentViewState[] = [];
+  /** States installed by an external disk reload (005). */
+  readonly reloadedStates: EditorState[] = [];
   focusCount = 0;
   undoCount = 0;
   redoCount = 0;
@@ -82,6 +93,20 @@ class FakeEditor implements EditorHandle {
     this.listener?.(documentId, state, false);
   }
 
+  /**
+   * Models the reload path (005).
+   *
+   * The real bridge installs a whole new `EditorState` and scrolls the clamped
+   * primary head into view; a state swap reports no document change, which is why
+   * a reload can never be mistaken for a user edit.
+   */
+  reloadDocumentState(documentId: DocumentId, state: EditorState): void {
+    this.boundDocumentId = documentId;
+    this.state = state;
+    this.reloadedStates.push(state);
+    this.listener?.(documentId, state, false);
+  }
+
   captureViewState(): DocumentViewState {
     return { ...this.scroll };
   }
@@ -110,9 +135,14 @@ class FakeEditor implements EditorHandle {
     this.listener = listener;
   }
 
-  /** Models a user edit in the bound document, which CodeMirror reports as `docChanged`. */
-  type(text: string): void {
-    this.deliver(EditorState.create({ doc: toText(text) }), true);
+  /** Models a user edit in the bound document, which CodeMirror reports as `docChanged`. */  type(text: string): void {
+    // A real edit is a transaction against the live state, which is what keeps
+    // history (and therefore a meaningful undo depth) around.
+    const current = this.requireBoundState();
+    const next = current.update({
+      changes: { from: 0, to: current.doc.length, insert: text },
+    }).state;
+    this.deliver(next, true);
   }
 
   /** Models Undo/Redo, which also change the document. */
@@ -165,12 +195,20 @@ class FakeFileService implements FileService {
   readonly reads: string[] = [];
   readonly writes: WriteTextFileRequest[] = [];
   readonly inspections: Array<{ path: string; allowMissing: boolean }> = [];
+  /** Paths the 005 validation inspection was asked about. */
+  readonly validationInspections: string[] = [];
 
   /** Registered existing files and directories, keyed by comparison key. */
   private readonly files = new Map<string, OpenTextFileResult | FileCommandError>();
   private readonly directories = new Set<string>();
   /** Alternative spellings that must resolve to another path's identity. */
   private readonly aliases = new Map<string, string>();
+  /** Forced 005 validation outcomes, keyed by comparison key. */
+  private readonly pathStates = new Map<string, DocumentPathInspection>();
+  /** Per-inspection outcomes consumed in order, keyed by comparison key. */
+  private readonly pathStateQueue = new Map<string, DocumentPathInspection[]>();
+  /** Reported modification times, so a metadata-only touch is expressible. */
+  private readonly modifiedTimes = new Map<string, number>();
 
   /**
    * Makes the *post-write* re-inspection of a path report another object's
@@ -185,6 +223,30 @@ class FakeFileService implements FileService {
   /** 1-based write indices that must fail, to place a save failure precisely. */
   readonly failWriteIndexes = new Set<number>();
   writeCallCount = 0;
+  /** Invoked for every accepted write, so a test can inject watcher hints. */
+  onWrite: ((request: WriteTextFileRequest) => void) | null = null;
+
+  /**
+   * Invoked at the create-if-absent boundary.
+   *
+   * Returning an error models another program creating the target in the window
+   * between Sorakada's final absence check and its write, which is exactly the
+   * race the atomic create path exists to close (T059).
+   */
+  onCreateConflict: ((request: WriteTextFileRequest) => FileCommandError | null) | null =
+    null;
+
+  /**
+   * Invoked at the head of every content read.
+   *
+   * It models an outside write landing between an inspection that already
+   * happened and the read that follows it, which is the window the post-write
+   * proof has to survive (T060).
+   */
+  onRead: ((path: string) => void) | null = null;
+
+  /** Every create-if-absent attempt, so a test can tell the two writers apart. */
+  readonly creates: WriteTextFileRequest[] = [];
 
   readError: FileCommandError | null = null;
   inspectError: FileCommandError | null = null;
@@ -221,6 +283,61 @@ class FakeFileService implements FileService {
   /** Removes a registered file, modelling a rename/delete that moved it away. */
   removeFile(path: string): void {
     this.files.delete(this.keyFor(path));
+  }
+
+  /** The text currently registered for a path, or `undefined` when it is absent. */
+  textFor(path: string): string | undefined {
+    const entry = this.files.get(this.keyFor(path));
+    return entry !== undefined && !("code" in entry) ? entry.text : undefined;
+  }
+
+  /** Rewrites a registered file, modelling an external modification. */
+  updateFile(
+    path: string,
+    text: string,
+    format: TextFormat = DEFAULT_FORMAT,
+  ): void {
+    this.files.set(this.keyFor(path), {
+      text,
+      format: { ...format },
+    });
+  }
+
+  /** Forces the 005 validation outcome of one path. */
+  setPathState(
+    path: string,
+    inspection: Omit<DocumentPathInspection, "requestedPath">,
+  ): void {
+    this.pathStates.set(this.keyFor(path), {
+      ...inspection,
+      requestedPath: path,
+    });
+  }
+
+  /**
+   * Queues one forced outcome per upcoming validation inspection of `path`.
+   *
+   * This is how a test models the disk changing *between* two inspections — a
+   * target that reappears while a missing file is being recreated, for instance —
+   * without depending on real timing.
+   */
+  queuePathState(
+    path: string,
+    inspection: Omit<DocumentPathInspection, "requestedPath">,
+  ): void {
+    const key = this.keyFor(path);
+    const queue = this.pathStateQueue.get(key) ?? [];
+    queue.push({ ...inspection, requestedPath: path });
+    this.pathStateQueue.set(key, queue);
+  }
+
+  /**
+   * Bumps a registered file's reported modification time without changing its
+   * bytes: a metadata-only touch, which must never be a content conflict.
+   */
+  touchFile(path: string): void {
+    const key = this.keyFor(path);
+    this.modifiedTimes.set(key, (this.modifiedTimes.get(key) ?? 0) + 1);
   }
 
   /** Makes `alias` resolve to `canonical`'s identity, as a link or `..` would. */
@@ -266,8 +383,95 @@ class FakeFileService implements FileService {
     return Promise.resolve(this.identityFor(path, key, "missing"));
   }
 
+  /**
+   * The 005 validation inspection.
+   *
+   * It never rejects, and it separates `missing` from `unreadable`, which is what
+   * FR-015 depends on. A path is a directory when it is registered as one *or*
+   * when it is an ancestor of a registered path, because an existing file's parent
+   * must not look missing in the harness.
+   */
+  inspectDocumentPath(path: string): Promise<DocumentPathInspection> {
+    this.validationInspections.push(path);
+    const key = this.keyFor(path);
+
+    const queued = this.pathStateQueue.get(key);
+    if (queued !== undefined && queued.length > 0) {
+      return Promise.resolve({ ...queued.shift()!, requestedPath: path });
+    }
+
+    const forced = this.pathStates.get(key);
+    if (forced !== undefined) {
+      return Promise.resolve({ ...forced, requestedPath: path });
+    }
+
+    if (this.isKnownDirectory(key)) {
+      return Promise.resolve({
+        requestedPath: path,
+        canonicalPath: path,
+        comparisonKey: key,
+        state: "directory",
+        diskRevision: { size: 0, modifiedTimeMillis: 0 },
+        message: null,
+      });
+    }
+
+    const entry = this.files.get(key);
+    if (entry !== undefined) {
+      if ("code" in entry) {
+        // A registered-but-unreadable file: the object exists, so this must never
+        // be reported as missing.
+        return Promise.resolve({
+          requestedPath: path,
+          canonicalPath: null,
+          comparisonKey: key,
+          state: "unreadable",
+          diskRevision: null,
+          message: entry.message,
+        });
+      }
+
+      return Promise.resolve({
+        requestedPath: path,
+        canonicalPath: path,
+        // The post-write proof reads the destination's identity through this
+        // inspection, so a modelled "this destination belongs to another session"
+        // remap has to apply here as well (see `adoptAsKey`).
+        comparisonKey: this.adoptAsKey.get(key) ?? key,
+        state: "file",
+        diskRevision: {
+          size: entry.text.length,
+          modifiedTimeMillis: this.modifiedTimes.get(key) ?? 0,
+        },
+        message: null,
+      });
+    }
+
+    return Promise.resolve({
+      requestedPath: path,
+      canonicalPath: null,
+      comparisonKey: null,
+      state: "missing",
+      diskRevision: null,
+      message: null,
+    });
+  }
+
+  private isKnownDirectory(key: string): boolean {
+    if (this.directories.has(key)) {
+      return true;
+    }
+    for (const registered of [...this.files.keys(), ...this.directories.keys()]) {
+      if (registered.startsWith(`${key}/`)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   readTextFile(path: string): Promise<OpenTextFileResult> {
     this.reads.push(path);
+    this.onRead?.(path);
 
     if (this.readError) {
       return Promise.reject(this.readError);
@@ -298,6 +502,30 @@ class FakeFileService implements FileService {
     });
   }
 
+  /**
+   * The atomic recreate write (T059).
+   *
+   * It refuses a target that already exists, which is what makes a recreate
+   * race-free: the disk state at this boundary decides, and the caller routes an
+   * `already_exists` failure into the reappearance rules instead of overwriting.
+   */
+  createTextFileIfAbsent(request: WriteTextFileRequest): Promise<void> {
+    this.creates.push(request);
+    const conflict = this.onCreateConflict?.(request) ?? null;
+    if (conflict !== null) {
+      return Promise.reject(conflict);
+    }
+
+    const key = this.keyFor(request.path);
+    if (this.files.has(key) || this.directories.has(key)) {
+      return Promise.reject({
+        code: "already_exists",
+        message: `${request.path} already exists.`,
+      } satisfies FileCommandError);
+    }
+
+    return this.writeTextFile(request);
+  }
   writeTextFile(request: WriteTextFileRequest): Promise<void> {
     this.writes.push(request);
     this.writeCallCount += 1;
@@ -313,10 +541,28 @@ class FakeFileService implements FileService {
     if (this.writeError) {
       return Promise.reject(this.writeError);
     }
+
+    // A successful write is what makes the destination hold the written text, so a
+    // later inspection must see it — otherwise the post-write revision
+    // confirmation (SC-006) and every following validation would describe a file
+    // that does not exist in this fake.
+    this.files.set(this.keyFor(request.path), {
+      text: request.text,
+      format: {
+        encoding: "utf8",
+        bom: request.bom,
+        detectedLineEnding:
+          request.lineEnding === "crlf" ? "crlf" : "lf",
+        preferredLineEnding: request.lineEnding,
+      },
+    });
+
     if (!this.holdWrites) {
+      this.onWrite?.(request);
       return Promise.resolve();
     }
 
+    this.onWrite?.(request);
     return new Promise<void>((resolve, reject) => {
       this.pending.push({ request, resolve, reject });
     });
@@ -385,12 +631,26 @@ class FakeFileService implements FileService {
     comparisonKey: string,
     kind: ResolvedPathIdentity["kind"],
   ): ResolvedPathIdentity {
+    const entry = this.files.get(comparisonKey);
+    const size =
+      kind === "file" && entry !== undefined && !("code" in entry)
+        ? entry.text.length
+        : 0;
+
     return {
       requestedPath: path,
       canonicalPath: path,
       comparisonKey,
       kind,
-      diskRevision: kind === "missing" ? null : { size: 0, modifiedTimeMillis: 0 },
+      // The revision mirrors the fake's own contents, so "unchanged" really means
+      // unchanged and a rewrite (or a touch) shows up as a changed revision (005).
+      diskRevision:
+        kind === "missing"
+          ? null
+          : {
+              size,
+              modifiedTimeMillis: this.modifiedTimes.get(comparisonKey) ?? 0,
+            },
     };
   }
 }
@@ -399,6 +659,10 @@ class FakeDialogs implements FileDialogService {
   openPath: string | null = null;
   savePath: string | null = null;
   unsavedChoice: UnsavedChoice = "cancel";
+  /** 005: the answer to the explicit overwrite decision. */
+  externalConflictChoice: ExternalConflictChoice = "cancel";
+  /** 005: the answer to the discard-before-reload confirmation. */
+  discardConfirmed = false;
 
   /** Per-prompt answers consumed in order; once empty `unsavedChoice` applies. */
   choices: UnsavedChoice[] = [];
@@ -408,6 +672,10 @@ class FakeDialogs implements FileDialogService {
   readonly errors: string[] = [];
   unsavedPromptCount = 0;
   readonly unsavedPrompts: string[] = [];
+  /** 005: documents the overwrite decision was requested for. */
+  readonly overwritePrompts: string[] = [];
+  /** 005: documents the discard-before-reload decision was requested for. */
+  readonly discardPrompts: string[] = [];
 
   pickOpenPath(): Promise<string | null> {
     return Promise.resolve(this.openPath);
@@ -431,6 +699,18 @@ class FakeDialogs implements FileDialogService {
       this.choices.length > 0 ? this.choices.shift()! : this.unsavedChoice,
     );
   }
+
+  confirmExternalOverwrite(
+    displayName: string,
+  ): Promise<ExternalConflictChoice> {
+    this.overwritePrompts.push(displayName);
+    return Promise.resolve(this.externalConflictChoice);
+  }
+
+  confirmDiscardForReload(displayName: string): Promise<boolean> {
+    this.discardPrompts.push(displayName);
+    return Promise.resolve(this.discardConfirmed);
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -442,6 +722,10 @@ interface Harness {
   editor: FakeEditor;
   files: FakeFileService;
   dialogs: FakeDialogs;
+  /** 005 validator wired to the same fake filesystem. */
+  validator: DiskValidator;
+  /** 005 shared internal-operation guard. */
+  guard: InternalFsOperationGuard;
   snapshots: DocumentManagerSnapshot[];
   emissions(): number;
 }
@@ -480,10 +764,14 @@ function createHarnessWithDocument(openInitialDocument: boolean): Harness {
   const editor = new FakeEditor();
   const files = new FakeFileService();
   const dialogs = new FakeDialogs();
+  const validator = new DiskValidator({ fileService: files });
+  const guard = new InternalFsOperationGuard();
   const manager = new DocumentManager({
     editor,
     fileService: files,
     dialogs,
+    diskValidator: validator,
+    internalFsOperations: guard,
   });
 
   const snapshots: DocumentManagerSnapshot[] = [];
@@ -514,6 +802,8 @@ function createHarnessWithDocument(openInitialDocument: boolean): Harness {
     editor,
     files,
     dialogs,
+    validator,
+    guard,
     snapshots,
     emissions: () => snapshots.length,
   };
@@ -1084,10 +1374,13 @@ describe("DocumentManager snapshot projection (US1)", () => {
       "tabs",
     ]);
     for (const tab of snapshot.tabs) {
+      // 005 adds exactly one field: the external disk state FR-041 requires the
+      // Tab strip to show. Nothing about the document itself may leak here.
       expect(Object.keys(tab).sort()).toEqual([
         "active",
         "dirty",
         "displayName",
+        "externalState",
         "id",
         "path",
       ]);
@@ -2398,6 +2691,7 @@ describe("DocumentManager path-mutation reservation (003)", () => {
     await openSmallA(harness);
 
     const result = await harness.manager.reservePathMutation({
+      kind: "rename",
       sourceKey: harness.files.comparisonKeyFor("C:\\work\\other.txt"),
       destinationKey: harness.files.comparisonKeyFor(SMALL_A),
     });
@@ -2414,12 +2708,14 @@ describe("DocumentManager path-mutation reservation (003)", () => {
     const destination = "C:\\work\\taken.txt";
 
     const first = await harness.manager.reservePathMutation({
+      kind: "rename",
       sourceKey: harness.files.comparisonKeyFor("C:\\work\\one.txt"),
       destinationKey: harness.files.comparisonKeyFor(destination),
     });
     expect(first.status).toBe("reserved");
 
     const second = await harness.manager.reservePathMutation({
+      kind: "rename",
       sourceKey: harness.files.comparisonKeyFor("C:\\work\\two.txt"),
       destinationKey: harness.files.comparisonKeyFor(destination),
     });
@@ -2431,6 +2727,7 @@ describe("DocumentManager path-mutation reservation (003)", () => {
 
     // Once released, the destination is available again.
     const third = await harness.manager.reservePathMutation({
+      kind: "rename",
       sourceKey: harness.files.comparisonKeyFor("C:\\work\\two.txt"),
       destinationKey: harness.files.comparisonKeyFor(destination),
     });
@@ -2453,6 +2750,7 @@ describe("DocumentManager path-mutation reservation (003)", () => {
     let reserved = false;
     const reserving = harness.manager
       .reservePathMutation({
+        kind: "delete",
         sourceKey: harness.files.comparisonKeyFor(SMALL_A),
       })
       .then((result) => {
@@ -2488,6 +2786,7 @@ describe("DocumentManager path-mutation reservation (003)", () => {
     let settled = false;
     const reserving = harness.manager
       .reservePathMutation({
+        kind: "delete",
         sourceKey: harness.files.comparisonKeyFor(directory),
       })
       .then((result) => {
@@ -2514,6 +2813,7 @@ describe("DocumentManager path-mutation reservation (003)", () => {
 
     const sourceIdentity = await identityOf(harness, directory);
     const reservation = await harness.manager.reservePathMutation({
+      kind: "rename",
       sourceKey: sourceIdentity.comparisonKey,
     });
     expect(reservation.status).toBe("reserved");
@@ -2552,6 +2852,7 @@ describe("DocumentManager path-mutation reservation (003)", () => {
     harness.editor.type("edited");
 
     const reservation = await harness.manager.reservePathMutation({
+      kind: "rename",
       sourceKey: harness.files.comparisonKeyFor(SMALL_A),
     });
     expect(reservation.status).toBe("reserved");
@@ -2769,3 +3070,1654 @@ describe("DocumentManager deleted-session APIs (003)", () => {
   });
 });
 
+
+/* -------------------------------------------------------------------------- */
+/* 005 — external change (US1: clean reload)                                  */
+/* -------------------------------------------------------------------------- */
+
+const EDITOR_FORMAT: TextFormat = {
+  encoding: "utf8",
+  bom: "utf8",
+  detectedLineEnding: "crlf",
+  preferredLineEnding: "crlf",
+};
+
+/**
+ * Drives one validation the way the opened-document coordinator does.
+ *
+ * These are document-domain tests: they exercise the manager's transition API with
+ * a real `DiskValidator` result instead of going through the watcher adapter. The
+ * coordinator's own event plumbing (coalescing, subscriptions, races) is covered in
+ * `openedDocumentWatchCoordinator.test.ts`.
+ */
+async function validateHarnessDocument(
+  harness: Harness,
+  id: DocumentId,
+  trigger: DiskValidationTrigger = "watcher-hint",
+): Promise<DiskValidationResult> {
+  const binding = harness.manager.getBinding(id);
+  if (binding === null) {
+    throw new Error("Expected a bound document.");
+  }
+  const session = harness.manager.getSession(id);
+  if (session === undefined) {
+    throw new Error("Expected an open document.");
+  }
+
+  const result = await harness.validator.validate({
+    binding,
+    trigger,
+    isCurrent: () => harness.manager.isBindingCurrent(binding),
+  });
+
+  switch (result.outcome) {
+    case "stale":
+      return result;
+    case "missing":
+      harness.manager.markExternalState(binding, "missing");
+      return result;
+    case "unverifiable":
+      await harness.manager.markValidationError(binding, result.error);
+      return result;
+    case "unchanged":
+      harness.manager.adoptVerifiedIdentity(binding, result.identity);
+      return result;
+    case "changed":
+      if (result.content === null) {
+        harness.manager.markExternalState(binding, "modified");
+        return result;
+      }
+      harness.manager.applyValidatedDiskSnapshot(binding, {
+        identity: result.identity,
+        content: result.content,
+      });
+      return result;
+  }
+}
+
+/** The single tab snapshot the harness's documents produce. */
+function tabFor(harness: Harness, id: DocumentId): TabSnapshot {
+  const tab = harness.manager.getSnapshot().tabs.find((entry) => entry.id === id);
+  if (tab === undefined) {
+    throw new Error(`Expected a tab for ${id}.`);
+  }
+  return tab;
+}
+
+describe("DocumentManager external change — clean reload (US1, T016)", () => {
+  it("reloads a clean document in place and keeps it clean (FR-016, FR-017, SC-001)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    const before = harness.manager.getSession(id)!;
+    const stateBefore = before.editorState;
+
+    harness.files.updateFile(SMALL_A, "alpha changed externally");
+    const result = await validateHarnessDocument(harness, id);
+
+    expect(result.outcome).toBe("changed");
+    const after = harness.manager.getSession(id)!;
+    expect(after.id).toBe(id);
+    expect(after.editorState).not.toBe(stateBefore);
+    expect(after.editorState.doc.toString()).toBe("alpha changed externally");
+    expect(after.savedBaseline.toString()).toBe("alpha changed externally");
+    expect(after.dirty).toBe(false);
+    expect(after.externalState).toBe("normal");
+    // The adopted revision is what makes the *next* validation cheap and correct.
+    expect(after.pathIdentity?.diskRevision?.size).toBe(
+      "alpha changed externally".length,
+    );
+    // The active document is pushed into the shared view exactly once.
+    expect(harness.editor.reloadedStates).toHaveLength(1);
+    expect(harness.dialogs.errors).toHaveLength(0);
+    expect(harness.dialogs.unsavedPromptCount).toBe(0);
+  });
+
+  it("clears undo history by replacing the state (FR-018)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("alpha edited");
+    await harness.manager.saveDocument(id);
+    expect(undoDepth(harness.manager.getSession(id)!.editorState)).toBeGreaterThan(0);
+
+    harness.files.updateFile(SMALL_A, "replaced on disk");
+    await validateHarnessDocument(harness, id);
+
+    expect(harness.manager.getSession(id)!.editorState.doc.toString()).toBe(
+      "replaced on disk",
+    );
+    expect(undoDepth(harness.manager.getSession(id)!.editorState)).toBe(0);
+  });
+
+  it("reloads a background document without activating its tab (US1 scenario 4)", async () => {
+    const harness = createHarness();
+    const first = await openSmallA(harness);
+    harness.files.addFile(SMALL_B, "bravo");
+    const second = await harness.manager.openPath(SMALL_B);
+    if (second.status !== "opened") {
+      throw new Error("Expected b.txt to open.");
+    }
+    const reloadsBefore = harness.editor.reloadedStates.length;
+
+    harness.files.updateFile(SMALL_A, "alpha changed externally");
+    await validateHarnessDocument(harness, first);
+
+    expect(harness.manager.getActiveDocumentId()).toBe(second.documentId);
+    expect(harness.manager.getSession(first)!.editorState.doc.toString()).toBe(
+      "alpha changed externally",
+    );
+    // A background document is reloaded in place; the shared view is untouched.
+    expect(harness.editor.reloadedStates).toHaveLength(reloadsBefore);
+    expect(undoDepth(harness.manager.getSession(first)!.editorState)).toBe(0);
+  });
+
+  it("adopts a changed disk format together with the new baseline (edge case)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+
+    // A different length so the revision comparison escalates to a read, which is
+    // what makes the format observable at all.
+    harness.files.updateFile(SMALL_A, "alpha with a BOM", EDITOR_FORMAT);
+    const result = await validateHarnessDocument(harness, id);
+
+    expect(result.outcome).toBe("changed");
+    const session = harness.manager.getSession(id)!;
+    expect(session.format.bom).toBe("utf8");
+    expect(session.format.preferredLineEnding).toBe("crlf");
+    expect(session.savedBaseline.toString()).toBe("alpha with a BOM");
+  });
+
+  it("treats a metadata-only touch as unchanged and keeps the buffer (edge case)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    const stateBefore = harness.manager.getSession(id)!.editorState;
+
+    // Same bytes, new modification time: the revision comparison escalates to a
+    // read, and the read proves the supported text did not change.
+    harness.files.touchFile(SMALL_A);
+    const result = await validateHarnessDocument(harness, id);
+
+    expect(result.outcome).toBe("changed");
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState).toBe(stateBefore);
+    expect(session.savedBaseline.toString()).toBe("alpha");
+    expect(session.dirty).toBe(false);
+    expect(session.externalState).toBe("normal");
+    // The new revision was still adopted, so the next validation is cheap again.
+    expect(session.pathIdentity?.diskRevision?.modifiedTimeMillis).toBe(1);
+    expect(harness.editor.reloadedStates).toHaveLength(0);
+  });
+
+  it("never replaces the buffer when the path cannot be inspected (FR-015, FR-043)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    const stateBefore = harness.manager.getSession(id)!.editorState;
+
+    harness.files.addUnreadableFile(SMALL_A, {
+      code: "io_read",
+      message: "The file is locked by another program.",
+    });
+    const result = await validateHarnessDocument(harness, id);
+
+    expect(result.outcome).toBe("unverifiable");
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState).toBe(stateBefore);
+    expect(session.dirty).toBe(false);
+    // A locked file is not a missing file.
+    expect(session.externalState).toBe("normal");
+    expect(harness.dialogs.errors).toEqual([
+      "The file is locked by another program.",
+    ]);
+  });
+
+  it("never replaces the buffer when the read fails (FR-020, FR-043)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    const stateBefore = harness.manager.getSession(id)!.editorState;
+
+    // The revision changed (so the validator has to read), and the read fails.
+    harness.files.updateFile(SMALL_A, "alpha replaced by binary");
+    harness.files.readError = {
+      code: "unsupported_binary",
+      message: "The file contains binary data.",
+    };
+    const result = await validateHarnessDocument(harness, id);
+
+    expect(result.outcome).toBe("unverifiable");
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState).toBe(stateBefore);
+    expect(session.savedBaseline.toString()).toBe("alpha");
+    expect(harness.dialogs.errors).toEqual(["The file contains binary data."]);
+    expect(harness.editor.reloadedStates).toHaveLength(0);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 005 — dirty protection (US2)                                               */
+/* -------------------------------------------------------------------------- */
+
+describe("DocumentManager external change — dirty protection (US2, T026)", () => {
+  it("keeps a dirty buffer and marks the document externally modified (FR-021, FR-022)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    const stateBefore = harness.manager.getSession(id)!.editorState;
+
+    harness.files.updateFile(SMALL_A, "someone else wrote this");
+    const result = await validateHarnessDocument(harness, id);
+
+    expect(result.outcome).toBe("changed");
+    if (result.outcome !== "changed") {
+      throw new Error("Expected a changed outcome.");
+    }
+    // T061: the snapshot comes back as comparison material — the manager, not the
+    // validator, decides that this text really diverged from the baseline.
+    expect(result.content?.text).toBe("someone else wrote this");
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState).toBe(stateBefore);
+    expect(session.dirty).toBe(true);
+    expect(session.savedBaseline.toString()).toBe("alpha");
+    expect(session.externalState).toBe("modified");
+    // No auto-reload ever happens for a dirty document.
+    expect(harness.editor.reloadedStates).toHaveLength(0);
+    expect(tabFor(harness, id).externalState).toBe("modified");
+  });
+
+  it("treats a metadata-only touch on a dirty document as no divergence (T061, edge case)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    harness.files.addDirectory("C:\\work");
+    const bindingBefore = harness.manager.getBinding(id)!;
+    const baselineBefore = harness.manager.getSession(id)!.savedBaseline.toString();
+    const stateBefore = harness.manager.getSession(id)!.editorState;
+
+    // The revision moved but the supported text and format are exactly what this
+    // document already holds as its baseline: a touch, not a divergence.
+    harness.files.touchFile(SMALL_A);
+    const result = await validateHarnessDocument(harness, id);
+
+    expect(result.outcome).toBe("changed");
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState).toBe(stateBefore);
+    expect(session.dirty).toBe(true);
+    expect(session.savedBaseline.toString()).toBe(baselineBefore);
+    // No false conflict: the document is still dirty and external `normal`.
+    expect(session.externalState).toBe("normal");
+    expect(tabFor(harness, id).externalState).toBe("normal");
+    expect(harness.editor.reloadedStates).toHaveLength(0);
+    // Only the revision advanced, so the next validation is cheap again.
+    expect(session.pathIdentity?.diskRevision?.modifiedTimeMillis).toBe(1);
+    expect(harness.manager.isBindingCurrent(bindingBefore)).toBe(true);
+
+    // And Save proceeds as an ordinary save, without an overwrite prompt.
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+    expect(harness.dialogs.overwritePrompts).toHaveLength(0);
+    expect(harness.files.writes).toHaveLength(1);
+    expect(harness.files.writes[0].text).toBe("my unsaved work");
+  });
+
+  it("treats a BOM-only external change on a dirty document as divergence (T061)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    harness.files.addDirectory("C:\\work");
+
+    // Identical normalized text, different byte-relevant format: a real disk
+    // change, so it must not be waved through as a touch. The revision moves with
+    // it (a BOM adds bytes), which is what makes the validator read.
+    harness.files.updateFile(SMALL_A, "alpha", {
+      ...NEW_DOCUMENT_FORMAT,
+      bom: "utf8",
+    });
+    harness.files.touchFile(SMALL_A);
+    await validateHarnessDocument(harness, id);
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe("my unsaved work");
+    expect(session.dirty).toBe(true);
+    expect(session.externalState).toBe("modified");
+
+    harness.dialogs.externalConflictChoice = "cancel";
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "cancelled",
+    });
+    expect(harness.files.writes).toHaveLength(0);
+    expect(harness.dialogs.overwritePrompts).toEqual(["a.txt"]);
+  });
+
+  it("does not repeatedly disrupt a dirty document when hints keep arriving (FR-041, SC-004)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    harness.files.updateFile(SMALL_A, "someone else wrote this");
+
+    await validateHarnessDocument(harness, id);
+    const stateAfterFirst = harness.manager.getSession(id)!.editorState;
+    const snapshotsAfterFirst = harness.emissions();
+
+    await validateHarnessDocument(harness, id);
+    await validateHarnessDocument(harness, id);
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState).toBe(stateAfterFirst);
+    expect(session.externalState).toBe("modified");
+    expect(session.dirty).toBe(true);
+    // A repeated hint that changes nothing must not emit another projection.
+    expect(harness.emissions()).toBe(snapshotsAfterFirst);
+    expect(harness.dialogs.errors).toHaveLength(0);
+  });
+});
+
+describe("DocumentManager external change — save protection (US2, T027, T028)", () => {
+  it("blocks ordinary Save until an explicit Overwrite and writes nothing on Cancel (FR-013, FR-023, FR-024, SC-002)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+
+    // A change the realtime watcher never reported: only the mandatory pre-save
+    // validation can find it.
+    harness.files.updateFile(SMALL_A, "someone else wrote this");
+    harness.dialogs.externalConflictChoice = "cancel";
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "cancelled",
+    });
+
+    expect(harness.files.writes).toHaveLength(0);
+    const session = harness.manager.getSession(id)!;
+    expect(session.dirty).toBe(true);
+    expect(session.editorState.doc.toString()).toBe("my unsaved work");
+    expect(session.savedBaseline.toString()).toBe("alpha");
+    expect(session.externalState).toBe("modified");
+    expect(harness.dialogs.overwritePrompts).toEqual(["a.txt"]);
+    // The conflict is visible without another modal dialog.
+    expect(tabFor(harness, id).externalState).toBe("modified");
+  });
+
+  it("writes the in-memory content and clears the conflict on Overwrite (FR-025)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    harness.files.updateFile(SMALL_A, "someone else wrote this");
+    harness.dialogs.externalConflictChoice = "overwrite";
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    expect(harness.files.writes).toHaveLength(1);
+    expect(harness.files.writes[0].text).toBe("my unsaved work");
+    expect(harness.files.writes[0].path).toBe(SMALL_A);
+    const session = harness.manager.getSession(id)!;
+    expect(session.dirty).toBe(false);
+    expect(session.externalState).toBe("normal");
+    expect(session.savedBaseline.toString()).toBe("my unsaved work");
+    expect(tabFor(harness, id).externalState).toBe("normal");
+    expect(harness.dialogs.errors).toHaveLength(0);
+  });
+
+  it("advances nothing when the overwrite write fails (FR-025, edge case)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    const stateBefore = harness.manager.getSession(id)!.editorState;
+    harness.files.updateFile(SMALL_A, "someone else wrote this");
+    harness.dialogs.externalConflictChoice = "overwrite";
+    harness.files.writeError = { code: "io_write", message: "disk full" };
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "failed",
+      error: { code: "io_write", message: "disk full" },
+    });
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState).toBe(stateBefore);
+    expect(session.dirty).toBe(true);
+    expect(session.savedBaseline.toString()).toBe("alpha");
+    // The conflict stays recorded, because no successful write resolved it.
+    expect(session.externalState).toBe("modified");
+  });
+
+  it("clears the conflict only for the successful current operation (edit during overwrite)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    harness.files.updateFile(SMALL_A, "someone else wrote this");
+    harness.dialogs.externalConflictChoice = "overwrite";
+    harness.files.holdWrites = true;
+
+    const saving = harness.manager.saveDocument(id);
+    await flush();
+    expect(harness.files.pendingWriteCount()).toBe(1);
+
+    // An edit that arrives while the write is in flight is newer than the captured
+    // snapshot, so it must stay dirty after the write commits.
+    harness.editor.type("my unsaved work plus more");
+    harness.files.releaseWrites();
+    await expect(saving).resolves.toEqual({ status: "success" });
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.savedBaseline.toString()).toBe("my unsaved work");
+    expect(session.dirty).toBe(true);
+    // The disk now holds exactly the baseline, so there is no divergence left.
+    expect(session.externalState).toBe("normal");
+  });
+
+  it("passes a dirty unchanged document straight through the existing save path (FR-013)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    expect(harness.files.writes).toHaveLength(1);
+    expect(harness.dialogs.overwritePrompts).toHaveLength(0);
+    expect(harness.manager.getSession(id)!.dirty).toBe(false);
+  });
+
+  it("requires an explicit discard confirmation before Reload from Disk replaces a dirty buffer (FR-027, T033)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    harness.files.updateFile(SMALL_A, "disk version");
+
+    harness.dialogs.discardConfirmed = false;
+    await expect(harness.manager.reloadDocumentFromDisk(id)).resolves.toEqual({
+      status: "cancelled",
+    });
+    expect(harness.manager.getSession(id)!.editorState.doc.toString()).toBe(
+      "my unsaved work",
+    );
+    expect(harness.dialogs.discardPrompts).toEqual(["a.txt"]);
+
+    harness.dialogs.discardConfirmed = true;
+    await expect(harness.manager.reloadDocumentFromDisk(id)).resolves.toEqual({
+      status: "success",
+    });
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe("disk version");
+    expect(session.dirty).toBe(false);
+    expect(session.externalState).toBe("normal");
+  });
+
+  it("reloads a clean document from disk without any confirmation", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.updateFile(SMALL_A, "disk version");
+
+    await expect(harness.manager.reloadDocumentFromDisk(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    expect(harness.dialogs.discardPrompts).toHaveLength(0);
+    expect(harness.dialogs.unsavedPromptCount).toBe(0);
+    expect(harness.manager.getSession(id)!.editorState.doc.toString()).toBe(
+      "disk version",
+    );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 005 — external delete (US3)                                                */
+/* -------------------------------------------------------------------------- */
+
+describe("DocumentManager external change — external delete (US3, T034-T036)", () => {
+  it("keeps a clean document open as missing with its content intact (FR-028, FR-029, SC-003)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    const stateBefore = harness.manager.getSession(id)!.editorState;
+    const pathBefore = harness.manager.getSession(id)!.path;
+
+    harness.files.removeFile(SMALL_A);
+    const result = await validateHarnessDocument(harness, id);
+
+    expect(result.outcome).toBe("missing");
+    const session = harness.manager.getSession(id)!;
+    expect(session.id).toBe(id);
+    expect(session.path).toBe(pathBefore);
+    expect(session.editorState).toBe(stateBefore);
+    expect(session.editorState.doc.toString()).toBe("alpha");
+    expect(session.dirty).toBe(false);
+    expect(session.externalState).toBe("missing");
+    expect(tabFor(harness, id).externalState).toBe("missing");
+    // The 003 internal-Delete pathway must not run for an external delete.
+    expect(harness.manager.listSessions()).toHaveLength(2);
+    expect(tabNames(harness.manager.getSnapshot())).toEqual([
+      "Untitled1",
+      "a.txt",
+    ]);
+  });
+
+  it("keeps a dirty document's content and dirty state when it goes missing (FR-029)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+
+    harness.files.removeFile(SMALL_A);
+    await validateHarnessDocument(harness, id);
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe("my unsaved work");
+    expect(session.dirty).toBe(true);
+    expect(session.externalState).toBe("missing");
+    expect(harness.manager.listSessions()).toHaveLength(2);
+  });
+
+  it("recreates a clean missing file at its original path on Save (FR-030, FR-032)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.addDirectory("C:\\work");
+    harness.files.removeFile(SMALL_A);
+    await validateHarnessDocument(harness, id);
+    expect(harness.manager.getSession(id)!.externalState).toBe("missing");
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    expect(harness.files.writes).toHaveLength(1);
+    expect(harness.files.writes[0]).toMatchObject({
+      path: SMALL_A,
+      text: "alpha",
+    });
+    const session = harness.manager.getSession(id)!;
+    expect(session.dirty).toBe(false);
+    expect(session.externalState).toBe("normal");
+    expect(session.savedBaseline.toString()).toBe("alpha");
+  });
+
+  it("recreates a dirty missing file and clears dirty only after the write (FR-030, FR-032)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.addDirectory("C:\\work");
+    harness.editor.type("my unsaved work");
+    harness.files.removeFile(SMALL_A);
+    await validateHarnessDocument(harness, id);
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    expect(harness.files.writes).toHaveLength(1);
+    expect(harness.files.writes[0].text).toBe("my unsaved work");
+    const session = harness.manager.getSession(id)!;
+    expect(session.dirty).toBe(false);
+    expect(session.externalState).toBe("normal");
+  });
+
+  it("fails without creating ancestors when the parent directory is gone (FR-031)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.removeFile(SMALL_A);
+    harness.files.setPathState("C:\\work", {
+      canonicalPath: null,
+      comparisonKey: null,
+      state: "missing",
+      diskRevision: null,
+      message: null,
+    });
+
+    const result = await harness.manager.saveDocument(id);
+
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.error.code).toBe("path_resolution");
+      expect(result.error.message).toContain("C:\\work");
+    }
+    // No write, no invented directory, and the document is still recoverable.
+    expect(harness.files.writes).toHaveLength(0);
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe("alpha");
+    expect(session.path).toBe(SMALL_A);
+    expect(session.externalState).toBe("missing");
+    expect(harness.manager.listSessions()).toHaveLength(2);
+  });
+
+  it("does not overwrite a target that reappeared before the recreate (FR-045)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.addDirectory("C:\\work");
+    harness.files.removeFile(SMALL_A);
+
+    // The absence is confirmed, and only then does the file come back.
+    harness.files.queuePathState(SMALL_A, {
+      canonicalPath: null,
+      comparisonKey: null,
+      state: "missing",
+      diskRevision: null,
+      message: null,
+    });
+    harness.files.updateFile(SMALL_A, "reappeared content");
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    // The reappeared file was adopted, not overwritten with the stale buffer.
+    expect(harness.files.writes).toHaveLength(0);
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe("reappeared content");
+    expect(session.savedBaseline.toString()).toBe("reappeared content");
+    expect(session.externalState).toBe("normal");
+  });
+
+  it("asks for an explicit decision when a dirty missing target reappeared (FR-045, FR-034)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.addDirectory("C:\\work");
+    harness.editor.type("my unsaved work");
+    harness.files.removeFile(SMALL_A);
+    harness.files.queuePathState(SMALL_A, {
+      canonicalPath: null,
+      comparisonKey: null,
+      state: "missing",
+      diskRevision: null,
+      message: null,
+    });
+    harness.files.updateFile(SMALL_A, "reappeared content");
+    harness.dialogs.externalConflictChoice = "cancel";
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "cancelled",
+    });
+
+    expect(harness.files.writes).toHaveLength(0);
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe("my unsaved work");
+    expect(session.dirty).toBe(true);
+    expect(session.externalState).toBe("modified");
+    expect(harness.dialogs.overwritePrompts).toEqual(["a.txt"]);
+  });
+
+  it("reloads a clean missing document when the path reappears (FR-033)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.removeFile(SMALL_A);
+    await validateHarnessDocument(harness, id);
+    expect(harness.manager.getSession(id)!.externalState).toBe("missing");
+
+    harness.files.updateFile(SMALL_A, "recreated by another program");
+    const result = await validateHarnessDocument(harness, id);
+
+    expect(result.outcome).toBe("changed");
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe("recreated by another program");
+    expect(session.dirty).toBe(false);
+    expect(session.externalState).toBe("normal");
+  });
+
+  it("treats a reappeared path as divergence without reloading a dirty document (FR-034)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    harness.files.removeFile(SMALL_A);
+    await validateHarnessDocument(harness, id);
+
+    harness.files.updateFile(SMALL_A, "recreated by another program");
+    await validateHarnessDocument(harness, id);
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe("my unsaved work");
+    expect(session.dirty).toBe(true);
+    expect(session.externalState).toBe("modified");
+    expect(harness.editor.reloadedStates).toHaveLength(0);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 005 — watch interest and stale completions                                 */
+/* -------------------------------------------------------------------------- */
+
+describe("DocumentManager watch interest (T023, FR-001-FR-004)", () => {
+  it("announces a bound interest on open and an unbound one on close", async () => {
+    const harness = createHarness();
+    const changes: WatchInterestChange[] = [];
+    harness.manager.subscribeWatchInterest((change) => {
+      changes.push(change);
+    });
+
+    const id = await openSmallA(harness);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ type: "bound", documentId: id, path: SMALL_A });
+
+    await harness.manager.closeDocument(id);
+    expect(changes).toHaveLength(2);
+    expect(changes[1]).toMatchObject({ type: "unbound", documentId: id, path: SMALL_A });
+  });
+
+  it("never announces interest for an untitled document (FR-002)", () => {
+    const harness = createHarness();
+    const changes: WatchInterestChange[] = [];
+    harness.manager.subscribeWatchInterest((change) => {
+      changes.push(change);
+    });
+
+    harness.manager.createUntitled();
+
+    expect(changes).toEqual([]);
+  });
+
+  it("announces the first bound interest when Save As binds an Untitled document (FR-002, FR-004)", async () => {
+    const harness = createHarness();
+    const id = harness.manager.createUntitled();
+    harness.editor.type("brand new");
+    const changes: WatchInterestChange[] = [];
+    harness.manager.subscribeWatchInterest((change) => {
+      changes.push(change);
+    });
+    harness.files.addDirectory("C:\\work");
+    harness.dialogs.savePath = "C:\\work\\fresh.txt";
+
+    await harness.manager.saveDocumentAs(id);
+
+    // An Untitled document had no interest before, so this is its first binding —
+    // not a migration — and the watcher consumer must start watching it.
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      type: "bound",
+      documentId: id,
+      path: "C:\\work\\fresh.txt",
+    });
+  });
+
+  it("announces a rebound interest for every document an internal rename moves (FR-004)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    const changes: WatchInterestChange[] = [];
+    harness.manager.subscribeWatchInterest((change) => {
+      changes.push(change);
+    });
+    const sourceIdentity = await identityOf(harness, SMALL_A);
+
+    const affected = harness.manager.commitRenamedPath({
+      sourceIdentity: {
+        canonicalPath: sourceIdentity.canonicalPath,
+        comparisonKey: sourceIdentity.comparisonKey,
+      },
+      newPath: "C:\\work\\renamed.txt",
+      newIdentity: syntheticIdentity(harness, "C:\\work\\renamed.txt"),
+    });
+
+    expect(affected).toEqual([id]);
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      type: "rebound",
+      documentId: id,
+      previousPath: SMALL_A,
+      path: "C:\\work\\renamed.txt",
+    });
+  });
+
+  it("bumps the binding generation so an in-flight validation becomes stale", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    const binding = harness.manager.getBinding(id)!;
+    harness.files.addDirectory("C:\\work");
+    harness.dialogs.savePath = "C:\\work\\elsewhere.txt";
+
+    await harness.manager.saveDocumentAs(id);
+
+    expect(harness.manager.isBindingCurrent(binding)).toBe(false);
+    expect(harness.manager.markExternalState(binding, "missing")).toBe(false);
+    expect(
+      harness.manager.applyValidatedDiskSnapshot(binding, {
+        identity: binding.identity,
+        content: { text: "stale", format: { ...NEW_DOCUMENT_FORMAT } },
+      }),
+    ).toBe("stale");
+    expect(harness.manager.getSession(id)!.editorState.doc.toString()).toBe(
+      "alpha",
+    );
+  });
+
+  it("rejects a result for a document that was closed while it was in flight", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    const binding = harness.manager.getBinding(id)!;
+
+    await harness.manager.closeDocument(id);
+
+    expect(harness.manager.isBindingCurrent(binding)).toBe(false);
+    expect(harness.manager.markExternalState(binding, "missing")).toBe(false);
+    await expect(
+      harness.manager.markValidationError(binding, {
+        code: "io_read",
+        message: "too late",
+      }),
+    ).resolves.toBe(false);
+    expect(harness.dialogs.errors).toHaveLength(0);
+  });
+
+  it("reports a validation failure once per distinct message (FR-041, FR-043)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    const binding = harness.manager.getBinding(id)!;
+
+    await harness.manager.markValidationError(binding, {
+      code: "io_read",
+      message: "locked",
+    });
+    await harness.manager.markValidationError(binding, {
+      code: "io_read",
+      message: "locked",
+    });
+    expect(harness.dialogs.errors).toEqual(["locked"]);
+
+    // A different failure is new information and must be shown.
+    await harness.manager.markValidationError(binding, {
+      code: "io_read",
+      message: "still locked",
+    });
+    expect(harness.dialogs.errors).toEqual(["locked", "still locked"]);
+
+    // A later successful validation clears the dedupe, so the next failure of the
+    // same shape is reported again (retry on a later trigger).
+    harness.files.touchFile(SMALL_A);
+    await validateHarnessDocument(harness, id);
+    await harness.manager.markValidationError(binding, {
+      code: "io_read",
+      message: "still locked",
+    });
+    expect(harness.dialogs.errors).toHaveLength(3);
+  });
+
+  it("surfaces the external state in the tab projection and requests no confirmation for a clean reload (T050)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+
+    expect(tabFor(harness, id).externalState).toBe("normal");
+
+    harness.files.updateFile(SMALL_A, "disk version");
+    await validateHarnessDocument(harness, id);
+
+    expect(tabFor(harness, id).externalState).toBe("normal");
+    expect(harness.dialogs.unsavedPromptCount).toBe(0);
+    expect(harness.dialogs.overwritePrompts).toHaveLength(0);
+    expect(harness.dialogs.discardPrompts).toHaveLength(0);
+    expect(harness.dialogs.errors).toHaveLength(0);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 005 — internal filesystem operation reconciliation (T045)                  */
+/* -------------------------------------------------------------------------- */
+
+describe("DocumentManager internal operation reconciliation (T045, FR-035, FR-036)", () => {
+  it("reconciles the notifications an internal rename produces (SC-006)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    const reconciliations: CapturedWatchHint[][] = [];
+    harness.manager.subscribeReconciliation((hints) => {
+      reconciliations.push([...hints]);
+    });
+
+    const newPath = "C:\\work\\renamed.txt";
+    const sourceKey = harness.files.comparisonKeyFor(SMALL_A);
+    const newKey = harness.files.comparisonKeyFor(newPath);
+    const reservation = await harness.manager.reservePathMutation({
+      kind: "rename",
+      sourceKey,
+      destinationKey: newKey,
+    });
+    expect(reservation.status).toBe("reserved");
+
+    // The watcher offers the notifications the disk rename is about to produce.
+    expect(
+      harness.guard.capture({
+        comparisonKey: sourceKey,
+        path: SMALL_A,
+        kind: "removed",
+      }),
+    ).toBe(true);
+    expect(
+      harness.guard.capture({
+        comparisonKey: newKey,
+        path: newPath,
+        kind: "created",
+      }),
+    ).toBe(true);
+
+    harness.files.removeFile(SMALL_A);
+    harness.files.addFile(newPath, "alpha");
+    harness.manager.commitRenamedPath({
+      sourceIdentity: {
+        canonicalPath: SMALL_A,
+        comparisonKey: sourceKey,
+      },
+      newPath,
+      newIdentity: syntheticIdentity(harness, newPath),
+    });
+    if (reservation.status === "reserved") {
+      reservation.reservation.release();
+    }
+
+    // Every notification the rename produced is explained by its post-operation
+    // state, so nothing is reported and no document is marked as diverging.
+    expect(reconciliations).toEqual([]);
+    const session = harness.manager.getSession(id)!;
+    expect(session.path).toBe(newPath);
+    expect(session.externalState).toBe("normal");
+    expect(session.dirty).toBe(false);
+  });
+
+  it("reconciles a successful internal delete without surfacing an external delete (FR-035)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    const reconciliations: CapturedWatchHint[][] = [];
+    harness.manager.subscribeReconciliation((hints) => {
+      reconciliations.push([...hints]);
+    });
+
+    const key = harness.files.comparisonKeyFor(SMALL_A);
+    const reservation = await harness.manager.reservePathMutation({
+      kind: "delete",
+      sourceKey: key,
+    });
+    expect(reservation.status).toBe("reserved");
+    expect(
+      harness.guard.capture({
+        comparisonKey: key,
+        path: SMALL_A,
+        kind: "removed",
+      }),
+    ).toBe(true);
+
+    harness.files.removeFile(SMALL_A);
+    harness.manager.removeDeletedSessions([id]);
+    if (reservation.status === "reserved") {
+      reservation.reservation.release();
+    }
+
+    expect(reconciliations).toEqual([]);
+    // 003 close semantics still ran, and no second unsaved-work prompt appeared.
+    expect(harness.manager.listSessions()).toHaveLength(1);
+    expect(harness.dialogs.unsavedPromptCount).toBe(0);
+  });
+
+  it("surfaces a notification the rename cannot explain (FR-036)", async () => {
+    const harness = createHarness();
+    await openSmallA(harness);
+    const reconciliations: CapturedWatchHint[][] = [];
+    harness.manager.subscribeReconciliation((hints) => {
+      reconciliations.push([...hints]);
+    });
+
+    const newPath = "C:\\work\\renamed.txt";
+    const sourceKey = harness.files.comparisonKeyFor(SMALL_A);
+    const newKey = harness.files.comparisonKeyFor(newPath);
+    const reservation = await harness.manager.reservePathMutation({
+      kind: "rename",
+      sourceKey,
+      destinationKey: newKey,
+    });
+
+    // The destination was created by the rename, so a removal of it cannot be
+    // explained by the operation.
+    harness.guard.capture({
+      comparisonKey: newKey,
+      path: newPath,
+      kind: "removed",
+    });
+
+    harness.files.removeFile(SMALL_A);
+    harness.manager.commitRenamedPath({
+      sourceIdentity: { canonicalPath: SMALL_A, comparisonKey: sourceKey },
+      newPath,
+      newIdentity: syntheticIdentity(harness, newPath),
+    });
+    if (reservation.status === "reserved") {
+      reservation.reservation.release();
+    }
+
+    expect(reconciliations).toHaveLength(1);
+    expect(reconciliations[0]).toEqual([
+      { comparisonKey: newKey, path: newPath, kind: "removed" },
+    ]);
+  });
+
+  it("surfaces every captured hint when a reserved mutation never commits (FR-036)", async () => {
+    const harness = createHarness();
+    await openSmallA(harness);
+    const reconciliations: CapturedWatchHint[][] = [];
+    harness.manager.subscribeReconciliation((hints) => {
+      reconciliations.push([...hints]);
+    });
+
+    const key = harness.files.comparisonKeyFor(SMALL_A);
+    const reservation = await harness.manager.reservePathMutation({
+      kind: "delete",
+      sourceKey: key,
+    });
+    expect(
+      harness.guard.capture({
+        comparisonKey: key,
+        path: SMALL_A,
+        kind: "changed",
+      }),
+    ).toBe(true);
+
+    // The disk operation failed or was cancelled, so nothing may be declared
+    // internal: the captured hint has to be validated as real divergence.
+    if (reservation.status === "reserved") {
+      reservation.reservation.release();
+    }
+
+    expect(reconciliations).toHaveLength(1);
+    expect(reconciliations[0][0]).toMatchObject({
+      comparisonKey: key,
+      kind: "changed",
+    });
+  });
+
+  it("does not swallow a save's own successful notification (SC-006)", async () => {    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    const reconciliations: CapturedWatchHint[][] = [];
+    harness.manager.subscribeReconciliation((hints) => {
+      reconciliations.push([...hints]);
+    });
+    harness.editor.type("my unsaved work");
+
+    // The write registers a hint for its own path, exactly as the real watcher
+    // would while the write is in flight.
+    harness.files.onWrite = (request) => {
+      harness.guard.capture({
+        comparisonKey: harness.files.comparisonKeyFor(request.path),
+        path: request.path,
+        kind: "changed",
+      });
+    };
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    expect(reconciliations).toEqual([]);
+    const session = harness.manager.getSession(id)!;
+    expect(session.dirty).toBe(false);
+    expect(session.externalState).toBe("normal");
+  });
+
+  it("reconciles the notification an internal Save As produces for its new path (FR-035)", async () => {
+    const harness = createHarness();
+    const id = harness.manager.createUntitled();
+    harness.editor.type("brand new");
+    const reconciliations: CapturedWatchHint[][] = [];
+    harness.manager.subscribeReconciliation((hints) => {
+      reconciliations.push([...hints]);
+    });
+    harness.files.addDirectory("C:\\work");
+    const target = "C:\\work\\fresh.txt";
+    harness.dialogs.savePath = target;
+
+    // The watcher reports the destination the Save As is about to create.
+    harness.files.onWrite = (request) => {
+      harness.guard.capture({
+        comparisonKey: harness.files.comparisonKeyFor(request.path),
+        path: request.path,
+        kind: "created",
+      });
+    };
+
+    await expect(harness.manager.saveDocumentAs(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    expect(reconciliations).toEqual([]);
+    const session = harness.manager.getSession(id)!;
+    expect(session.path).toBe(target);
+    expect(session.dirty).toBe(false);
+    expect(session.externalState).toBe("normal");
+  });
+
+  it("does not let a discarded disk version hide a dirty conflict (FR-021, FR-023)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    const binding = harness.manager.getBinding(id)!;
+    const adoptedRevision = binding.identity.diskRevision;
+
+    // Disk content handed to a dirty document *without* a confirmed discard: the
+    // buffer is kept, and the adopted revision must not advance, otherwise the
+    // divergence would look resolved to every later validation and the next Save
+    // could overwrite the external version without asking.
+    const outcome = harness.manager.applyValidatedDiskSnapshot(binding, {
+      identity: {
+        ...binding.identity,
+        diskRevision: { size: 999, modifiedTimeMillis: 999 },
+      },
+      content: {
+        text: "someone else wrote this",
+        format: { ...NEW_DOCUMENT_FORMAT },
+      },
+    });
+
+    expect(outcome).toBe("external-modified");
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe("my unsaved work");
+    expect(session.dirty).toBe(true);
+    expect(session.externalState).toBe("modified");
+    expect(session.pathIdentity?.diskRevision).toEqual(adoptedRevision);
+
+    // The conflict survives the next validation, and Save still has to ask before
+    // it may write anything.
+    harness.files.updateFile(SMALL_A, "someone else wrote this");
+    await validateHarnessDocument(harness, id);
+    expect(harness.manager.getSession(id)!.externalState).toBe("modified");
+
+    harness.dialogs.externalConflictChoice = "cancel";
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "cancelled",
+    });
+    expect(harness.files.writes).toHaveLength(0);
+    expect(harness.dialogs.overwritePrompts).toEqual(["a.txt"]);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 005 — atomic recreate and a proven post-write state (T059, T060)            */
+/* -------------------------------------------------------------------------- */
+
+describe("DocumentManager atomic recreate (T059, FR-045)", () => {
+  it("uses create-if-absent for the recreate branch and a plain write everywhere else", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.addDirectory("C:\\work");
+
+    // An ordinary save only ever writes.
+    harness.editor.type("my unsaved work");
+    await harness.manager.saveDocument(id);
+    expect(harness.files.creates).toHaveLength(0);
+    expect(harness.files.writes).toHaveLength(1);
+
+    // A recreate of a confirmed-missing target creates instead.
+    harness.files.removeFile(SMALL_A);
+    await validateHarnessDocument(harness, id);
+    harness.editor.type("recreated content");
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+    expect(harness.files.creates).toHaveLength(1);
+    expect(harness.files.creates[0]).toMatchObject({
+      path: SMALL_A,
+      text: "recreated content",
+    });
+  });
+
+  it("never overwrites a target that appears at the create boundary (FR-045)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.addDirectory("C:\\work");
+    harness.files.removeFile(SMALL_A);
+    await validateHarnessDocument(harness, id);
+    expect(harness.manager.getSession(id)!.externalState).toBe("missing");
+
+    // The target reappears in the window between the final absence check and the
+    // create. The create is atomic, so Sorakada learns about it instead of
+    // destroying the new file.
+    harness.files.onCreateConflict = () => {
+      harness.files.updateFile(SMALL_A, "written by another program");
+      return {
+        code: "already_exists",
+        message: `${SMALL_A} already exists.`,
+      };
+    };
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    // Nothing was overwritten: the plain writer never ran, and the clean document
+    // adopted the file that had appeared.
+    expect(harness.files.writes).toHaveLength(0);
+    expect(harness.files.textFor(SMALL_A)).toBe("written by another program");
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe("written by another program");
+    expect(session.dirty).toBe(false);
+    expect(session.externalState).toBe("normal");
+  });
+
+  it("asks before replacing a target that appears at the create boundary for a dirty document (FR-045)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.addDirectory("C:\\work");
+    harness.editor.type("my unsaved work");
+    harness.files.removeFile(SMALL_A);
+    await validateHarnessDocument(harness, id);
+
+    harness.files.onCreateConflict = () => {
+      harness.files.updateFile(SMALL_A, "written by another program");
+      return {
+        code: "already_exists",
+        message: `${SMALL_A} already exists.`,
+      };
+    };
+    harness.dialogs.externalConflictChoice = "cancel";
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "cancelled",
+    });
+
+    expect(harness.files.writes).toHaveLength(0);
+    expect(harness.files.textFor(SMALL_A)).toBe("written by another program");
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe("my unsaved work");
+    expect(session.dirty).toBe(true);
+    expect(session.externalState).toBe("modified");
+    expect(harness.dialogs.overwritePrompts).toEqual(["a.txt"]);
+  });
+
+  it("writes only after the user explicitly overwrites the race winner (FR-045, FR-025)", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.addDirectory("C:\\work");
+    harness.editor.type("my unsaved work");
+    harness.files.removeFile(SMALL_A);
+    await validateHarnessDocument(harness, id);
+
+    harness.files.onCreateConflict = () => {
+      harness.files.updateFile(SMALL_A, "written by another program");
+      return {
+        code: "already_exists",
+        message: `${SMALL_A} already exists.`,
+      };
+    };
+    harness.dialogs.externalConflictChoice = "overwrite";
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    expect(harness.files.writes).toHaveLength(1);
+    expect(harness.files.writes[0].text).toBe("my unsaved work");
+    expect(harness.files.textFor(SMALL_A)).toBe("my unsaved work");
+    const session = harness.manager.getSession(id)!;
+    expect(session.dirty).toBe(false);
+    expect(session.externalState).toBe("normal");
+  });
+});
+
+describe("DocumentManager post-write proof (T060, FR-036)", () => {
+  it("does not declare reconciliation when an outside write wins the read-back", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    const reconciliations: CapturedWatchHint[][] = [];
+    harness.manager.subscribeReconciliation((hints) => {
+      reconciliations.push([...hints]);
+    });
+    harness.editor.type("my unsaved work");
+
+    // The write lands, then another program replaces it before Sorakada can prove
+    // what is on disk. The watcher hint for our own write arrives in that window.
+    harness.files.onWrite = (request) => {
+      harness.guard.capture({
+        comparisonKey: harness.files.comparisonKeyFor(request.path),
+        path: request.path,
+        kind: "changed",
+      });
+      harness.files.updateFile(SMALL_A, "outside write won");
+    };
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    // The baseline advanced to what Sorakada actually wrote, but the disk no longer
+    // matches it, so the document is externally modified rather than clean.
+    const session = harness.manager.getSession(id)!;
+    expect(session.savedBaseline.toString()).toBe("my unsaved work");
+    expect(session.externalState).toBe("modified");
+    expect(tabFor(harness, id).externalState).toBe("modified");
+    // The adopted revision is unknown, so the next validation must read content
+    // instead of trusting metadata.
+    expect(session.pathIdentity?.diskRevision).toBeNull();
+    // And the operation's own hint was surfaced for revalidation, not swallowed.
+    expect(reconciliations).toHaveLength(1);
+    expect(reconciliations[0][0]).toMatchObject({
+      comparisonKey: harness.files.comparisonKeyFor(SMALL_A),
+      kind: "changed",
+    });
+
+    // A following validation converges on the outside content.
+    await validateHarnessDocument(harness, id);
+    const converged = harness.manager.getSession(id)!;
+    expect(converged.editorState.doc.toString()).toBe("outside write won");
+    expect(converged.externalState).toBe("normal");
+  });
+
+  it("detects an outside write that lands between the proof's inspection and its read", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+
+    let landed = false;
+    harness.files.onRead = () => {
+      if (landed) {
+        return;
+      }
+      landed = true;
+      harness.files.updateFile(SMALL_A, "outside write during the proof");
+    };
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.savedBaseline.toString()).toBe("my unsaved work");
+    expect(session.externalState).toBe("modified");
+    expect(session.pathIdentity?.diskRevision).toBeNull();
+
+    harness.files.onRead = null;
+    await validateHarnessDocument(harness, id);
+    expect(harness.manager.getSession(id)!.editorState.doc.toString()).toBe(
+      "outside write during the proof",
+    );
+  });
+
+  it("keeps the conflict state when the read-back cannot be completed", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    const reconciliations: CapturedWatchHint[][] = [];
+    harness.manager.subscribeReconciliation((hints) => {
+      reconciliations.push([...hints]);
+    });
+    harness.files.onWrite = (request) => {
+      harness.guard.capture({
+        comparisonKey: harness.files.comparisonKeyFor(request.path),
+        path: request.path,
+        kind: "changed",
+      });
+    };
+    // The read-back cannot be completed, so nothing may be claimed as reconciled.
+    harness.files.readError = { code: "io_read", message: "locked" };
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.savedBaseline.toString()).toBe("my unsaved work");
+    // A failed proof is not a divergence: no conflict is invented, and the state
+    // the document already had is preserved.
+    expect(session.externalState).toBe("normal");
+    expect(session.pathIdentity?.diskRevision).toBeNull();
+    expect(reconciliations).toHaveLength(1);
+
+    // Once reading works again the document converges without a false conflict.
+    harness.files.readError = null;
+    await validateHarnessDocument(harness, id);
+    const converged = harness.manager.getSession(id)!;
+    expect(converged.dirty).toBe(false);
+    expect(converged.externalState).toBe("normal");
+    expect(converged.editorState.doc.toString()).toBe("my unsaved work");
+  });
+
+  it("adopts a Save As destination but not its unproven content", async () => {
+    const harness = createHarness();
+    const id = harness.manager.createUntitled();
+    harness.editor.type("brand new");
+    const target = "C:\\work\\fresh.txt";
+    harness.files.addDirectory("C:\\work");
+    harness.dialogs.savePath = target;
+    harness.files.onWrite = () => {
+      harness.files.updateFile(target, "someone else got there first");
+    };
+
+    await expect(harness.manager.saveDocumentAs(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    // The path is adopted because the write really happened there, but the disk no
+    // longer holds Sorakada's bytes, so the document is not reported clean.
+    const session = harness.manager.getSession(id)!;
+    expect(session.path).toBe(target);
+    expect(session.savedBaseline.toString()).toBe("brand new");
+    expect(session.externalState).toBe("modified");
+    expect(session.pathIdentity?.diskRevision).toBeNull();
+  });
+
+  it("settles as reconciled only when the disk really holds the written snapshot", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    const reconciliations: CapturedWatchHint[][] = [];
+    harness.manager.subscribeReconciliation((hints) => {
+      reconciliations.push([...hints]);
+    });
+    harness.editor.type("my unsaved work");
+    harness.files.onWrite = (request) => {
+      harness.guard.capture({
+        comparisonKey: harness.files.comparisonKeyFor(request.path),
+        path: request.path,
+        kind: "changed",
+      });
+    };
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.externalState).toBe("normal");
+    expect(session.dirty).toBe(false);
+    // The proof succeeded, so the write's own notification is reconciled and the
+    // revision is a real one again.
+    expect(reconciliations).toEqual([]);
+    expect(session.pathIdentity?.diskRevision).not.toBeNull();
+  });
+});
+describe("DocumentManager clean pre-save validation failure (T063, FR-043)", () => {
+  it("surfaces a clean document's unverifiable pre-save failure instead of a silent success", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    const before = harness.manager.getSession(id)!;
+    const stateBefore = before.editorState;
+    const baselineBefore = before.savedBaseline.toString();
+    const formatBefore = { ...before.format };
+
+    // The path cannot be verified at all (locked, denied, or a transient I/O
+    // failure on a file that is not missing).
+    harness.files.addUnreadableFile(SMALL_A, {
+      code: "io_read",
+      message: "locked by another program",
+    });
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+
+    // The failure reached the user through the existing non-destructive path...
+    expect(harness.dialogs.errors).toEqual(["locked by another program"]);
+    // ...and nothing at all about the document or the disk changed.
+    const after = harness.manager.getSession(id)!;
+    expect(after.editorState).toBe(stateBefore);
+    expect(after.savedBaseline.toString()).toBe(baselineBefore);
+    expect(after.format).toEqual(formatBefore);
+    expect(after.dirty).toBe(false);
+    expect(after.externalState).toBe("normal");
+    expect(harness.files.writes).toHaveLength(0);
+    expect(harness.files.creates).toHaveLength(0);
+  });
+
+  it("reports a repeated identical failure once, and a new failure again", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.files.addUnreadableFile(SMALL_A, {
+      code: "io_read",
+      message: "locked by another program",
+    });
+
+    await harness.manager.saveDocument(id);
+    await harness.manager.saveDocument(id);
+
+    // Repeated identical failures must not turn every Save into another dialog.
+    expect(harness.dialogs.errors).toEqual(["locked by another program"]);
+
+    // A different failure is new information and must be shown.
+    harness.files.addUnreadableFile(SMALL_A, {
+      code: "io_read",
+      message: "still locked, now by something else",
+    });
+    await harness.manager.saveDocument(id);
+    expect(harness.dialogs.errors).toEqual([
+      "locked by another program",
+      "still locked, now by something else",
+    ]);
+  });
+
+  it("keeps blocking a dirty document while the clean case only reports", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    harness.editor.type("my unsaved work");
+    harness.files.addUnreadableFile(SMALL_A, {
+      code: "io_read",
+      message: "locked by another program",
+    });
+
+    // A dirty document has data at risk, so the same failure is also a failed save.
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "failed",
+      error: { code: "io_read", message: "locked by another program" },
+    });
+    expect(harness.manager.getSession(id)!.dirty).toBe(true);
+    expect(harness.files.writes).toHaveLength(0);
+  });
+});
+/* -------------------------------------------------------------------------- */
+/* 005 — post-proof notification ordering (T064)                              */
+/* -------------------------------------------------------------------------- */
+
+describe("DocumentManager settlement after the write proof (T064, FR-036)", () => {
+  it("does not discard a same-path hint that arrives after the read-back proof", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    const reconciliations: CapturedWatchHint[][] = [];
+    harness.manager.subscribeReconciliation((hints) => {
+      reconciliations.push([...hints]);
+    });
+    harness.editor.type("my unsaved work");
+    const key = harness.files.comparisonKeyFor(SMALL_A);
+
+    let reads = 0;
+    harness.files.onRead = () => {
+      reads += 1;
+      if (reads === 1) {
+        // Sorakada's own write notification arrives while the first proof reads
+        // the file back, so that proof is already older than the notification.
+        harness.guard.capture({ comparisonKey: key, path: SMALL_A, kind: "changed" });
+        return;
+      }
+      if (reads === 2) {
+        // The re-proof's read: an outside write lands now — after a proof had
+        // succeeded and before the guard settles — together with its hint.
+        harness.files.updateFile(SMALL_A, "outside write after the proof");
+        harness.guard.capture({ comparisonKey: key, path: SMALL_A, kind: "changed" });
+      }
+    };
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+    harness.files.onRead = null;
+
+    // The later proof sees the outside content, so the operation reconciles
+    // nothing: the baseline is what Sorakada wrote, but the disk is not.
+    const session = harness.manager.getSession(id)!;
+    expect(session.savedBaseline.toString()).toBe("my unsaved work");
+    expect(session.externalState).toBe("modified");
+    expect(session.pathIdentity?.diskRevision).toBeNull();
+    // The hint was surfaced for validation rather than discarded on the strength
+    // of the earlier proof.
+    expect(reconciliations).toHaveLength(1);
+    expect(reconciliations[0]).toHaveLength(2);
+    expect(reconciliations[0][0]).toMatchObject({ comparisonKey: key });
+
+    // And the document converges on what is really there.
+    await validateHarnessDocument(harness, id);
+    const converged = harness.manager.getSession(id)!;
+    expect(converged.editorState.doc.toString()).toBe("outside write after the proof");
+    expect(converged.externalState).toBe("normal");
+  });
+
+  it("invents no conflict when the notifications keep arriving but the disk holds our bytes", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness, "alpha");
+    const reconciliations: CapturedWatchHint[][] = [];
+    harness.manager.subscribeReconciliation((hints) => {
+      reconciliations.push([...hints]);
+    });
+    harness.editor.type("my unsaved work");
+    const key = harness.files.comparisonKeyFor(SMALL_A);
+
+    // A pathological burst: a notification for this key during every read-back, so
+    // no proof can ever be attributed to this operation.
+    harness.files.onRead = () => {
+      harness.guard.capture({ comparisonKey: key, path: SMALL_A, kind: "changed" });
+    };
+
+    await expect(harness.manager.saveDocument(id)).resolves.toEqual({
+      status: "success",
+    });
+    harness.files.onRead = null;
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.savedBaseline.toString()).toBe("my unsaved work");
+    // The disk really does hold Sorakada's bytes, so no conflict is invented — the
+    // operation only declined to claim the notifications as its own.
+    expect(session.externalState).toBe("normal");
+    expect(tabFor(harness, id).externalState).toBe("normal");
+    expect(harness.dialogs.overwritePrompts).toHaveLength(0);
+    expect(session.pathIdentity?.diskRevision).toBeNull();
+    // Nothing was swallowed: the burst was handed to the consumer.
+    expect(reconciliations.length).toBeGreaterThan(0);
+    expect(harness.guard.pendingHintCount()).toBe(0);
+
+    // A later validation confirms the baseline is intact, so the user never sees a
+    // conflict for their own save.
+    await validateHarnessDocument(harness, id);
+    const converged = harness.manager.getSession(id)!;
+    expect(converged.dirty).toBe(false);
+    expect(converged.externalState).toBe("normal");
+    expect(converged.editorState.doc.toString()).toBe("my unsaved work");
+    expect(harness.dialogs.errors).toHaveLength(0);
+  });
+
+  it("re-proves a Save As settlement as well", async () => {
+    const harness = createHarness();
+    const id = harness.manager.createUntitled();
+    harness.editor.type("brand new");
+    const target = "C:\\work\\fresh.txt";
+    harness.manager.subscribeReconciliation(() => undefined);
+    harness.files.addDirectory("C:\\work");
+    harness.dialogs.savePath = target;
+    const key = harness.files.comparisonKeyFor(target);
+
+    let reads = 0;
+    harness.files.onRead = () => {
+      reads += 1;
+      if (reads === 1) {
+        harness.guard.capture({ comparisonKey: key, path: target, kind: "created" });
+        return;
+      }
+      if (reads === 2) {
+        harness.files.updateFile(target, "someone else got there first");
+        harness.guard.capture({ comparisonKey: key, path: target, kind: "created" });
+      }
+    };
+
+    await expect(harness.manager.saveDocumentAs(id)).resolves.toEqual({
+      status: "success",
+    });
+    harness.files.onRead = null;
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.path).toBe(target);
+    expect(session.savedBaseline.toString()).toBe("brand new");
+    expect(session.externalState).toBe("modified");
+    expect(session.pathIdentity?.diskRevision).toBeNull();
+  });
+});

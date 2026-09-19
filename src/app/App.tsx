@@ -5,13 +5,17 @@ import { Editor } from "../editor/Editor";
 import { createEditorHandle } from "../editor/editorHandle";
 import { nativeFileDialogService } from "../services/fileDialogs";
 import { tauriFileService } from "../services/fileService";
+import { tauriFilesystemWatcher } from "../services/filesystemWatcher";
 import { nativeWorkspaceDialogService } from "../services/workspaceDialogs";
 import { tauriWorkspaceFileService } from "../services/workspaceFileService";
 import { createCommandRegistry } from "./commands/commandRegistry";
 import type { CommandId } from "./commands/commandIds";
 import { commandForKeyboardEvent } from "./commands/ideaKeymap";
+import { DiskValidator } from "./document/diskValidation";
 import { DocumentManager } from "./document/documentManager";
 import type { DocumentManagerSnapshot } from "./document/documentSession";
+import { InternalFsOperationGuard } from "./document/internalFsOperationGuard";
+import { OpenedDocumentWatchCoordinator } from "./document/openedDocumentWatchCoordinator";
 import { processDroppedPaths } from "./dragdrop/fileDropController";
 import { Explorer } from "./explorer/Explorer";
 import { ExplorerActions } from "./explorer/explorerActions";
@@ -67,6 +71,16 @@ export function App() {
   const [editorHandle] = useState(createEditorHandle);
   const [registry] = useState(createCommandRegistry);
   const [benchmark] = useState(createActivationBenchmark);
+  /**
+   * 005 shares one validation and one internal-operation guard between the
+   * manager (which writes the filesystem) and the watcher consumer (which reads
+   * the hints those writes produce), so "our own event" has exactly one
+   * definition (FR-035).
+   */
+  const [internalFsOperations] = useState(() => new InternalFsOperationGuard());
+  const [diskValidator] = useState(
+    () => new DiskValidator({ fileService: tauriFileService }),
+  );
   const [manager] = useState(
     () =>
       new DocumentManager({
@@ -74,6 +88,17 @@ export function App() {
         fileService: tauriFileService,
         dialogs: nativeFileDialogService,
         activationBenchmark: benchmark,
+        diskValidator,
+        internalFsOperations,
+      }),
+  );
+  const [watcher] = useState(
+    () =>
+      new OpenedDocumentWatchCoordinator({
+        documents: manager,
+        validator: diskValidator,
+        watcher: tauriFilesystemWatcher,
+        guard: internalFsOperations,
       }),
   );
   const [workContext] = useState(
@@ -141,6 +166,11 @@ export function App() {
     // Benchmark-only: publishes the SC-005 timing marks for the manual
     // switching run described in `quickstart.md` §12.
     installActivationBenchmark(benchmark);
+
+    // 005: the opened-document watcher consumer. It only listens here — every
+    // validation it starts is asynchronous, so nothing on this path can block a
+    // keystroke or the first paint.
+    void watcher.start();
 
     // The bridge reports every state update with the document it was bound to,
     // which is what keeps a Tab switch from being credited to the wrong Tab.
@@ -308,6 +338,7 @@ export function App() {
     let disposeMenu: (() => Promise<void>) | null = null;
     let disposeWindow: (() => void) | null = null;
     let disposeDragDrop: (() => void) | null = null;
+    let disposeFocus: (() => void) | null = null;
 
     const installNativeSurfaces = async (): Promise<void> => {
       if (!isTauriRuntime()) {
@@ -319,6 +350,17 @@ export function App() {
         manager,
         appWindow,
       );
+
+      // 005 fallback trigger (FR-012): regaining focus revalidates every bound
+      // document through the cheap inspection path. The handler deliberately does
+      // not await any disk work, and it is not coupled to the Explorer, so
+      // returning from another program can neither freeze the UI nor rescan the
+      // Workspace (FR-040, SC-008).
+      const unlistenFocus = await appWindow.onFocusChanged(({ payload }) => {
+        if (payload) {
+          watcher.validateAllOnWindowFocus();
+        }
+      });
 
       // Native drag/drop only exists in the desktop shell; a browser-only
       // session must not attempt to install it at all.
@@ -355,12 +397,14 @@ export function App() {
       if (disposed) {
         stopWindowLifecycle();
         unlistenDragDrop();
+        unlistenFocus();
         await installation.restore();
         return;
       }
 
       disposeWindow = stopWindowLifecycle;
       disposeDragDrop = unlistenDragDrop;
+      disposeFocus = unlistenFocus;
       disposeMenu = installation.restore;
       menuRef.current = installation;
       await installation.syncAvailability();
@@ -382,8 +426,10 @@ export function App() {
       }
 
       disposeDragDrop?.();
+      disposeFocus?.();
       disposeWindow?.();
       void disposeMenu?.();
+      void watcher.dispose();
     };
   }, [
     actions,
@@ -392,6 +438,7 @@ export function App() {
     editorHandle,
     manager,
     registry,
+    watcher,
     workContext,
   ]);
 

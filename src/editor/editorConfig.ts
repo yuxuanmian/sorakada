@@ -1,5 +1,10 @@
 import { basicSetup } from "codemirror";
-import { Compartment, EditorState, type Extension } from "@codemirror/state";
+import {
+  Compartment,
+  EditorSelection,
+  EditorState,
+  type Extension,
+} from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
 /**
@@ -139,4 +144,50 @@ export function createEditorState(
     doc,
     extensions: [basicSetup, appearanceBoundary(), runtimeExtensions],
   });
+}
+
+/**
+ * Builds the replacement state for a document whose content was reloaded from disk.
+ *
+ * This is the 005 counterpart of {@link createEditorState}, and it exists as a
+ * factory rather than a dispatch so the replacement can be built, validated and
+ * committed by the document owner before any view sees it.
+ *
+ * Three requirements shape it:
+ *
+ * - **Undo/redo must not resurrect the superseded version** (FR-018). History
+ *   lives *inside* `EditorState`, so creating a new state is exactly what clears
+ *   it; there is deliberately no "clear history" effect to forget.
+ * - **Every selection anchor/head is preserved as the same absolute offset and
+ *   clamped to the new length** (FR-019). Offsets past the new end collapse onto
+ *   the end instead of failing the reload, and the main range index is preserved
+ *   so the primary selection stays primary.
+ * - **It is not a user edit transaction** (plan §5.8). No transaction with a
+ *   document change is produced, so the reload cannot make the document dirty.
+ *
+ * Bringing the clamped primary head into view is the view's job, not the state's
+ * (`EditorHandle.reloadDocumentState`), because a state cannot know whether it
+ * is the one currently displayed.
+ */
+export function createExternalReloadState(
+  current: EditorState,
+  text: string,
+  runtimeExtensions: Extension = [],
+): EditorState {
+  const replacement = createEditorState(text, runtimeExtensions);
+  const length = replacement.doc.length;
+  const clamp = (position: number): number =>
+    Math.max(0, Math.min(position, length));
+
+  const ranges = current.selection.ranges.map((range) =>
+    EditorSelection.range(clamp(range.anchor), clamp(range.head)),
+  );
+  const mainIndex = Math.max(
+    0,
+    Math.min(current.selection.mainIndex, ranges.length - 1),
+  );
+
+  return replacement.update({
+    selection: EditorSelection.create(ranges, mainIndex),
+  }).state;
 }

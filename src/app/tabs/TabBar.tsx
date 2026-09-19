@@ -79,6 +79,33 @@ export function TabBar({ tabs, onSelect, onClose, onNew }: TabBarProps) {
             }}
           >
             <span className="tab__label">{tab.displayName}</span>
+            {/*
+              005 (FR-041): the external disk state is shown non-modally, because
+              a modal dialog on every watcher event would be unusable. The marker
+              is a projection of manager-owned state, so the strip never decides
+              what the state is — and `dirty` keeps its own separate marker
+              (FR-009).
+            */}
+            {tab.externalState === "modified" ? (
+              <span
+                className="tab__external tab__external--modified"
+                role="img"
+                aria-label="Changed on disk"
+                title="Changed on disk by another program"
+              >
+                ↻
+              </span>
+            ) : null}
+            {tab.externalState === "missing" ? (
+              <span
+                className="tab__external tab__external--missing"
+                role="img"
+                aria-label="Missing on disk"
+                title="Deleted on disk; Save recreates the file"
+              >
+                ⚠
+              </span>
+            ) : null}
             {tab.dirty ? (
               <span className="tab__dirty" title="Unsaved changes">
                 ●

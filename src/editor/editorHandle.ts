@@ -53,6 +53,20 @@ export interface EditorHandle {
    */
   setState(documentId: DocumentId, state: EditorState): void;
 
+  /**
+   * Installs externally reloaded content and reveals its clamped primary head.
+   *
+   * A disk reload replaces the whole state (which is what clears undo/redo) and
+   * then has to satisfy FR-019: the restored view keeps the clamped primary
+   * selection head visible. Exact pixel scroll preservation is explicitly not
+   * required when the new content changed line layout, so this scrolls the head
+   * into view instead of restoring an offset that may now be meaningless.
+   *
+   * `setState` produces an update with no document change, so this can never be
+   * mistaken for a user edit (plan §5.8).
+   */
+  reloadDocumentState(documentId: DocumentId, state: EditorState): void;
+
   /** Captures the reading position the shared view currently shows. */
   captureViewState(): DocumentViewState;
   /** Restores a document's reading position after its state was bound. */
@@ -123,6 +137,21 @@ class EditorHandleImpl implements EditorHandle {
     // target document.
     this.boundDocumentId = documentId;
     view.setState(state);
+  }
+
+  reloadDocumentState(documentId: DocumentId, state: EditorState): void {
+    const view = this.requireView();
+    // Same ordering rule as `setState`: the (change-free) update the swap
+    // produces must already be attributed to the reloaded document.
+    this.boundDocumentId = documentId;
+    view.setState(state);
+    // FR-019: keep the clamped primary head visible. `setState` does not scroll,
+    // and the previous scroll offset may describe a line that no longer exists.
+    view.dispatch({
+      effects: EditorView.scrollIntoView(state.selection.main.head, {
+        y: "center",
+      }),
+    });
   }
 
   captureViewState(): DocumentViewState {

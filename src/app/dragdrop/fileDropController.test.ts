@@ -13,15 +13,19 @@ import {
 } from "../document/documentSession";
 import type { EditorHandle, StateUpdateListener } from "../../editor/editorHandle";
 import type {
+  DocumentPathInspection,
   FileService,
   OpenTextFileResult,
   ResolvedPathIdentity,
   WriteTextFileRequest,
 } from "../../services/fileService";
 import type {
+  ExternalConflictChoice,
   FileDialogService,
   UnsavedChoice,
 } from "../../services/fileDialogs";
+import { DiskValidator } from "../document/diskValidation";
+import { InternalFsOperationGuard } from "../document/internalFsOperationGuard";
 import { processDroppedPaths, type FileDropManager } from "./fileDropController";
 
 /* -------------------------------------------------------------------------- */
@@ -287,6 +291,11 @@ class MinimalEditor implements EditorHandle {
     this.state = state;
   }
 
+  /** 005 external reload: a whole new state, never a user edit. */
+  reloadDocumentState(_documentId: DocumentId, state: EditorState): void {
+    this.state = state;
+  }
+
   captureViewState(): DocumentViewState {
     return { scrollTop: 0, scrollLeft: 0 };
   }
@@ -392,10 +401,67 @@ class InMemoryFileService implements FileService {
     return Promise.resolve({ text, format: { ...NEW_DOCUMENT_FORMAT } });
   }
 
+  /**
+   * 005 validation-oriented inspection.
+   *
+   * Drag/drop never validates an existing bound path, so this fake only needs to
+   * answer the two states a dropped open can meet.
+   */
+  inspectDocumentPath(path: string): Promise<DocumentPathInspection> {
+    const comparisonKey = this.keyFor(path);
+    const directory = this.directories.has(comparisonKey);
+    const text = this.files.get(comparisonKey);
+
+    if (!directory && text === undefined) {
+      return Promise.resolve({
+        requestedPath: path,
+        canonicalPath: null,
+        comparisonKey: null,
+        state: "missing",
+        diskRevision: null,
+        message: null,
+      });
+    }
+
+    return Promise.resolve({
+      requestedPath: path,
+      canonicalPath: path,
+      comparisonKey,
+      state: directory ? "directory" : "file",
+      diskRevision: { size: text?.length ?? 0, modifiedTimeMillis: 0 },
+      message: null,
+    });
+  }
+
+  /** The create path is the same in-memory write when nothing exists yet. */
+  createTextFileIfAbsent(request: WriteTextFileRequest): Promise<void> {
+    return this.writeTextFile(request);
+  }
   writeTextFile(request: WriteTextFileRequest): Promise<void> {
     this.writes.push(request);
     return Promise.resolve();
   }
+}
+
+/**
+ * Builds a manager with the 005 collaborators the dropped-open path needs.
+ *
+ * The dropped-open tests care about duplicate suppression, not external-change
+ * coordination, so each manager gets its own validator and guard wired to the
+ * same in-memory filesystem.
+ */
+function createDropManager(
+  editor: EditorHandle,
+  fileService: FileService,
+  dialogs: FileDialogService,
+): DocumentManager {
+  return new DocumentManager({
+    editor,
+    fileService,
+    dialogs,
+    diskValidator: new DiskValidator({ fileService }),
+    internalFsOperations: new InternalFsOperationGuard(),
+  });
 }
 
 class RecordingDialogs implements FileDialogService {
@@ -418,6 +484,14 @@ class RecordingDialogs implements FileDialogService {
   confirmUnsavedChanges(): Promise<UnsavedChoice> {
     return Promise.resolve("cancel");
   }
+
+  confirmExternalOverwrite(): Promise<ExternalConflictChoice> {
+    return Promise.resolve("cancel");
+  }
+
+  confirmDiscardForReload(): Promise<boolean> {
+    return Promise.resolve(false);
+  }
 }
 
 describe("duplicate reuse across opening surfaces (SC-002)", () => {
@@ -427,11 +501,7 @@ describe("duplicate reuse across opening surfaces (SC-002)", () => {
     files.addAlias(DUPLICATE_A, VALID_A);
 
     const dialogs = new RecordingDialogs();
-    const manager = new DocumentManager({
-      editor: new MinimalEditor(),
-      fileService: files,
-      dialogs,
-    });
+    const manager = createDropManager(new MinimalEditor(), files, dialogs);
     const key = files.keyFor(VALID_A);
 
     for (let request = 0; request < 20; request += 1) {
@@ -476,11 +546,7 @@ describe("dropped batches and the Workspace (US3)", () => {
     files.addDirectory(DIRECTORY);
 
     const dialogs = new RecordingDialogs();
-    const manager = new DocumentManager({
-      editor: new MinimalEditor(),
-      fileService: files,
-      dialogs,
-    });
+    const manager = createDropManager(new MinimalEditor(), files, dialogs);
 
     // A mixed batch: the directory is skipped without a prompt, and the files
     // on either side still open in drop order.
@@ -502,11 +568,11 @@ describe("dropped batches and the Workspace (US3)", () => {
     files.add(INSIDE, "inside");
     files.add(OUTSIDE, "outside");
 
-    const manager = new DocumentManager({
-      editor: new MinimalEditor(),
-      fileService: files,
-      dialogs: new RecordingDialogs(),
-    });
+    const manager = createDropManager(
+      new MinimalEditor(),
+      files,
+      new RecordingDialogs(),
+    );
 
     // Drop order decides Tab order; both are ordinary documents because the
     // Workspace is a navigation context, not a document owner (FR-045, FR-047).
@@ -522,11 +588,7 @@ describe("dropped batches and the Workspace (US3)", () => {
     files.addAlias(DUPLICATE_A, VALID_A);
 
     const dialogs = new RecordingDialogs();
-    const manager = new DocumentManager({
-      editor: new MinimalEditor(),
-      fileService: files,
-      dialogs,
-    });
+    const manager = createDropManager(new MinimalEditor(), files, dialogs);
 
     const first = await processDroppedPaths([VALID_A], manager);
     const second = await processDroppedPaths([DUPLICATE_A], manager);

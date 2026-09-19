@@ -23,11 +23,13 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 import {
+  DISCARD_RELOAD_BUTTONS,
+  EXTERNAL_CONFLICT_BUTTONS,
   UNSAVED_WORK_BUTTONS,
   nativeFileDialogService,
   toUnsavedChoice,
 } from "./fileDialogs";
-import type { UnsavedChoice } from "./fileDialogs";
+import type { ExternalConflictChoice, UnsavedChoice } from "./fileDialogs";
 
 beforeEach(() => {
   openMock.mockReset();
@@ -174,5 +176,91 @@ describe("showError", () => {
       title: "Sorakada",
       kind: "error",
     });
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* 005 — explicit external-conflict and discard decisions                     */
+/* -------------------------------------------------------------------------- */
+
+describe("confirmExternalOverwrite (FR-023, FR-024, FR-042)", () => {
+  it("asks with explicit Overwrite / Cancel labels that never read as a plain save", async () => {
+    messageMock.mockResolvedValue(EXTERNAL_CONFLICT_BUTTONS.overwrite);
+
+    await expect(
+      nativeFileDialogService.confirmExternalOverwrite("notes.txt"),
+    ).resolves.toBe("overwrite");
+
+    expect(messageMock).toHaveBeenCalledTimes(1);
+    const [text, options] = messageMock.mock.calls[0];
+    expect(text).toContain("notes.txt");
+    expect(text).toContain("Overwrite");
+    expect(options).toEqual({
+      title: "Sorakada",
+      kind: "warning",
+      buttons: { ok: "Overwrite", cancel: "Cancel" },
+    });
+  });
+
+  const overwriteCases: Array<[string, ExternalConflictChoice]> = [
+    [EXTERNAL_CONFLICT_BUTTONS.overwrite, "overwrite"],
+    // The platform may fall back to role names; both spellings must still mean
+    // Overwrite, and nothing else may.
+    ["Yes", "overwrite"],
+    ["Ok", "overwrite"],
+    [EXTERNAL_CONFLICT_BUTTONS.cancel, "cancel"],
+    ["No", "cancel"],
+    ["Cancel", "cancel"],
+    ["", "cancel"],
+    ["something unexpected", "cancel"],
+  ];
+
+  it.each(overwriteCases)(
+    "maps %j onto %s",
+    async (result, expected) => {
+      messageMock.mockResolvedValue(result);
+
+      await expect(
+        nativeFileDialogService.confirmExternalOverwrite("notes.txt"),
+      ).resolves.toBe(expected);
+    },
+  );
+});
+
+describe("confirmDiscardForReload (FR-027)", () => {
+  it("asks with an explicit Discard / Cancel decision", async () => {
+    messageMock.mockResolvedValue(DISCARD_RELOAD_BUTTONS.discard);
+
+    await expect(
+      nativeFileDialogService.confirmDiscardForReload("notes.txt"),
+    ).resolves.toBe(true);
+
+    expect(messageMock).toHaveBeenCalledWith(
+      expect.stringContaining("discard"),
+      {
+        title: "Sorakada",
+        kind: "warning",
+        buttons: { ok: "Discard", cancel: "Cancel" },
+      },
+    );
+    // The prompt must say the unsaved changes are what gets discarded.
+    expect(messageMock.mock.calls[0][0]).toContain("notes.txt");
+  });
+
+  const discardCases: Array<[string, boolean]> = [
+    [DISCARD_RELOAD_BUTTONS.discard, true],
+    ["Yes", true],
+    ["Ok", true],
+    [DISCARD_RELOAD_BUTTONS.cancel, false],
+    ["No", false],
+    ["", false],
+  ];
+
+  it.each(discardCases)("maps %j onto %s", async (result, expected) => {
+    messageMock.mockResolvedValue(result);
+
+    await expect(
+      nativeFileDialogService.confirmDiscardForReload("notes.txt"),
+    ).resolves.toBe(expected);
   });
 });

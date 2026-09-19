@@ -15,7 +15,11 @@ export type FileCommandCode =
   | "io_directory"
   | "io_create"
   | "io_rename"
-  | "io_trash";
+  | "io_trash"
+  // 005: a create-if-absent write found the target already present. It is carried
+  // by the same error shape and is what turns a recreate race into a reappearance
+  // decision instead of an overwrite (FR-045).
+  | "already_exists";
 
 /** Serializable error returned by the Rust file commands. */
 export interface FileCommandError {
@@ -67,6 +71,36 @@ export interface ResolvedPathIdentity {
 }
 
 /**
+ * What a bound document path currently is, as external-change validation needs
+ * to know it.
+ *
+ * `missing` and `unreadable` are deliberately separate: an external delete must
+ * become `missing`, while a transient read/inspection failure must never be
+ * converted into one (FR-014, FR-015).
+ */
+export type DocumentPathState = "file" | "directory" | "missing" | "unreadable";
+
+/**
+ * Result of `inspect_document_path`.
+ *
+ * This is the validation-oriented counterpart of `ResolvedPathIdentity`: it
+ * always resolves, and reports a failure to verify as `unreadable` instead of
+ * rejecting, so a validation caller can distinguish "gone" from "cannot tell".
+ */
+export interface DocumentPathInspection {
+  requestedPath: string;
+  /** Resolved candidate path; `null` when the path could not be resolved at all. */
+  canonicalPath: string | null;
+  /** Comparison identity key; `null` when the path could not be resolved at all. */
+  comparisonKey: string | null;
+  state: DocumentPathState;
+  /** Metadata when the target exists; `null` for `missing` and `unreadable`. */
+  diskRevision: DiskRevision | null;
+  /** Why the path could not be verified; only set for `unreadable`. */
+  message: string | null;
+}
+
+/**
  * The file operations the document lifecycle depends on.
  *
  * Keeping this an interface (rather than importing `invoke` directly in the
@@ -75,6 +109,16 @@ export interface ResolvedPathIdentity {
 export interface FileService {
   readTextFile(path: string): Promise<OpenTextFileResult>;
   writeTextFile(request: WriteTextFileRequest): Promise<void>;
+  /**
+   * Creates `request.path`, refusing to replace it when it already exists.
+   *
+   * This is the recreate path of a `missing` document (FR-030, FR-045). Unlike
+   * `writeTextFile` it is atomic about absence: the Rust side opens the target with
+   * create-new semantics, so a file that appeared between the final validation and
+   * this write is reported as an `already_exists` error instead of being silently
+   * overwritten. Nothing else about the encoding contract changes.
+   */
+  createTextFileIfAbsent(request: WriteTextFileRequest): Promise<void>;
   /**
    * Resolves a path to its comparison identity without touching its contents.
    *
@@ -85,6 +129,14 @@ export interface FileService {
     path: string,
     allowMissing: boolean,
   ): Promise<ResolvedPathIdentity>;
+  /**
+   * Inspects a bound document path for external-change validation.
+   *
+   * Unlike `inspectFilePath` this never rejects: `missing` and `unreadable` are
+   * explicit states, which is what keeps a locked or permission-denied file from
+   * being mistaken for an externally deleted one (FR-013–FR-015).
+   */
+  inspectDocumentPath(path: string): Promise<DocumentPathInspection>;
 }
 
 /** Narrows an unknown rejection value to the contract's error shape. */
@@ -135,12 +187,22 @@ export const tauriFileService: FileService = {
     return invoke<void>("write_text_file", { request });
   },
 
+  createTextFileIfAbsent(request: WriteTextFileRequest): Promise<void> {
+    return invoke<void>("create_text_file_if_absent", { request });
+  },
+
   inspectFilePath(
     path: string,
     allowMissing: boolean,
   ): Promise<ResolvedPathIdentity> {
     return invoke<ResolvedPathIdentity>("inspect_file_path", {
       request: { path, allowMissing },
+    });
+  },
+
+  inspectDocumentPath(path: string): Promise<DocumentPathInspection> {
+    return invoke<DocumentPathInspection>("inspect_document_path", {
+      request: { path },
     });
   },
 };

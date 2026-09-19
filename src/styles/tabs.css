@@ -92,6 +92,27 @@
   line-height: 1;
 }
 
+/*
+ * External disk state (005, FR-041).
+ *
+ * Deliberately minimal: a small glyph plus a tooltip, using the existing theme
+ * tokens. No notification framework, no dialog and no new palette entry is
+ * introduced for it, and the dirty marker above keeps its own colour so the two
+ * orthogonal states (FR-009) stay distinguishable at a glance.
+ */
+.tab__external {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.tab__external--modified {
+  color: var(--color-text-muted);
+}
+
+.tab__external--missing {
+  color: var(--color-text);
+}
+
 .tab__close {
   display: flex;
   align-items: center;

@@ -3,6 +3,14 @@ import { message, open, save } from "@tauri-apps/plugin-dialog";
 /** The user's decision when unsaved work is about to be discarded. */
 export type UnsavedChoice = "save" | "dontSave" | "cancel";
 
+/**
+ * The user's decision when ordinary Save met an externally changed file.
+ *
+ * 005 exposes exactly these two outcomes and no merge/diff middle ground
+ * (FR-023, FR-024, FR-042).
+ */
+export type ExternalConflictChoice = "overwrite" | "cancel";
+
 /** The native dialogs the document lifecycle depends on. */
 export interface FileDialogService {
   /**
@@ -29,6 +37,21 @@ export interface FileDialogService {
    * document without discarding the current one, so they never run this guard.
    */
   confirmUnsavedChanges(displayName: string): Promise<UnsavedChoice>;
+  /**
+   * The explicit overwrite decision ordinary Save must obtain when the bound
+   * file changed on disk while the document was dirty (FR-023, FR-042).
+   *
+   * Anything other than a positive Overwrite answer resolves `cancel`, which is
+   * the safe outcome: it leaves both the buffer and the disk untouched.
+   */
+  confirmExternalOverwrite(displayName: string): Promise<ExternalConflictChoice>;
+  /**
+   * Confirms that unsaved changes may be discarded because validated disk
+   * content is about to replace them (FR-027).
+   *
+   * Only a positive answer resolves `true`.
+   */
+  confirmDiscardForReload(displayName: string): Promise<boolean>;
 }
 
 /** Extensions offered by the native pickers; "All files" always remains available. */
@@ -111,6 +134,50 @@ export function toUnsavedChoice(result: string): UnsavedChoice {
   return "cancel";
 }
 
+/**
+ * The labels of the external-conflict prompt.
+ *
+ * `Overwrite` is deliberately not labelled `Yes`/`Save`: FR-042 requires the
+ * decision to read as an explicit overwrite rather than as an ordinary save.
+ */
+export const EXTERNAL_CONFLICT_BUTTONS = {
+  overwrite: "Overwrite",
+  cancel: "Cancel",
+} as const;
+
+/** The labels of the discard-and-reload prompt (FR-027). */
+export const DISCARD_RELOAD_BUTTONS = {
+  discard: "Discard",
+  cancel: "Cancel",
+} as const;
+
+/**
+ * Maps a message-dialog result onto the overwrite decision.
+ *
+ * Like `toUnsavedChoice` this accepts both the configured label and the
+ * platform's role name, and treats everything else — including a dismissed
+ * dialog — as Cancel (FR-024).
+ */
+export function toExternalConflictChoice(result: string): ExternalConflictChoice {
+  if (
+    result === EXTERNAL_CONFLICT_BUTTONS.overwrite ||
+    result === "Yes" ||
+    result === "Ok"
+  ) {
+    return "overwrite";
+  }
+  return "cancel";
+}
+
+/** Maps a message-dialog result onto the discard confirmation (FR-027). */
+export function toDiscardChoice(result: string): boolean {
+  return (
+    result === DISCARD_RELOAD_BUTTONS.discard ||
+    result === "Yes" ||
+    result === "Ok"
+  );
+}
+
 /** The native dialog implementation used by the desktop application. */
 export const nativeFileDialogService: FileDialogService = {
   async pickOpenPath(): Promise<string | null> {
@@ -150,5 +217,42 @@ export const nativeFileDialogService: FileDialogService = {
     });
 
     return toUnsavedChoice(result);
+  },
+
+  async confirmExternalOverwrite(
+    displayName: string,
+  ): Promise<ExternalConflictChoice> {
+    const result = await message(
+      `${displayName} has changed on disk since Sorakada read it. Overwrite the file on disk with the version open in Sorakada?`,
+      {
+        title: APP_DIALOG_TITLE,
+        kind: "warning",
+        // `Ok`/`Cancel` is the two-button shape the plugin accepts; the labels are
+        // what the platform hands back, which is why the mapping above accepts the
+        // role names as well.
+        buttons: {
+          ok: EXTERNAL_CONFLICT_BUTTONS.overwrite,
+          cancel: EXTERNAL_CONFLICT_BUTTONS.cancel,
+        },
+      },
+    );
+
+    return toExternalConflictChoice(result);
+  },
+
+  async confirmDiscardForReload(displayName: string): Promise<boolean> {
+    const result = await message(
+      `Reload ${displayName} from disk and discard the unsaved changes in Sorakada?`,
+      {
+        title: APP_DIALOG_TITLE,
+        kind: "warning",
+        buttons: {
+          ok: DISCARD_RELOAD_BUTTONS.discard,
+          cancel: DISCARD_RELOAD_BUTTONS.cancel,
+        },
+      },
+    );
+
+    return toDiscardChoice(result);
   },
 };

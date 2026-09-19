@@ -65,6 +65,8 @@ function createSession(
     editorState: EditorState.create({ doc: "" }),
     viewState: { scrollTop: 0, scrollLeft: 0 },
     latestSaveGeneration: 0,
+    externalState: "normal",
+    bindingGeneration: 0,
     ...overrides,
   };
 }

@@ -4,6 +4,7 @@ import {
   isFileCommandError,
   tauriFileService,
   toFileCommandError,
+  type DocumentPathInspection,
   type FileCommandCode,
   type FileCommandError,
   type OpenTextFileResult,
@@ -126,6 +127,141 @@ describe("tauriFileService.inspectFilePath", () => {
     await expect(
       tauriFileService.inspectFilePath("C:\\missing.txt", false),
     ).rejects.toEqual(error);
+  });
+});
+
+describe("tauriFileService.inspectDocumentPath", () => {
+  /**
+   * The exact JSON `src-tauri/src/commands/file.rs` pins with `serde_json`: six
+   * camelCase fields, a lowercase state, and `null` for every field a failure or
+   * an absence does not fill in.
+   */
+  const FILE_INSPECTION = {
+    requestedPath: "C:\\work\\notes.txt",
+    canonicalPath: "\\\\?\\C:\\work\\notes.txt",
+    comparisonKey: "\\\\?\\c:\\work\\notes.txt",
+    state: "file",
+    diskRevision: { size: 1234, modifiedTimeMillis: 1789600000000 },
+    message: null,
+  } as const;
+
+  it("invokes inspect_document_path with the nested camelCase request and decodes six fields", async () => {
+    invokeMock.mockResolvedValue(FILE_INSPECTION);
+
+    const inspection = await tauriFileService.inspectDocumentPath(
+      "C:\\work\\notes.txt",
+    );
+
+    expect(inspection).toEqual(FILE_INSPECTION);
+    // Both halves of the wire contract name the same six fields; a snake_case
+    // drift on either side fails here or in the Rust test.
+    expect(Object.keys(inspection).sort()).toEqual([
+      "canonicalPath",
+      "comparisonKey",
+      "diskRevision",
+      "message",
+      "requestedPath",
+      "state",
+    ]);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("inspect_document_path", {
+      request: { path: "C:\\work\\notes.txt" },
+    });
+  });
+
+  it("decodes a missing path and an unreadable path as distinct states (FR-014, FR-015)", async () => {
+    const missing: DocumentPathInspection = {
+      requestedPath: "C:\\work\\gone.txt",
+      canonicalPath: null,
+      comparisonKey: null,
+      state: "missing",
+      diskRevision: null,
+      message: null,
+    };
+    invokeMock.mockResolvedValue(missing);
+    await expect(
+      tauriFileService.inspectDocumentPath("C:\\work\\gone.txt"),
+    ).resolves.toEqual(missing);
+
+    const unreadable: DocumentPathInspection = {
+      requestedPath: "C:\\work\\locked.txt",
+      canonicalPath: null,
+      comparisonKey: null,
+      state: "unreadable",
+      diskRevision: null,
+      message: "Cannot inspect C:\\work\\locked.txt: access denied",
+    };
+    invokeMock.mockResolvedValue(unreadable);
+    const decoded = await tauriFileService.inspectDocumentPath(
+      "C:\\work\\locked.txt",
+    );
+    expect(decoded.state).toBe("unreadable");
+    expect(decoded.message).not.toBeNull();
+    // A failure to verify is never reported as an absence.
+    expect(decoded.state).not.toBe("missing");
+  });
+
+  it("decodes a directory state so a replaced path is never treated as missing", async () => {
+    const directory: DocumentPathInspection = {
+      requestedPath: "C:\\work\\notes.txt",
+      canonicalPath: "\\\\?\\C:\\work\\notes.txt",
+      comparisonKey: "\\\\?\\c:\\work\\notes.txt",
+      state: "directory",
+      diskRevision: { size: 0, modifiedTimeMillis: 1789600000000 },
+      message: null,
+    };
+    invokeMock.mockResolvedValue(directory);
+
+    await expect(
+      tauriFileService.inspectDocumentPath("C:\\work\\notes.txt"),
+    ).resolves.toEqual(directory);
+  });
+});
+
+describe("tauriFileService.createTextFileIfAbsent", () => {
+  it("invokes create_text_file_if_absent with the same camelCase request as write_text_file", async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await tauriFileService.createTextFileIfAbsent({
+      path: "C:\\work\\notes.txt",
+      text: "alpha\nbeta",
+      bom: "none",
+      lineEnding: "crlf",
+    });
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    // The request type is deliberately the one `write_text_file` already uses, so
+    // the encoding contract cannot drift between the two writers.
+    expect(invokeMock).toHaveBeenCalledWith("create_text_file_if_absent", {
+      request: {
+        path: "C:\\work\\notes.txt",
+        text: "alpha\nbeta",
+        bom: "none",
+        lineEnding: "crlf",
+      },
+    });
+  });
+
+  it("surfaces the already_exists refusal the recreate race depends on (FR-045)", async () => {
+    const error: FileCommandError = {
+      code: "already_exists",
+      message:
+        "File 'C:\\work\\notes.txt' already exists and was not overwritten.",
+    };
+    invokeMock.mockRejectedValue(error);
+
+    await expect(
+      tauriFileService.createTextFileIfAbsent({
+        path: "C:\\work\\notes.txt",
+        text: "alpha",
+        bom: "none",
+        lineEnding: "lf",
+      }),
+    ).rejects.toEqual(error);
+    // The code is part of the closed union the document manager switches on to
+    // route the race into the reappearance rules instead of an overwrite.
+    expect(isFileCommandError(error)).toBe(true);
+    expect(error.message).not.toBe("");
   });
 });
 

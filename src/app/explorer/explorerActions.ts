@@ -480,6 +480,9 @@ export class ExplorerActions {
     }
 
     const reservation = await this.deps.documents.reservePathMutation({
+      // 005 declares the intended effect so the notifications the creation
+      // produces are reconciled against the created destination (FR-035).
+      kind: "create",
       sourceKey: destinationIdentity.comparisonKey,
     });
     if (reservation.status === "failed") {
@@ -596,6 +599,10 @@ export class ExplorerActions {
     }
 
     const reservation = await this.deps.documents.reservePathMutation({
+      // 005: the source will disappear and the destination will appear, which is
+      // what the internal-operation guard reconciles the rename's notifications
+      // against instead of treating them as outside changes (FR-035, FR-036).
+      kind: "rename",
       sourceKey: sourceIdentity.comparisonKey,
       destinationKey: destinationIdentity.comparisonKey,
     });
@@ -695,6 +702,9 @@ export class ExplorerActions {
     // user is even asked, and stops a new Open from registering the old path
     // while the trash operation is in flight (FR-103).
     const reservation = await this.deps.documents.reservePathMutation({
+      // 005: a successful internal Delete removes the target, so the removal
+      // notifications it produces are not external deletions (FR-035).
+      kind: "delete",
       sourceKey: targetKey,
     });
     if (reservation.status === "failed") {

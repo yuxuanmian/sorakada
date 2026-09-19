@@ -9,7 +9,10 @@
 
 import type { EditorState, Text } from "@codemirror/state";
 
-import type { ResolvedPathIdentity } from "../../services/fileService";
+import type {
+  DiskRevision,
+  ResolvedPathIdentity,
+} from "../../services/fileService";
 
 /** M1 supports UTF-8 only; the field stays enum-shaped for later expansion. */
 export type Encoding = "utf8";
@@ -48,6 +51,17 @@ export interface DocumentViewState {
   scrollLeft: number;
 }
 
+/**
+ * How the bound disk file relates to the last baseline Sorakada adopted (005).
+ *
+ * This is deliberately orthogonal to `dirty` (FR-008, FR-009): `dirty` describes
+ * the in-memory document versus its saved baseline, while this describes the
+ * file on disk versus that same baseline. A document can therefore be
+ * clean+missing or dirty+modified, which a single conflict flag could not
+ * express. Watcher events never set it directly — only a validation result may.
+ */
+export type ExternalState = "normal" | "modified" | "missing";
+
 /** One open document. */
 export interface DocumentSession {
   /** Stable identity; unchanged by Save As. */
@@ -73,6 +87,21 @@ export interface DocumentSession {
    * longer the newest intent cannot adopt a path or advance the baseline.
    */
   latestSaveGeneration: number;
+  /**
+   * How the bound file currently relates to the adopted baseline (005).
+   *
+   * Only `DocumentManager` transitions may change it, and always from a
+   * validation result for a still-current binding.
+   */
+  externalState: ExternalState;
+  /**
+   * Incremented whenever the bound path changes (005).
+   *
+   * Asynchronous validation and reload completions capture this value and are
+   * discarded when the document has since been rebound by Save As or an internal
+   * Explorer Rename, or was closed and reopened under the same id (FR-039).
+   */
+  bindingGeneration: number;
 }
 
 /** Lightweight projection of one Tab. Contains no document text. */
@@ -82,6 +111,14 @@ export interface TabSnapshot {
   path: string | null;
   dirty: boolean;
   active: boolean;
+  /**
+   * The document's external disk state (005).
+   *
+   * Tab-visible, because FR-041 requires `modified`/`missing` to be visible
+   * without a modal dialog; it is a projection of manager-owned state, so the UI
+   * never derives it from watcher events.
+   */
+  externalState: ExternalState;
 }
 
 /** Lightweight projection consumed by React. */
@@ -114,6 +151,22 @@ export const NEW_DOCUMENT_FORMAT: TextFormat = {
 /** A fresh reading position for a document the shared view has never shown. */
 export function createDefaultViewState(): DocumentViewState {
   return { scrollTop: 0, scrollLeft: 0 };
+}
+
+/**
+ * The disk revision the session last adopted, or `null` when it is unknown.
+ *
+ * `pathIdentity` stays the single owner of path identity, and its `diskRevision`
+ * is the single owner of "which disk metadata the baseline corresponds to". A
+ * `null` revision on a bound session is meaningful: the baseline was never
+ * confirmed against metadata (for instance a re-inspection failed right after a
+ * successful write), so validation must escalate to a content read rather than
+ * trusting a revision comparison.
+ */
+export function sessionDiskRevision(
+  session: DocumentSession,
+): DiskRevision | null {
+  return session.pathIdentity?.diskRevision ?? null;
 }
 
 /** Derives the window-title filename from a path, tolerating `\` and `/`. */

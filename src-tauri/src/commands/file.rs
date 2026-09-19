@@ -1,12 +1,15 @@
 //! Tauri file commands.
 //!
-//! These commands implement the `read_text_file` / `write_text_file` IPC
-//! contract. They deliberately expose logical text plus file-format metadata
-//! instead of raw filesystem access, and they delegate all byte-level work to
-//! [`crate::file_codec`].
+//! These commands implement the `read_text_file` / `write_text_file` /
+//! `create_text_file_if_absent` IPC contract. They deliberately expose logical
+//! text plus file-format metadata instead of raw filesystem access, and they
+//! delegate all byte-level work to [`crate::file_codec`].
 
 use crate::file_codec::{self, FileCommandError, TextFormat, WriteRequest};
-use crate::file_identity::{self, InspectPathRequest, ResolvedPathIdentity};
+use crate::file_identity::{
+    self, DocumentPathInspection, InspectDocumentPathRequest, InspectPathRequest,
+    ResolvedPathIdentity,
+};
 use serde::Serialize;
 
 /// Success payload of `read_text_file`.
@@ -35,17 +38,37 @@ pub fn write_text_file(request: WriteRequest) -> Result<(), FileCommandError> {
     file_codec::write_file(&request)
 }
 
+/// Creates a text file that must not exist yet.
+///
+/// This is the recreate path of a `missing` document: unlike `write_text_file` it
+/// never replaces an existing target, so a file that appeared between validation
+/// and the write is reported as `already_exists` instead of being overwritten.
+#[tauri::command]
+pub fn create_text_file_if_absent(request: WriteRequest) -> Result<(), FileCommandError> {
+    file_codec::create_file_if_absent(&request)
+}
+
 /// Inspects a path without touching its contents.
 ///
 /// 002 uses the resolved comparison key to detect an already-open file before
 /// rereading it, to reject a Save As target another document owns, and to
 /// reserve a not-yet-existing destination. It never creates or modifies the
-/// target; only `write_text_file` writes bytes.
+/// target; only `write_text_file` and `create_text_file_if_absent` write bytes.
 #[tauri::command]
 pub fn inspect_file_path(
     request: InspectPathRequest,
 ) -> Result<ResolvedPathIdentity, FileCommandError> {
     file_identity::resolve_path_identity(&request.path, request.allow_missing)
+}
+
+/// Inspects a bound document path for external-change validation.
+///
+/// Unlike `inspect_file_path` this never fails: it reports `missing` and
+/// `unreadable` as explicit states, because the caller must not convert a
+/// transient read/inspection failure into a missing document (FR-015).
+#[tauri::command]
+pub fn inspect_document_path(request: InspectDocumentPathRequest) -> DocumentPathInspection {
+    file_identity::inspect_document_path(&request.path)
 }
 
 #[cfg(test)]
@@ -160,6 +183,106 @@ mod tests {
         assert_eq!(
             std::fs::read(&path).expect("read back"),
             b"one\r\ntwo".to_vec()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pins the camelCase request the frontend sends to
+    /// `create_text_file_if_absent`: it is the same `WriteRequest` the existing
+    /// `write_text_file` command takes, so the frontend shape is unchanged.
+    #[test]
+    fn create_text_file_if_absent_accepts_the_camel_case_frontend_request() {
+        let request: WriteRequest = serde_json::from_value(json!({
+            "path": "C:\\work\\notes.txt",
+            "text": "one\ntwo",
+            "bom": "utf8",
+            "lineEnding": "crlf",
+        }))
+        .expect("deserialize the frontend request shape");
+
+        assert_eq!(request.path, "C:\\work\\notes.txt");
+        assert_eq!(request.text, "one\ntwo");
+        assert_eq!(request.bom, Bom::Utf8);
+        assert_eq!(request.line_ending, OutputLineEnding::Crlf);
+
+        // The frontend only ever spells `lineEnding` in camelCase, so snake_case
+        // drift must fail loudly here rather than silently changing the bytes.
+        let snake_case = serde_json::from_value::<WriteRequest>(json!({
+            "path": "C:\\work\\notes.txt",
+            "text": "one\ntwo",
+            "bom": "utf8",
+            "line_ending": "crlf",
+        }));
+        assert!(snake_case.is_err(), "WriteRequest is camelCase only");
+    }
+
+    /// The command really creates the file when the target is absent.
+    #[test]
+    fn create_text_file_if_absent_creates_the_file_through_the_command_layer() {
+        let dir = work_dir("create-command");
+        let path = dir.join("brand-new.txt").to_string_lossy().to_string();
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "the fixture target must start absent"
+        );
+
+        create_text_file_if_absent(WriteRequest {
+            path: path.clone(),
+            text: "hello\nworld".to_string(),
+            bom: Bom::None,
+            line_ending: OutputLineEnding::Lf,
+        })
+        .expect("create should succeed");
+
+        assert_eq!(
+            std::fs::read(&path).expect("read back"),
+            b"hello\nworld".to_vec()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pins the JSON the frontend's `FileCommandError` DTO reads for the
+    /// recreate path, and that the refused target keeps its bytes.
+    #[test]
+    fn create_text_file_if_absent_errors_match_the_ipc_contract_shape() {
+        let dir = work_dir("create-errors");
+        let existing = write_bytes(&dir, "existing.txt", b"original content\n");
+
+        let error = to_json(
+            &create_text_file_if_absent(WriteRequest {
+                path: existing.clone(),
+                text: "replacement content\n".to_string(),
+                bom: Bom::None,
+                line_ending: OutputLineEnding::Lf,
+            })
+            .expect_err("an existing target must never be replaced"),
+        );
+
+        assert_eq!(error["code"], json!(file_codec::CODE_ALREADY_EXISTS));
+        assert_eq!(
+            error.as_object().expect("object").len(),
+            2,
+            "FileCommandError must carry exactly code + message"
+        );
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty()),
+            "message must be non-empty for the native error dialog"
+        );
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&existing)),
+            "message must name the refused path: {}",
+            error["message"]
+        );
+        assert_eq!(
+            std::fs::read(&existing).expect("read back"),
+            b"original content\n".to_vec(),
+            "the refused file must keep its original bytes"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -388,6 +511,113 @@ mod tests {
                 .is_some_and(|message| !message.is_empty()),
             "message must be non-empty for the native error dialog"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pins the camelCase request the frontend sends to `inspect_document_path`.
+    #[test]
+    fn inspect_document_path_request_accepts_the_frontend_shape() {
+        let request: InspectDocumentPathRequest = serde_json::from_value(json!({
+            "path": "C:\\work\\notes.txt",
+        }))
+        .expect("deserialize the frontend request shape");
+
+        assert_eq!(request.path, "C:\\work\\notes.txt");
+
+        // The command takes exactly one field, so an unknown or snake_case key
+        // must fail loudly here instead of silently inspecting an empty path.
+        let mismatched = serde_json::from_value::<InspectDocumentPathRequest>(json!({
+            "requested_path": "C:\\work\\notes.txt",
+        }));
+        assert!(
+            mismatched.is_err(),
+            "InspectDocumentPathRequest is the camelCase `path` field only"
+        );
+    }
+
+    /// Pins the JSON the frontend's `DocumentPathInspection` DTO reads for a
+    /// document whose file is still on disk.
+    #[test]
+    fn inspect_document_path_matches_the_ipc_contract_shape() {
+        let dir = work_dir("document-inspect-shape");
+        let path = write_bytes(&dir, "notes.txt", b"alpha\nbeta");
+
+        let value = to_json(&inspect_document_path(InspectDocumentPathRequest {
+            path: path.clone(),
+        }));
+
+        assert_eq!(
+            value.as_object().expect("object").len(),
+            6,
+            "DocumentPathInspection must carry exactly six fields"
+        );
+        assert_eq!(value["requestedPath"], json!(path));
+        assert_eq!(value["state"], json!("file"));
+        assert!(value["canonicalPath"].is_string());
+        assert!(value["comparisonKey"].is_string());
+        assert_eq!(value["message"], Value::Null);
+
+        let revision = value["diskRevision"]
+            .as_object()
+            .expect("revision object");
+        assert_eq!(
+            revision.len(),
+            2,
+            "DiskRevision must carry exactly two fields"
+        );
+        assert_eq!(value["diskRevision"]["size"], json!(10));
+        assert!(value["diskRevision"]["modifiedTimeMillis"].is_i64());
+
+        // camelCase only: a snake_case regression here would be invisible to
+        // `cargo test` without these assertions.
+        assert!(value.get("requested_path").is_none());
+        assert!(value.get("canonical_path").is_none());
+        assert!(value.get("comparison_key").is_none());
+        assert!(value.get("disk_revision").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A deleted document stays classifiable, so the command never has to turn
+    /// a missing file into an error the caller might mishandle.
+    #[test]
+    fn inspect_document_path_reports_a_missing_target_without_failing() {
+        let dir = work_dir("document-inspect-missing");
+        let missing = dir.join("absent.txt").to_string_lossy().to_string();
+
+        let value = to_json(&inspect_document_path(InspectDocumentPathRequest {
+            path: missing,
+        }));
+
+        assert_eq!(value.as_object().expect("object").len(), 6);
+        assert_eq!(value["state"], json!("missing"));
+        assert_eq!(value["diskRevision"], Value::Null);
+        assert_eq!(value["message"], Value::Null);
+        assert!(
+            value["canonicalPath"].is_string(),
+            "an existing parent still yields a candidate path"
+        );
+        assert!(
+            value["comparisonKey"].is_string(),
+            "a candidate path carries the comparison key the file will report"
+        );
+
+        // With the whole directory gone there is no candidate identity left,
+        // which the frontend reads as "no path to recreate".
+        let orphan = dir
+            .join("no-such-dir")
+            .join("absent.txt")
+            .to_string_lossy()
+            .to_string();
+        let orphan_value = to_json(&inspect_document_path(InspectDocumentPathRequest {
+            path: orphan,
+        }));
+
+        assert_eq!(orphan_value["state"], json!("missing"));
+        assert_eq!(orphan_value["canonicalPath"], Value::Null);
+        assert_eq!(orphan_value["comparisonKey"], Value::Null);
+        assert_eq!(orphan_value["message"], Value::Null);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

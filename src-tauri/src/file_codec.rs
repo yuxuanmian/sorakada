@@ -13,6 +13,7 @@
 //! performed in either direction.
 
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 
 /// UTF-8 byte order mark.
 const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
@@ -31,6 +32,8 @@ const CODE_UNSUPPORTED_ENCODING: &str = "unsupported_encoding";
 const CODE_UNSUPPORTED_BINARY: &str = "unsupported_binary";
 /// Error code reported when a bare CR byte is present.
 const CODE_UNSUPPORTED_LINE_ENDING: &str = "unsupported_line_ending";
+/// Error code reported when a create-if-absent write finds the target already present.
+pub const CODE_ALREADY_EXISTS: &str = "already_exists";
 // Structural 003 codes (`io_directory`, `io_create`, `io_rename`, `io_trash`)
 // live next to the primitives that raise them, in `crate::workspace_fs`; the
 // `path_resolution` code lives in `crate::file_identity`. All of them are
@@ -217,6 +220,54 @@ pub fn write_file(request: &WriteRequest) -> Result<(), FileCommandError> {
     })
 }
 
+/// Encodes and creates a file that must not exist yet.
+///
+/// Atomic by construction: `create_new(true)` fails when the target already
+/// exists, so there is no window between "does it exist?" and "write it" for
+/// another process to slip into. Byte encoding/BOM/line-ending work stays here in
+/// the codec, and the encoded bytes are identical to what `write_file` produces
+/// for the same request.
+///
+/// Parent directories are never created, exactly like `write_file`, so a missing
+/// ancestor is an `io_write` failure.
+///
+/// Residual risk: if the create succeeds but `write_all` fails (a full disk, for
+/// example) the newly created file is left on disk with partial content. That
+/// matches `write_file`'s behaviour for the same failure, the caller keeps its
+/// in-memory buffer, and deliberately deleting a file Sorakada just created is
+/// the more destructive choice — so the file is deliberately not unlinked here.
+pub fn create_file_if_absent(request: &WriteRequest) -> Result<(), FileCommandError> {
+    let bytes = encode(&request.text, &request.bom, &request.line_ending);
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&request.path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                FileCommandError::new(
+                    CODE_ALREADY_EXISTS,
+                    format!(
+                        "File '{}' already exists and was not overwritten.",
+                        request.path
+                    ),
+                )
+            } else {
+                FileCommandError::new(
+                    CODE_IO_WRITE,
+                    format!("Failed to write '{}': {error}", request.path),
+                )
+            }
+        })?;
+
+    file.write_all(&bytes).map_err(|error| {
+        FileCommandError::new(
+            CODE_IO_WRITE,
+            format!("Failed to write '{}': {error}", request.path),
+        )
+    })
+}
+
 /// Counts CRLF and bare-LF line endings and derives the format metadata.
 ///
 /// A `\r` that is not immediately followed by `\n` is rejected.
@@ -288,6 +339,16 @@ mod tests {
         let mut path = std::env::temp_dir();
         path.push(format!("sorakada-codec-{}-{name}", std::process::id()));
         path
+    }
+
+    /// Plain LF, no-BOM request used by the create-if-absent cases.
+    fn request_for(path: &std::path::Path, text: &str) -> WriteRequest {
+        WriteRequest {
+            path: path.to_string_lossy().to_string(),
+            text: text.to_string(),
+            bom: Bom::None,
+            line_ending: OutputLineEnding::Lf,
+        }
     }
 
     #[test]
@@ -646,6 +707,165 @@ mod tests {
         let error = decode_file(&path.to_string_lossy()).expect_err("missing file must fail");
         assert_eq!(error.code, CODE_IO_READ);
         assert!(!error.message.is_empty());
+    }
+
+    #[test]
+    fn create_file_if_absent_reports_io_write_for_invalid_destination() {
+        let mut path = temp_path("create-nested");
+        path.push("missing-directory");
+        path.push("file.txt");
+
+        let request = request_for(&path, "a\n");
+
+        let error = create_file_if_absent(&request).expect_err("invalid destination must fail");
+        assert_eq!(error.code, CODE_IO_WRITE);
+        assert!(!error.message.is_empty());
+
+        // Exactly like `write_file`, the missing ancestor is never created.
+        assert!(
+            !path.parent().expect("parent").exists(),
+            "the create path must not make missing parent directories"
+        );
+    }
+
+    #[test]
+    fn create_file_if_absent_writes_the_same_bytes_as_write_file() {
+        let created = temp_path("create-identical.txt");
+        let reference = temp_path("create-identical-reference.txt");
+        let _ = std::fs::remove_file(&created);
+        let _ = std::fs::remove_file(&reference);
+
+        // UTF-8 BOM + CRLF, the case where a duplicated encoder would drift.
+        let text = "alpha\nbeta\ngamma";
+
+        let create_request = WriteRequest {
+            path: created.to_string_lossy().to_string(),
+            text: text.to_string(),
+            bom: Bom::Utf8,
+            line_ending: OutputLineEnding::Crlf,
+        };
+        create_file_if_absent(&create_request).expect("create should succeed");
+
+        let write_request = WriteRequest {
+            path: reference.to_string_lossy().to_string(),
+            ..create_request
+        };
+        write_file(&write_request).expect("write should succeed");
+
+        let created_bytes = std::fs::read(&created).expect("read created file");
+        assert_eq!(
+            created_bytes,
+            std::fs::read(&reference).expect("read reference file"),
+            "create_file_if_absent must produce write_file's exact bytes"
+        );
+        assert_eq!(
+            created_bytes,
+            encode(text, &Bom::Utf8, &OutputLineEnding::Crlf)
+        );
+        assert_eq!(&created_bytes[..3], &[0xEF, 0xBB, 0xBF]);
+
+        let _ = std::fs::remove_file(&created);
+        let _ = std::fs::remove_file(&reference);
+    }
+
+    #[test]
+    fn create_file_if_absent_never_replaces_an_existing_file() {
+        let path = temp_path("create-existing.txt");
+        let original: &[u8] = b"original content\n";
+        std::fs::write(&path, original).expect("seed fixture");
+
+        let request = request_for(&path, "replacement content\n");
+        let error =
+            create_file_if_absent(&request).expect_err("an existing file must not be replaced");
+
+        assert_eq!(error.code, CODE_ALREADY_EXISTS);
+        assert!(!error.message.is_empty());
+        assert!(
+            error.message.contains(&request.path),
+            "message must name the path: {}",
+            error.message
+        );
+        assert!(
+            error.message.to_lowercase().contains("already exists"),
+            "message must state the file already exists: {}",
+            error.message
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read back"),
+            original.to_vec(),
+            "the original bytes must be untouched"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn create_file_if_absent_refuses_an_existing_empty_file() {
+        let path = temp_path("create-existing-empty.txt");
+        std::fs::write(&path, b"").expect("seed empty fixture");
+
+        // A length check would call this "absent" and clobber it; `create_new`
+        // does not care about the size.
+        let request = request_for(&path, "no longer empty\n");
+        let error =
+            create_file_if_absent(&request).expect_err("an existing empty file must be refused");
+
+        assert_eq!(error.code, CODE_ALREADY_EXISTS);
+        assert_eq!(
+            std::fs::read(&path).expect("read back"),
+            Vec::<u8>::new(),
+            "the empty file must stay empty"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn create_file_if_absent_preserves_unicode_and_trailing_whitespace_bytes() {
+        let path = temp_path("create-unicode.txt");
+        let _ = std::fs::remove_file(&path);
+
+        // Trailing space and no final newline: nothing may be trimmed or added.
+        let text = "keep   \nno final newline ✓ 漢字  ";
+        let request = request_for(&path, text);
+
+        create_file_if_absent(&request).expect("create should succeed");
+        assert_eq!(
+            std::fs::read(&path).expect("read back"),
+            text.as_bytes().to_vec()
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn create_file_if_absent_refuses_a_directory_target() {
+        let path = temp_path("create-directory-target");
+        let _ = std::fs::remove_file(&path);
+        std::fs::create_dir_all(&path).expect("create directory fixture");
+
+        let request = request_for(&path, "must never land\n");
+        let error =
+            create_file_if_absent(&request).expect_err("a directory target must be refused");
+
+        // Windows refuses the open with ERROR_ACCESS_DENIED before `create_new`'s
+        // existence check can report ERROR_FILE_EXISTS, so the directory case
+        // arrives as `io_write` here and as `already_exists` elsewhere. Both are
+        // contract codes and neither writes a byte, which is the real guarantee.
+        assert!(
+            error.code == CODE_ALREADY_EXISTS || error.code == CODE_IO_WRITE,
+            "unexpected code for a directory target: {}",
+            error.code
+        );
+        assert!(!error.message.is_empty());
+        assert!(path.is_dir(), "the directory must still exist");
+        assert_eq!(
+            std::fs::read_dir(&path).expect("list directory").count(),
+            0,
+            "nothing may be written in place of the directory"
+        );
+
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]

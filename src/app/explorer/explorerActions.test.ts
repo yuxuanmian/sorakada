@@ -423,6 +423,8 @@ function session(path: string, dirty: boolean, id = `doc-${leafName(path)}`): Do
     editorState: EditorState.create({ doc: "" }),
     viewState: { scrollTop: 0, scrollLeft: 0 },
     latestSaveGeneration: 0,
+    externalState: "normal",
+    bindingGeneration: 0,
   };
 }
 
