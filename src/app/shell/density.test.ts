@@ -85,6 +85,23 @@ describe("density tokens", () => {
     expect(DENSITY_METRICS.comfortable.treeRowHeight).toBe(28);
   });
 
+  /*
+   * 008 Visual Polish: the island gap is a *new* metric rather than a 007 value,
+   * so it is asserted on its own instead of joining the frozen non-Tree set
+   * below. `DENSITY_CSS_VARIABLES` already pins the CSS half.
+   */
+  it("freezes the island gap at 6/8/10 and scales it with density", () => {
+    expect(DENSITY_METRICS.compact.islandGap).toBe(6);
+    expect(DENSITY_METRICS.default.islandGap).toBe(8);
+    expect(DENSITY_METRICS.comfortable.islandGap).toBe(10);
+    expect(DENSITY_METRICS.compact.islandGap).toBeLessThan(
+      DENSITY_METRICS.default.islandGap,
+    );
+    expect(DENSITY_METRICS.default.islandGap).toBeLessThan(
+      DENSITY_METRICS.comfortable.islandGap,
+    );
+  });
+
   it("leaves every non-Tree metric at its 007 value (008 FR-040)", () => {
     expect(DENSITY_METRICS.compact).toMatchObject({
       treeIndent: 12,

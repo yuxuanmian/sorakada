@@ -14,13 +14,38 @@
 /* TopBar (T042, T053)                                                        */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * The TopBar is window chrome, not an island, and it is deliberately the lightest
+ * possible band: its surface is the translucent `--chrome-surface-top`, so the
+ * canvas shows through it and the bar reads as an overlay on the work area rather
+ * than as a separate dark strip. What gives it presence is the ambient light.
+ *
+ * It carries no separator line: the islands' own rim borders are the work area's
+ * boundary, and a full-width line across the chrome would only compete with them.
+ *
+ * Both ambient layers are anchored to the viewport top-left so they are the same
+ * field the canvas below continues, and the halo layer is sized to the bar's own
+ * height so it is already zero on the bottom edge — which is what keeps the light
+ * from appearing cut off there.
+ *
+ * The neutral `--chrome-sheen` layer on top gives the surface its sense of light
+ * passing through it. It is deliberately not purple, and it too fades to nothing
+ * within the bar.
+ */
 .top-bar {
   display: flex;
   flex: 0 0 var(--topbar-height);
   align-items: stretch;
   min-width: 0;
-  border-bottom: 1px solid var(--color-border);
-  background-color: var(--color-bg-raised);
+  background-color: var(--chrome-surface-top);
+  background-image:
+    linear-gradient(to bottom, var(--chrome-sheen), transparent),
+    var(--chrome-ambient);
+  background-repeat: no-repeat;
+  background-size:
+    100% 100%,
+    100% var(--ambient-height),
+    100% var(--topbar-height);
   user-select: none;
 }
 
@@ -117,22 +142,54 @@
 }
 
 /* ------------------------------------------------------------------------- */
-/* MainArea: Sidebar next to the Editor Workspace                             */
+/* MainArea: the island canvas, Sidebar and Editor Workspace                  */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * The canvas. It is painted here rather than on `body` so exactly the inset
+ * around the work area and the gap between the islands reveal it: the two work
+ * regions are islands on a slightly darker field, not columns cut apart by a
+ * full-height divider (008 Visual Polish).
+ *
+ * The top inset is the smaller `--island-inset-top`, so the islands tuck in under
+ * the unseparated chrome while still keeping a real gap below it.
+ *
+ * The ambient band is the same viewport-anchored field the TopBar draws, shifted
+ * up by the TopBar's height so the two line up exactly: on the seam the TopBar's
+ * extra halo layer is already zero and the sheen has faded out, so both sides show
+ * the identical radial and there is nothing to see as a cut. The radial reaches
+ * zero at `--ambient-height`, so nothing lower is tinted. The islands are opaque on
+ * top of it, which is what keeps the Editor a near-solid plane and the Explorer a
+ * neutral surface.
+ *
+ * The inset also means `clientWidth` — which `AppShell` feeds to
+ * `renderSidebarWidth` — includes it, which is why `MAIN_AREA_CHROME_WIDTH`
+ * accounts for the island chrome.
+ */
 .app__main-area {
   display: flex;
   flex: 1 1 auto;
   align-items: stretch;
+  gap: var(--island-gap);
   min-width: 0;
   min-height: 0;
+  padding: var(--island-inset-top) var(--island-inset) var(--island-inset);
   overflow: hidden;
+  background-color: var(--surface-canvas);
+  background-image: var(--ambient-radial);
+  background-repeat: no-repeat;
+  background-size: 100% var(--ambient-height);
+  background-position: 0 calc(-1 * var(--topbar-height));
 }
 
 /*
- * 008 T029: the Sidebar consumes the semantic surface token instead of the raw
- * raised colour, so its slight material impression stays a central decision.
- * No Sidebar geometry, resizer or content change belongs to 008.
+ * The Sidebar island.
+ *
+ * The hard right divider is gone: the gap plus one weak rim border is what
+ * separates it from the Editor now. It deliberately does *not* clip its overflow,
+ * because the resize strip is positioned across the gap outside this box and
+ * `overflow: hidden` here would make the handle unhittable; `.sidebar__content`
+ * clips its own content to the rounded shape instead.
  */
 .sidebar {
   position: relative;
@@ -140,7 +197,8 @@
   flex: 0 0 auto;
   flex-direction: column;
   min-height: 0;
-  border-right: 1px solid var(--color-border);
+  border: 1px solid var(--border-island);
+  border-radius: var(--radius-island);
   background-color: var(--surface-sidebar);
 }
 
@@ -150,27 +208,47 @@
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  border-radius: inherit;
 }
 
+/*
+ * The drag strip spans the island gap, so the target is the whole space between
+ * the two islands instead of half of a 4px splitter. Absolute positioning is
+ * relative to the padding box, so the gap begins after the 1px rim border — the
+ * strip covers that border plus the gap, and never overlaps the Editor island.
+ * The visible indicator stays `--sidebar-resizer-width` wide and is centred in
+ * the strip, so the hover affordance looks the same as it always did.
+ */
 .sidebar__resizer {
   position: absolute;
   top: 0;
-  right: calc(var(--sidebar-resizer-width) / -2);
+  right: calc(-1px - var(--island-gap));
   z-index: var(--layer-transient);
-  width: var(--sidebar-resizer-width);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(var(--island-gap) + 1px);
   height: 100%;
   cursor: col-resize;
 }
 
-.sidebar__resizer:hover,
-.sidebar__resizer--active {
+.sidebar__resizer::before {
+  content: "";
+  width: var(--sidebar-resizer-width);
+  height: 100%;
+  background-color: transparent;
+}
+
+.sidebar__resizer:hover::before,
+.sidebar__resizer--active::before {
   background-color: var(--color-focus-ring);
 }
 
 /*
- * The Editor Workspace keeps the frozen minimum width from `layoutMetrics.ts`
- * (the same 320 logical pixels), so a Sidebar clamp that went wrong could never
- * paint over the editor (FR-083, SC-005).
+ * The Editor Workspace island: TabStrip and EditorHost are one surface, never
+ * two cards. It keeps the frozen minimum width from `layoutMetrics.ts` (the same
+ * 320 logical pixels), so a Sidebar clamp that went wrong could never paint over
+ * the editor (FR-083, SC-005).
  */
 .editor-workspace {
   position: relative;
@@ -179,6 +257,10 @@
   flex-direction: column;
   min-width: var(--min-editor-width);
   min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-island);
+  border-radius: var(--radius-island);
+  background-color: var(--surface-editor);
 }
 
 /* One editor group: its Tab strip above its host (FR-002). */
@@ -213,8 +295,8 @@
   gap: var(--space-2);
   min-width: 0;
   padding: 0 var(--space-2);
-  border-top: 1px solid var(--color-border);
-  background-color: var(--color-bg-raised);
+  border-top: 1px solid var(--chrome-border);
+  background-color: var(--chrome-surface);
   color: var(--color-text-muted);
   font-size: 11px;
   user-select: none;

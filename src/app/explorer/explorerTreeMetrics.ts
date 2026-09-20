@@ -64,6 +64,22 @@ export function rowIndent(depth: number, metrics: DensityMetrics): number {
 }
 
 /**
+ * The indent slots one row draws (008 Explorer guide polish).
+ *
+ * The Tree renders one *purely vertical* guide per ancestor level and no
+ * horizontal connectors at all, so a slot needs no per-level variation: the count
+ * is the only thing the row can get wrong, and getting it wrong is what would
+ * misalign the chevron and label, because the slots and `rowIndent` have to
+ * describe the very same width.
+ *
+ * This is presentation only — it reads the row's depth and never influences
+ * expansion, selection or projection order.
+ */
+export function guideSlotCount(depth: number): number {
+  return Math.max(0, depth);
+}
+
+/**
  * Bounded overscan (plan §9).
  *
  * Mounting a few rows above and below the viewport keeps scrolling smooth; the

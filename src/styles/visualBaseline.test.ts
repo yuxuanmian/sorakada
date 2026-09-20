@@ -125,6 +125,24 @@ function bodyValue(body: string, property: string): string | undefined {
   return match === null ? undefined : normalizeValue(match[1]);
 }
 
+/**
+ * The opacity weight baked into one ambient token, as a 0..1 fraction.
+ *
+ * Reading it back from the stylesheet — rather than repeating the number in the
+ * assertion — is what makes the contrast guard below track a future retune: a
+ * heavier accent mix has to keep the chrome text legible or the audit fails.
+ */
+function ambientWeight(token: string): number {
+  const value = declaredValue(globalCss, token) ?? "";
+  const percent = /var\(--ambient-accent\)\s*(\d+)%/.exec(value)?.[1];
+  expect(percent, `${token} must be a low-opacity accent mix`).toBeDefined();
+  const weight = Number(percent) / 100;
+  expect(weight, token).toBeGreaterThan(0);
+  // A high weight is exactly the "saturated purple block" to avoid.
+  expect(weight, token).toBeLessThanOrEqual(0.2);
+  return weight;
+}
+
 /* ------------------------------------------------------------------------- */
 /* The frozen 008 baseline (plan.md §1..§2, §4)                               */
 /* ------------------------------------------------------------------------- */
@@ -170,7 +188,7 @@ const FROZEN_SURFACES: Readonly<Record<string, string>> = {
   "--surface-tree-selected":
     "color-mix(in srgb, var(--color-selection) 72%, var(--color-bg-raised))",
   "--color-tree-guide":
-    "color-mix(in srgb, var(--color-text-muted) 18%, transparent)",
+    "color-mix(in srgb, var(--color-text-muted) 13%, transparent)",
 };
 
 /** The exact first-pass scrollbar colours (T017). */
@@ -434,6 +452,20 @@ describe("the frozen palette stays legible and ordered (SC-001, SC-002)", () => 
     return parseHex(value!);
   };
 
+  /**
+   * The weight baked into one `color-mix` token, as a 0..1 fraction.
+   *
+   * Read back from the stylesheet rather than repeated here, so retuning a
+   * derived surface is automatically re-checked against every contrast
+   * assertion below instead of silently drifting past them.
+   */
+  const mixWeight = (name: string, source: string): number => {
+    const value = declaredValue(globalCss, name) ?? "";
+    const percent = new RegExp(`var\\(${source}\\)\\s*(\\d+)%`).exec(value)?.[1];
+    expect(percent, `${name} must mix ${source}`).toBeDefined();
+    return Number(percent) / 100;
+  };
+
   const editorBase = token("--color-bg");
   const raised = token("--color-bg-raised");
   const text = token("--color-text");
@@ -451,7 +483,11 @@ describe("the frozen palette stays legible and ordered (SC-001, SC-002)", () => 
   const currentLine = composite(lineActive, 0.72, editorBase);
   const treeSelected = mix(selection, raised, 0.72);
   const treeHover = composite(text, 0.05, sidebar);
-  const guideOverBase = composite(muted, 0.18, editorBase);
+  const guideOverBase = composite(
+    muted,
+    mixWeight("--color-tree-guide", "--color-text-muted"),
+    editorBase,
+  );
 
   it("keeps the Editor a softened plane and its text a softened near-white", () => {
     // FR-003/FR-004: no pure black plane, no pure white reading colour — and
@@ -468,7 +504,9 @@ describe("the frozen palette stays legible and ordered (SC-001, SC-002)", () => 
       ["sidebar", sidebar],
       ["tab strip", tabStrip],
       ["tab", tab],
-      ["footer/topbar", raised],
+      // The TopBar is no longer the bare raised colour — the ambient-tinted case
+      // is asserted separately below.
+      ["footer", raised],
     ] as const) {
       expect(contrast(muted, surface), name).toBeGreaterThanOrEqual(4.5);
     }
@@ -526,6 +564,61 @@ describe("the frozen palette stays legible and ordered (SC-001, SC-002)", () => 
     }
   });
 
+  it("keeps the chrome foreground legible on the ambient-tinted TopBar", () => {
+    // The TopBar is a translucent wash over the canvas and the ambient lifts it
+    // further, so the surface the window chrome text actually sits on is neither
+    // the bare raised colour nor the bare canvas. Every input is read back from the
+    // stylesheet, so a heavier wash or a heavier accent has to stay legible here.
+    const accent = parseHex(declaredValue(globalCss, "--ambient-accent")!);
+    const canvas = parseHex(declaredValue(globalCss, "--color-canvas")!);
+    const sheenWeight =
+      Number(
+        /(\d+)%/.exec(declaredValue(globalCss, "--chrome-sheen") ?? "")?.[1],
+      ) / 100;
+
+    const barSurface = composite(
+      raised,
+      mixWeight("--chrome-surface-top", "--chrome-surface"),
+      canvas,
+    );
+    const ambientPeak = composite(
+      accent,
+      ambientWeight("--ambient-afterglow"),
+      composite(accent, ambientWeight("--ambient-peak"), barSurface),
+    );
+    const tinted = composite([255, 255, 255], sheenWeight, ambientPeak);
+
+    expect(contrast(muted, tinted)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(text, tinted)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("keeps the TopBar inside the canvas field rather than its own band", () => {
+    // The bar has to read as a light overlay on the work area, so it must be *no
+    // more separated from the canvas than the canvas already is from the Editor
+    // island*. Comparing against that existing ratio — rather than an arbitrary
+    // ceiling — is what makes "the TopBar belongs to the canvas" a checkable
+    // statement, and it is why both the wash and the neutral sheen have to stay
+    // low: on a surface this dark, a few percent of white alone would lift the bar
+    // back out of the field.
+    const canvas = parseHex(declaredValue(globalCss, "--color-canvas")!);
+    const editor = parseHex(declaredValue(globalCss, "--color-bg")!);
+    const sheenWeight =
+      Number(
+        /(\d+)%/.exec(declaredValue(globalCss, "--chrome-sheen") ?? "")?.[1],
+      ) / 100;
+
+    // Worst case: the wash over the canvas, with the sheen at full strength on the
+    // bar's top row.
+    const bar = composite(
+      raised,
+      mixWeight("--chrome-surface-top", "--chrome-surface"),
+      canvas,
+    );
+    const rendered = composite([255, 255, 255], sheenWeight, bar);
+
+    expect(contrast(rendered, canvas)).toBeLessThan(contrast(editor, canvas));
+  });
+
   it("orders inactive tab below hover below active", () => {
     const onStrip = (surface: Rgb): number => contrast(surface, tabStrip);
     expect(onStrip(tabHover)).toBeGreaterThan(onStrip(tab));
@@ -540,6 +633,20 @@ describe("the frozen palette stays legible and ordered (SC-001, SC-002)", () => 
     const guide = contrast(guideOverBase, editorBase);
     expect(guide).toBeGreaterThanOrEqual(1.15);
     expect(guide).toBeLessThan(contrast(muted, editorBase));
+  });
+
+  it("keeps the guides fainter than the strong state fills (guide polish)", () => {
+    // The guide has to stay subordinate to the selected/active fill — that is what
+    // makes it read as structure rather than as decoration. It must however stay
+    // *brighter* than the very weak hover tint, or hovering a row would erase the
+    // skeleton. Those two requirements only meet inside this window, so the values
+    // are pinned here instead of being left to taste.
+    const guide = contrast(guideOverBase, editorBase);
+    const selectedFill = contrast(treeSelected, editorBase);
+    const hoverFill = contrast(composite(text, 0.05, editorBase), editorBase);
+
+    expect(guide).toBeLessThan(selectedFill);
+    expect(guide).toBeGreaterThan(hoverFill);
   });
 });
 
@@ -642,9 +749,183 @@ describe("the 007 palette centralisation still holds (T022..T023, T127)", () => 
     expect(
       bodyValue(rulesFor(tabsCss, ".tab-strip")[0].body, "background-color"),
     ).toBe("var(--surface-tab-strip)");
-    expect(
-      bodyValue(rulesFor(tabsCss, ".tab-strip")[0].body, "border-bottom"),
-    ).toBe("1px solid var(--color-border)");
+  });
+
+  it("declares the island layout tokens centrally (Visual Polish)", () => {
+    expect(declaredValue(globalCss, "--color-canvas")).toBe("#121317");
+    expect(declaredValue(globalCss, "--surface-canvas")).toBe(
+      "var(--color-canvas)",
+    );
+    expect(declaredValue(globalCss, "--border-island")).toBe(
+      "color-mix(in srgb, var(--color-border) 70%, transparent)",
+    );
+    // The inset is an alias, not a second number: that is what keeps the window
+    // inset and the inter-island gap equal at every density.
+    expect(declaredValue(globalCss, "--island-inset")).toBe("var(--island-gap)");
+    // The top inset is deliberately smaller, but must stay a real gap so the
+    // islands are never flush against the unseparated chrome.
+    expect(declaredValue(globalCss, "--island-inset-top")).toBe(
+      "calc(var(--island-gap) / 2)",
+    );
+  });
+
+  it("keeps the canvas a light step below every work surface", () => {
+    // The canvas only ever shows as the inset and the gap, so it must read as a
+    // slightly deeper field — not as a second reading plane.
+    const canvas = parseHex(declaredValue(globalCss, "--color-canvas")!);
+    const darkestSurface = parseHex(declaredValue(globalCss, "--color-bg")!);
+    expect(luminance(canvas)).toBeLessThan(luminance(darkestSurface));
+    expect(contrast(canvas, darkestSurface)).toBeLessThan(1.25);
+  });
+
+  it("draws the two work regions as islands on that canvas", () => {
+    const mainArea = rulesFor(shellCss, ".app__main-area")[0].body;
+    expect(bodyValue(mainArea, "background-color")).toBe("var(--surface-canvas)");
+    // Smaller on top, uniform elsewhere: the islands tuck under the chrome.
+    expect(bodyValue(mainArea, "padding")).toBe(
+      "var(--island-inset-top) var(--island-inset) var(--island-inset)",
+    );
+    expect(bodyValue(mainArea, "gap")).toBe("var(--island-gap)");
+
+    for (const selector of [".sidebar", ".editor-workspace"] as const) {
+      const body = rulesFor(shellCss, selector)[0].body;
+      expect(bodyValue(body, "border"), selector).toBe(
+        "1px solid var(--border-island)",
+      );
+      expect(bodyValue(body, "border-radius"), selector).toBe(
+        "var(--radius-island)",
+      );
+    }
+
+    // The full-height divider the gap replaced must be gone.
+    expect(rulesFor(shellCss, ".sidebar")[0].body).not.toContain("border-right");
+  });
+
+  it("leaves the chrome unseparated so the islands' borders are the boundary", () => {
+    // A full-width line across the TopBar both competed with the islands' rim
+    // borders and cut the ambient light's vertical continuity.
+    const topBar = rulesFor(shellCss, ".top-bar")[0].body;
+    expect(topBar).not.toContain("border");
+    // The bar's surface is the translucent overlay token, not an opaque band, so the
+    // canvas carries most of its colour and the ambient supplies the presence.
+    expect(bodyValue(topBar, "background-color")).toBe(
+      "var(--chrome-surface-top)",
+    );
+    // The Footer keeps its own opaque surface and separator; it is the only
+    // `--chrome-border` use left.
+    const footer = rulesFor(shellCss, ".footer-bar")[0].body;
+    expect(bodyValue(footer, "background-color")).toBe("var(--chrome-surface)");
+    expect(bodyValue(footer, "border-top")).toBe(
+      "1px solid var(--chrome-border)",
+    );
+  });
+
+  it("keeps TabStrip and EditorHost one island surface (Visual Polish)", () => {    // The strip is the top band of the Editor island. A hard divider there would
+    // split one work surface into two stacked cards, which is exactly what the
+    // island layout exists to avoid.
+    expect(rulesFor(tabsCss, ".tab-strip")[0].body).not.toContain("border-bottom");
+
+    const workspace = rulesFor(shellCss, ".editor-workspace")[0].body;
+    expect(bodyValue(workspace, "background-color")).toBe(
+      "var(--surface-editor)",
+    );
+  });
+
+  it("builds the top chrome ambient from one shared low-opacity definition", () => {
+    // One accent, only ever used through low-opacity mixes: presence has to come
+    // from area and gradient length, not from saturation.
+    expect(declaredValue(globalCss, "--ambient-accent")).toBe("#9b75e8");
+    expect(declaredValue(globalCss, "--ambient-height")).toBe("128px");
+    expect(ambientWeight("--ambient-peak")).toBeGreaterThanOrEqual(
+      ambientWeight("--ambient-plateau"),
+    );
+    expect(ambientWeight("--ambient-plateau")).toBeGreaterThan(
+      ambientWeight("--ambient-mid"),
+    );
+    expect(ambientWeight("--ambient-mid")).toBeGreaterThanOrEqual(
+      ambientWeight("--ambient-afterglow"),
+    );
+
+    // A flat, wide ellipse whose centre sits right of the window corner, so the
+    // bright area is a plateau across the bar rather than a spot in the corner.
+    const radial = declaredValue(globalCss, "--ambient-radial") ?? "";
+    expect(radial).toContain("46% var(--ambient-height) at 12% 0%");
+    // The plateau holds the bright mid-tone out to about 30% of the width and the
+    // weak stop carries it to about 45%, before the final stop reaches zero at
+    // roughly 58% — about three quarters of the reach of the first pass.
+    expect(radial).toContain("var(--ambient-plateau) 40%");
+    expect(radial).toContain("var(--ambient-mid) 68%");
+    expect(radial).toContain("transparent 100%");
+
+    // The TopBar's extra layer is a second ellipse, not a linear wash: it is sized
+    // to the bar's own band so it is already zero on the seam, which is what keeps
+    // the light from ending in a visible cut once the separator is gone.
+    const halo = declaredValue(globalCss, "--ambient-halo") ?? "";
+    expect(halo).toContain("46% 100% at 12% 0%");
+    expect(halo).toContain("var(--ambient-afterglow)");
+    expect(halo).toContain("transparent 100%");
+
+    expect(declaredValue(globalCss, "--chrome-ambient")).toBe(
+      "var(--ambient-radial), var(--ambient-halo)",
+    );
+
+    // The TopBar's "lit glass" cue must stay neutral: it may not smuggle in a
+    // second, stronger shot of the accent.
+    const sheen = declaredValue(globalCss, "--chrome-sheen") ?? "";
+    expect(sheen).toMatch(/^rgb\(255 255 255 \/ \d+%\)$/);
+    expect(Number(/(\d+)%/.exec(sheen)?.[1])).toBeLessThanOrEqual(6);
+  });
+
+  it("puts the ambient behind the work islands, never on them", () => {
+    // The TopBar takes the neutral sheen plus both ambient layers, anchored to
+    // the same viewport field the canvas below continues; the canvas takes the
+    // radial alone, and the radial reaches zero at `--ambient-height`, so nothing
+    // lower is tinted.
+    const topBar = rulesFor(shellCss, ".top-bar")[0].body;
+    expect(bodyValue(topBar, "background-image")).toBe(
+      "linear-gradient(to bottom, var(--chrome-sheen), transparent), var(--chrome-ambient)",
+    );
+    expect(bodyValue(topBar, "background-size")).toBe(
+      "100% 100%, 100% var(--ambient-height), 100% var(--topbar-height)",
+    );
+
+    const mainArea = rulesFor(shellCss, ".app__main-area")[0].body;
+    expect(bodyValue(mainArea, "background-image")).toBe("var(--ambient-radial)");
+    expect(bodyValue(mainArea, "background-size")).toBe(
+      "100% var(--ambient-height)",
+    );
+    // Shifted by the TopBar's height so the two bands line up across the seam.
+    expect(bodyValue(mainArea, "background-position")).toBe(
+      "0 calc(-1 * var(--topbar-height))",
+    );
+
+    // The islands stay opaque planes, so the Editor is never dyed and the
+    // Explorer cannot become a purple-black theme.
+    for (const selector of [".sidebar", ".editor-workspace"] as const) {
+      const body = rulesFor(shellCss, selector)[0].body;
+      expect(body, selector).not.toContain("background-image");
+      expect(bodyValue(body, "background-color"), selector).not.toContain(
+        "ambient",
+      );
+    }
+  });
+
+  it("adds no glow, blur or coloured shadow to the ambient chrome", () => {
+    for (const selector of [
+      ".top-bar",
+      ".app__main-area",
+      ".footer-bar",
+    ] as const) {
+      const body = rulesFor(shellCss, selector)[0].body;
+      for (const banned of [
+        "filter",
+        "backdrop-filter",
+        "box-shadow",
+        "text-shadow",
+      ] as const) {
+        expect(body, `${selector} declares ${banned}`).not.toContain(banned);
+      }
+    }
   });
 });
 
@@ -790,14 +1071,50 @@ describe("Explorer feedback is depth-independent (T080..T081)", () => {
     ).toBe("var(--surface-tree-selected)");
   });
 
-  it("keeps one-pixel guides on the tree-guide token", () => {
+  it("draws one purely vertical guide per ancestor level", () => {
     const guide = rulesFor(explorerCss, ".explorer-row__guide::before")[0].body;
     expect(bodyValue(guide, "width")).toBe("1px");
+    // Full height, so the rows of one subtree tile into a single unbroken line.
+    expect(bodyValue(guide, "top")).toBe("0");
+    expect(bodyValue(guide, "bottom")).toBe("0");
     expect(bodyValue(guide, "background-color")).toBe("var(--color-tree-guide)");
+  });
 
-    const elbow = rulesFor(explorerCss, ".explorer-row__guide--elbow::after")[0].body;
-    expect(bodyValue(elbow, "height")).toBe("1px");
-    expect(bodyValue(elbow, "background-color")).toBe("var(--color-tree-guide)");
+  it("keeps every guide vertical: no connectors and no per-level ending", () => {
+    // The design is one straight line per ancestor level. A horizontal `::after`
+    // stub, a half-height stop or a hidden level would each bring back the
+    // elbow/broken-line look this pass removes, so their absence is the contract.
+    const selectors = parseRules(explorerCss).flatMap((rule) => rule.selectors);
+    for (const banned of ["--gap", "--stop", "--stub", "--elbow", "--branch"]) {
+      expect(
+        selectors.filter((selector) => selector.includes(banned)),
+        `${banned} must not exist`,
+      ).toEqual([]);
+    }
+
+    // No second pseudo-element on a guide, and none on the chevron either.
+    expect(
+      selectors.filter(
+        (selector) =>
+          selector.includes("explorer-row__guide") &&
+          selector.includes("::after"),
+      ),
+    ).toEqual([]);
+    expect(
+      selectors.filter(
+        (selector) =>
+          selector.includes("explorer-row__chevron") &&
+          selector.includes("::after"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps the guides above the hover and selection fills", () => {
+    // The line must pass through a hovered or selected row rather than being
+    // painted over by it: the slots are positioned row children.
+    expect(
+      bodyValue(rulesFor(explorerCss, ".explorer-row > *")[0].body, "position"),
+    ).toBe("relative");
   });
 
   it("keeps the inline editor a visible control at the row-relative height", () => {

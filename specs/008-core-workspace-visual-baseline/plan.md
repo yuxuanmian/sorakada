@@ -161,7 +161,7 @@ Add semantic derived variables in `global.css`; components consume these instead
 --highlight-tab: rgb(255 255 255 / 5%);
 --surface-tree-hover: color-mix(in srgb, var(--color-text) 5%, transparent);
 --surface-tree-selected: color-mix(in srgb, var(--color-selection) 72%, var(--color-bg-raised));
---color-tree-guide: color-mix(in srgb, var(--color-text-muted) 18%, transparent);
+--color-tree-guide: color-mix(in srgb, var(--color-text-muted) 13%, transparent);
 --scrollbar-thumb: rgb(174 179 186 / 28%);
 --scrollbar-thumb-hover: rgb(174 179 186 / 45%);
 --scrollbar-thumb-active: rgb(174 179 186 / 62%);

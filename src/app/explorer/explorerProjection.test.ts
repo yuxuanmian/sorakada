@@ -370,8 +370,7 @@ describe("ancestor guide metadata", () => {
     expect(byKey.get("C:\\work\\second")?.ancestorContinuation).toEqual([false]);
   });
 
-  it("carries deep paths correctly and works for symlink rows", () => {
-    const rows = flattenVisibleExplorerRows(deepState());
+  it("carries deep paths correctly and works for symlink rows", () => {    const rows = flattenVisibleExplorerRows(deepState());
     const deep = rows.find(
       (row) => row.kind === "node" && row.path.endsWith("inner\\x.ts"),
     );
@@ -394,6 +393,32 @@ describe("ancestor guide metadata", () => {
     const linkRow = flattenVisibleExplorerRows(state)[1];
     expect(linkRow).toMatchObject({ kind: "node", depth: 1 });
     expect(linkRow.ancestorContinuation).toEqual([false]);
+  });
+
+  /*
+   * The Tree's guides are one full-height vertical line per ancestor level rather
+   * than per-row elbows, so a line is broken only where the flat order returns to
+   * a shallower row. That is what ends a line after a directory's last visible
+   * descendant — and it is a property of the depth-first order, not of the guide
+   * code, which is exactly why it is pinned here.
+   */
+  it("keeps every subtree contiguous, which is what ends a guide line", () => {
+    const rows = flattenVisibleExplorerRows(deepState());
+    expect(rows.length).toBeGreaterThan(5);
+
+    rows.forEach((row, index) => {
+      let cursor = index + 1;
+      while (cursor < rows.length && rows[cursor].depth > row.depth) {
+        cursor += 1;
+      }
+      const next = rows[cursor];
+      if (next !== undefined) {
+        expect(
+          next.depth,
+          `the rows below ${row.key} must be its own subtree`,
+        ).toBeLessThanOrEqual(row.depth);
+      }
+    });
   });
 });
 

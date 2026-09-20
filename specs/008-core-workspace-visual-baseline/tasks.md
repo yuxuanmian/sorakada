@@ -346,7 +346,7 @@ isolation (9) — still passes untouched.
 | Group | Tokens (exact implemented values) |
 |---|---|
 | Palette | `--color-bg:#1b1c1f`, `--color-bg-raised:#22242a`, `--color-border:#343740`, `--color-text:#e3e5e8`, `--color-text-muted:#aeb3ba`, `--color-text-subtle:#747a83`, `--color-line-active:#292c33`, `--color-selection:#3a4555`, `--color-selection-text:#eef1f4`, `--color-accent:#4a8cff`, `--color-caret:#82aaff`, `--color-hover:#272a30`, `--color-active:#30343c`, `--color-focus-ring:#4f83c5`, `--color-danger:#b0403a` |
-| Surfaces | `--surface-editor:var(--color-bg)`, `--surface-sidebar` 94% raised→transparent, `--surface-tab-strip` 88% raised→base, `--surface-tab` 78% raised→base, `--surface-tab-hover` 94% tab→6% text, `--surface-tab-active` 89% tab→11% text, `--border-tab` 84% border→transparent, `--border-tab-hover` 92% border→8% text, `--border-tab-active` 58% accent→border, `--highlight-tab:rgb(255 255 255 / 5%)`, `--surface-tree-hover` 5% text→transparent, `--surface-tree-selected` 72% selection→raised, `--color-tree-guide` 18% muted→transparent |
+| Surfaces | `--surface-editor:var(--color-bg)`, `--surface-sidebar` 94% raised→transparent, `--surface-tab-strip` 88% raised→base, `--surface-tab` 78% raised→base, `--surface-tab-hover` 94% tab→6% text, `--surface-tab-active` 89% tab→11% text, `--border-tab` 84% border→transparent, `--border-tab-hover` 92% border→8% text, `--border-tab-active` 58% accent→border, `--highlight-tab:rgb(255 255 255 / 5%)`, `--surface-tree-hover` 5% text→transparent, `--surface-tree-selected` 72% selection→raised, `--color-tree-guide` 13% muted→transparent |
 | Scrollbar | `--scrollbar-thumb:rgb(174 179 186 / 28%)`, `--scrollbar-thumb-hover:rgb(174 179 186 / 45%)`, `--scrollbar-thumb-active:rgb(174 179 186 / 62%)` |
 | Editor/typography | `--font-editor:"JetBrains Mono","Sarasa Mono SC","Noto Sans Mono CJK SC","Microsoft YaHei UI",ui-monospace,monospace`, `--font-size-editor:14px`, `--editor-line-height:1.52`, `--editor-padding-block:10px`, `--editor-line-padding-inline:8px`; `--font-ui` and `--font-mono` unchanged |
 | Motion | `--motion-fast:120ms` (chrome background/border/colour only) |
@@ -416,7 +416,7 @@ binary exists anywhere in `src`. No `transform`, `filter`, `blur`, `backdrop-fil
 | FR-035, FR-036 | Dirty/external marker DOM and semantics untouched; `.tab__close` stays 18×18 with a paint-only hover |
 | FR-037, FR-038 | `.tab-strip__actions` remains an untouched sibling of the scrolling viewport; `TabStrip.tsx`/`tabLayout.ts`/`TabOverview.tsx` unchanged |
 | FR-039, FR-040 | Tree row height 20/24/28 only; every other density metric pinned at its 007 value |
-| FR-041, FR-047 | 1px guides on `--color-tree-guide`, measured visible (1.43:1) but below the label hierarchy |
+| FR-041, FR-047 | 1px guides on `--color-tree-guide`, measured visible but below the label hierarchy (1.29:1 at the 13% value set by the guide-polish pass) |
 | FR-042..FR-046 | `.explorer-row::before` with `top/bottom:1px` and identical `left/right: calc(var(--tree-indent) / 2 + 1px)` at every depth, `--radius-md`, `pointer-events:none`, no depth term; hover/selected on the layer only; the row box is transparent |
 | FR-048..FR-050 | `IconDrawMode` + `drawMode` on `IconDescriptor` (default stroke); the four generic primaries request `fill`; `link` badge stays stroke; `AppIcon` renders `fill="currentColor"` with a hairline current-colour edge |
 | FR-051 | `.explorer-inline-input` keeps `calc(var(--tree-row-height) - 4px)`, gains `--surface-editor`, `--radius-md` and the 1px `--color-focus-ring` border; no transition added |
@@ -494,3 +494,322 @@ not duplicated here; they stay pending maintainer review.
 - [X] T155 Keep the filled generic filesystem glyphs individually identifiable. In fill mode `other` currently renders identically to `file`, because its distinguishing mark `M6.5 9.5h3` is a collinear zero-area path and the minimal 0.5px stroke shares the fill colour, so the "stays distinguishable at row size" property documented in `glyphs.ts` is lost and the `file` dog-ear stops reading. Adjust only the `file`, `folder`, `folder-open` and `other` path artwork in `src/app/icons/glyphs.ts` so the filled form keeps a visible mark, preserving the 16×16 viewBox, `currentColor`, safe fallback semantics and every UI action glyph unchanged; extend `src/app/icons/icons.test.ts` so a zero-area fill-mode mark fails. Do not expand the icon vocabulary or add per-extension mappings per FR-048, FR-049, plan §12, T101 (partial)
 - [X] T156 Give the fixed New/Overview controls the small-radius hover language the plan requires. `.tab-strip__action` currently hovers `var(--color-hover)` with no `border-radius`, unlike `.tab__close` (`tabs.css`) and `.explorer__action` (`explorer.css`). Apply the same tokenized small-radius hover surface while keeping the fixed measured action width and the full-strip-height hit geometry, confirm the control still reads as a control rather than a fake framed document Tab, and confirm the overflow-state strip height does not turn it into a pill. Do not wrap New/Overview in permanent Tab frames or move them into the scrolling viewport per plan §8, FR-037, T071 (partial)
 - [X] T157 Remove the ineffective fill transition on the Tab decorative frame. `.tab::before` transitions `background-color`, but the visible fill is the `background-image` gradient whose bottom stop is opaque `--surface-tab`, so the hover/active fill change snaps while only `border-color` animates. Either make the property that visibly changes the animated one or drop the dead declaration, keeping the transition at `var(--motion-fast)`, confined to background/border/opacity, and never animating Tab/Tree geometry, position or the scrollbar lane per plan §15, FR-009, T076 (partial)
+
+## Phase 10: Island Layout (008 Visual Polish)
+
+A direct maintainer checklist layered on top of the 008 baseline: the work area
+becomes light islands on a slightly deeper canvas instead of continuous columns
+cut by full-height dividers. Presentation only — no behaviour, resize, virtualizer,
+Tab-overflow, document, Explorer-controller or WorkContext change, and no new
+dependency, state owner or window material.
+
+Tokens: `--color-canvas` `#121317`, `--surface-canvas`, `--border-island`
+(`color-mix(in srgb, var(--color-border) 70%, transparent)`) and `--island-inset`
+(an alias of the density-owned `--island-gap`, so the window inset and the
+inter-island gap can never disagree). `--island-gap` is a **new** density metric
+at 6/8/10 for Compact/Default/Comfortable, pinned on both sides by
+`density.test.ts` / `DENSITY_CSS_VARIABLES`.
+
+- [X] T158 Add the canvas/island semantic tokens to the central layer (`global.css`), with the canvas a light step below the darkest work surface (FR-006)
+- [X] T159 Give the AppShell MainArea one uniform inset plus the inter-island gap, revealing the canvas (FR-010)
+- [X] T160 Make the Sidebar an independent island: weak rim border, small radius, one surface, no full-height right divider
+- [X] T161 Make the EditorWorkspace an independent island on `--surface-editor`, keeping its frozen 320px minimum
+- [X] T162 Keep TabStrip and EditorHost one continuous island surface — no second card, no divider between them (T056..T057)
+- [X] T163 Remove the hard separators the island layout makes unnecessary: the Sidebar right border and the `.tab-strip` bottom border
+- [X] T164 Keep the Sidebar resizer easy to hit: the strip now spans the whole gap (gap + 1px rim, never overlapping the Editor island), with the visible indicator still `--sidebar-resizer-width` wide
+- [X] T165 Confirm no layout anomaly at the 640×400 minimum: measured Editor island 362/356/350px at Compact/Default/Comfortable, all ≥ the 320px minimum, with no clipping or overlap. `MAIN_AREA_CHROME_WIDTH` was corrected from the 4px splitter to `3 × widest island gap` (30) because the inset now counts toward the measured MainArea — the clamp *logic* is unchanged, but without this the Editor would be clipped at the extreme drag limit
+- [X] T166 Confirm all three densities: `--island-gap`/`--island-inset` measure 6/8/10 and the inset is uniform on every side at 1200×780 and 640×400
+- [ ] T167 Confirm the 100-Tab fixture is unchanged — pending a real Tauri/WebView2 session: the fixture needs 100 real documents, and `uiDebugState` exposes no fixture toggle (only Tree row bounds / virtual range). Structurally, `tabLayout.ts`, `TabStrip.tsx` and every Tab density metric are untouched; the strip viewport is simply narrower by the island chrome
+- [ ] T168 Confirm the 10,000-row Tree fixture is unchanged — pending a real Tauri/WebView2 session for the same reason. `treeRowHeight` stays 20/24/28 (pinned), the virtualizer is untouched, and only the viewport box shrinks by the chrome
+- [X] T169 `npm run typecheck` — pass (0)
+- [X] T170 `npm run test` — pass, 52 files / 1193 tests
+- [X] T171 `npm run build` — pass
+- [X] T172 `cargo test` (from `src-tauri`) — pass, 145 tests
+- [ ] T173 Manual screenshot acceptance — browser-level evidence already captured and handed over (real built app at 1200×780 and 640×400, all three densities; gap/inset pixels verified as `#121317` canvas, Sidebar `#212329`, Editor plane `#1b1c1f`, TopBar/Footer `#22242a`). Final WebView2 aesthetic sign-off remains with the maintainer
+
+### Island layout evidence (measured in the built app)
+
+| Check | Result |
+|---|---|
+| Inset = gap = 6/8/10 (Compact/Default/Comfortable) | measured on all four sides at both window sizes |
+| Editor island width at 640×400 | 362 / 356 / 350 px — every density ≥ 320 |
+| Island radius / border | 5px (`--radius-md`) / 1px `--border-island` on both islands |
+| TabStrip ↔ EditorHost | `.tab-strip` bottom border **0px** — one continuous surface |
+| Sidebar right divider | replaced by the gap plus the weak rim border |
+| Resizer | spans gap + 1px rim, centred within 0.5px of the gap centre, never overlaps the Editor island |
+| TopBar / Footer | full viewport width (1200 / 640) — the Footer deliberately stays a full-width band rather than becoming an island, preserving its structural semantics |
+| Rendered pixels | canvas/insets `#121317`, Sidebar `#212329`, TabStrip `#212329`, Editor plane `#1b1c1f`, TopBar/Footer `#22242a` |
+
+Explicitly *not* changed: `TabStrip.tsx`, `tabLayout.ts`, `ExplorerVirtualTree.tsx`,
+`ExplorerRow.tsx`, `DocumentManager`, `ExplorerController`, `WorkContext`, `src/ui/**`,
+the ContextMenu/Dialog/Tooltip surfaces, `src-tauri/**` and the dependency set. The
+Explorer header rule and the TopBar/Footer window-chrome borders were left in place
+because they are internal content/chrome separators, not inter-island dividers.
+
+## Phase 11: Island Layout & Top Chrome Ambient (008 Visual Polish, second pass)
+
+Adds the environment light on top of Phase 10. Scope guards for this pass: CSS/tokens/
+presentation only — no behaviour, dependency, state owner, Settings, Theme Engine,
+Mica/Acrylic or Tauri transparency change, and no Dialog / ContextMenu / Tooltip /
+Footer-function / Search / syntax-highlighting redesign. The whole pass is tokens plus
+seven stylesheet rules; no new element and no new stacking layer was needed.
+
+- [X] T174 Respect the scope guards: the diff touches `global.css`, `shell.css` and the audits only — no component, model, controller, dependency or `src-tauri/**` change
+- [X] T175 Establish the canvas / island / chrome / border / ambient-accent semantics centrally: `--surface-canvas`, `--border-island`, `--radius-island`, `--island-inset`, `--chrome-surface`, `--chrome-border`, `--chrome-sheen`, `--ambient-accent`, `--ambient-height`, `--ambient-peak`/`-plateau`/`-mid`/`-afterglow`, `--ambient-radial`, `--ambient-linear`, `--chrome-ambient`. No component declares a new literal
+- [X] T176 Make the App's bottom layer a stable Dark canvas (`--color-canvas` `#121317`), a step below every work surface, so the island gaps read as background space
+- [X] T177 Give the MainArea the island layout with one uniform gap between Sidebar and EditorWorkspace (Phase 10 T159..T162)
+- [X] T178 Drive the gap from the shared density token: 6/8/10 for Compact/Default/Comfortable (Phase 10 T158)
+- [X] T179 Keep the outer inset from breaking the 640×400 minimum — measured Editor island 362/356/350px, all ≥ 320 (Phase 10 T165)
+- [X] T180 Sidebar as an independent island: small radius, weak rim border, light surface contrast, no card shadow (Phase 10 T160)
+- [X] T181 EditorWorkspace as an independent island (Phase 10 T161)
+- [X] T182 Keep TabStrip + EditorHost one Editor island surface — no gap, no second radius, no border between them (Phase 10 T162)
+- [X] T183 Remove the dividers the islands replace, and make `--chrome-border` translucent so the ambient crosses the TopBar seam instead of being cut by an opaque line
+- [X] T184 Leave the Explorer selected/hover geometry untouched: no indent or hit-area redesign
+- [X] T185 Keep a reliable Sidebar resizer hit area inside the gap — the strip spans the gap (+ rim) and never overlaps the Editor island
+- [X] T186 Build **one** Top Chrome Ambient definition used as canvas/chrome environment light, never a purple background per component
+- [X] T187 Use the cool accent (`#9b75e8`) only through low-opacity mixes — 12% peak / 5% mid / 3% afterglow, never a saturated block
+- [X] T188 Concentrate the light in the top-left TopBar rather than washing the whole bar evenly
+- [X] T189 Horizontal falloff reaches zero at ~67% of the viewport width (measured; spec allows 60–70%)
+- [X] T190 Vertical falloff returns to the plain canvas by ~135px (measured; spec allows 100–140px)
+- [X] T191 Use the recommended two-layer construction: radial owns the top-left light, linear only lengthens the TopBar afterglow. The canvas takes the radial alone, because a horizontally-uniform layer in a fixed-height band would end in a hard step
+- [X] T192 Take the ambient's presence from area and gradient length, not from saturation
+- [X] T193 TopBar takes the strongest ambient; the canvas below continues the same field
+- [X] T194 TabBar stays clearly weaker than the TopBar — the Editor island is opaque, so the strip is neutral and the light stops at the island edge by construction
+- [X] T195 Editor body stays a stable, near-solid surface with no ambient tint
+- [X] T196 Explorer body gets no ambient tint (the allowed upper bound is "very slight"), so it cannot become a purple-black theme
+- [X] T197 Return the right-hand window controls to neutral Dark — measured `#22242a` across x=1080..1199
+- [X] T198 Add no neon glow, outer glow, large blur or coloured shadow — verified: no `filter`/`backdrop-filter`/`box-shadow`/`blur` in any stylesheet
+- [X] T199 Keep the Active Tab's own frame/border logic and the Tab small-radius framed language; the gradient does not replace state distinction
+- [X] T200 Check the TopBar → TabBar → Editor vertical transition: measured continuous across the seam at all three densities (peak `#332f45` at y=0 in every density; boundary exactly at 30/34/38px) with no purple end line
+- [X] T201 Check the Sidebar → gap → Editor hierarchy: the gap is lit canvas, not a thick black border
+- [X] T202 Check the scrollbars: vertical and horizontal thumbs sit inside the island viewport, inset from the island's outer edge; the rounded corner cuts only transparent track (verified at 3× against the real stylesheet)
+- [X] T203 Check the horizontal Tree scrollbar: the extent calculation is untouched (`explorerTreeMetrics` unchanged); only the viewport box shrank by the island chrome
+- [X] T204 Check all three densities, not just Default: the ambient geometry is identical in every preset (viewport-anchored), and only the TopBar height shifts the seam
+- [ ] T205 Verify the 100-Tab fixture — pending a real Tauri/WebView2 session (needs 100 real documents; no fixture toggle exists in `uiDebugState`). Structurally `tabLayout.ts`, `TabStrip.tsx` and all Tab density metrics are untouched
+- [ ] T206 Verify the 10,000-row Explorer fixture — pending a real Tauri/WebView2 session for the same reason. `treeRowHeight` stays 20/24/28 and the virtualizer is untouched
+- [X] T207 Check empty/composition states: zero-Workspace + zero-Tab and the document-only (Sidebar hidden) layout were rendered and leave no stray shell or orphan gap. Workspace-only still needs a real session
+- [X] T208 Check the narrow window: at 640×400 the inset/gap keep the structure stable with no Sidebar/Editor overlap
+- [X] T209 Introduce no `!important`, dependency-internal selector, component-local palette literal or new raw `z-index` — verified by grep and by the existing `cssContract` / `visualBaseline` audits
+- [X] T210 `npm run typecheck` — pass (0)
+- [X] T211 `npm run test` — pass, 52 files / 1197 tests
+- [X] T212 `npm run build` — pass
+- [X] T213 `cargo test` (from `src-tauri`) — pass, 145 tests
+- [ ] T214 Final real-Tauri Dark UI manual acceptance and screenshots. Browser-level evidence is captured (real built app, 1200×780 and 640×400, three densities, sidebar-hidden composition, 3× scrollbar probe); the "有氛围但不明显是一块紫色 / 纵向收得够快 / Editor 仍安静" judgement is the maintainer's
+
+### Ambient tuning levers (for the maintainer pass)
+
+Adjust in this order, per the checklist: if the purple reads too strong, lower the
+mixes on `--ambient-peak`/`--ambient-plateau`/`--ambient-mid`/`--ambient-afterglow`;
+if it reads too weak, lengthen the horizontal falloff or widen the radial's
+percentages — do **not** raise saturation. If the result feels too "card-like",
+reduce `--border-island` / `--radius-island` before touching `--island-gap`.
+
+The brightness guard is now derived, not hard-coded: `visualBaseline.test.ts` reads
+the accent weights back out of `global.css` and composites them (plus
+`--chrome-sheen`) over the chrome surface, then asserts muted chrome text still
+clears 4.5:1. Raising the ambient past what the TopBar text can carry therefore
+fails the audit instead of shipping.
+
+**Reshaped profile (second ambient pass).** The radial became a flatter, wider
+ellipse centred at 12% with a four-stop profile, so the bright mid-tone is a
+*plateau* rather than a corner hot-spot, and the linear afterglow now peaks at the
+same 12% instead of at the window corner. `--ambient-height` dropped 140 → 128px and
+the TopBar gained the neutral `--chrome-sheen` for its lit-glass read. A follow-up
+trim shortened the horizontal reach to about three quarters (`46%` semi-axis,
+linear to `55%`) because the first shape read as stretched; the bright region was
+deliberately left untouched and only the tail was pulled in.
+
+Measured at Default 1200×780 (B−R is the purple indicator; the neutral chrome
+surface is `#22242a`, B−R = 8):
+
+| Axis | Measurement |
+|---|---|
+| TopBar peak at 12% | `#3e3853`, B−R = 21 — the brightest point sits just right of the corner (0% measures 18) |
+| TopBar bright plateau 10–30% | 20 → 19 |
+| TopBar weak afterglow 35–50% | 16 → 11 |
+| TopBar converged from ~60% | 7–8 — fully neutral, window controls included |
+| Vertical at left edge | y=34 → 14, y=70 → 11, y=90 → 9, y=110 → 6, y≥124 → 5 (plain canvas); unchanged by the horizontal trim |
+| Work islands | no tint — Sidebar `#212329` and Editor `#1b1c1f` are identical to the pre-ambient values |
+
+## Phase 12: Explorer Tree Guide Polish
+
+Direct maintainer checklist. Presentation only: interaction, expand/collapse,
+selection, virtualization and the projection's data semantics are untouched —
+`flattenVisibleExplorerRows` and the `ancestorContinuation` flags are unchanged, and
+the only logic edited is the *class* derivation for a guide slot, which now reads that
+existing flag instead of ignoring it.
+
+The regression this pass fixes: the deepest indent slot was elbowed unconditionally,
+so a level's line was cut at every row's middle. The skeleton rendered as a dashed
+line with a gap beside every chevron. The line now stops only where the level
+genuinely ends — at the last sibling — so consecutive rows tile into one hairline.
+
+- [X] T215 Only guide visuals and in-row structure changed; no interaction, expansion, selection, virtualization or model semantics touched
+- [X] T216 A level's line is one continuous hairline: every slot that still has siblings below it spans the full row height, so consecutive rows tile seamlessly instead of breaking beside each chevron
+- [X] T217 The chevron no longer substitutes for the line — an expanded node that really has child rows carries a short segment from the chevron down to the row's bottom, where its first child resumes the same column
+- [X] T218 The deepest slot always pulls a short horizontal connector out to the chevron/icon/label — a `├` while siblings follow, a `└` at the last one
+- [X] T219 A level with siblings below keeps its line running through the row
+- [X] T220 Only the last sibling stops a line, at exactly the row's middle (measured `bottom: 12px` of a 24px row)
+- [X] T221 An expanded directory's children share the parent-level skeleton rather than showing broken segments
+- [X] T222 Guides stay one hairline (1px) in the dedicated low-contrast token, with no glow, gradient or active-scope emphasis
+- [X] T223 Guide intensity is now clearly weaker than the selected/active fill while still stronger than the hover tint, so hover cannot erase the skeleton — **frozen token changed `--color-tree-guide` 18% → 13% with maintainer sign-off**, with `plan.md` §2 synced. Measured 1.29:1 guide, 1.53:1 selected fill, 1.13:1 hover tint
+- [X] T224 Hover/selected fills do not erase the structure: guides are positioned children of the row, so they paint above the feedback layer and stay readable over both states
+- [X] T225 Island layout, row heights, indent scale and the unified-width hover/selection surface are untouched
+- [X] T226 Deep, many-sibling and mixed expand/collapse shapes verified against the real projection: continuing rows carry no `stop`, last siblings carry it, and levels that ended above carry `gap`
+- [X] T227 Last node, single-child chain, empty directory and file nodes verified. An expanded-but-empty directory no longer dangles a segment (no `--branch`), and a single-child chain collapses to `gap` levels
+- [ ] T228 10,000-row fixture — pending a real Tauri/WebView2 session. Nothing in the virtualization path changed (CSS plus a class derivation; `treeRowHeight` and the virtualizer untouched), and the audit pins that guides add no layout, but the mounted-row bound and scroll behaviour need real eyes
+- [X] T229 `npm run typecheck` — pass (0)
+- [X] T230 `npm run test` — pass, 52 files / 1205 tests
+- [X] T231 `npm run build` — pass
+- [X] T232 `cargo test` (from `src-tauri`) — pass, 145 tests
+- [ ] T233 Manual acceptance in a real session: the goal is a Tree that reads as one continuous skeleton, not per-row chevrons with broken stubs
+
+### Guide geometry evidence (computed styles, Default density)
+
+Row height 24px, indent 14px, read back from the real stylesheet in headless Chromium:
+
+| Slot | `::before` | Meaning |
+|---|---|---|
+| plain / `--stub` with a following sibling | `top: 0; bottom: 0` | full-height line, tiles with the rows above and below |
+| `--stub --stop` (last sibling) | `top: 0; bottom: 12px` | stops at exactly the row's middle |
+| `--gap` (level ended above) | `display: none` | draws nothing at all |
+| deepest slot `::after` | `7px × 1px` | the horizontal connector, half the indent |
+| `--branch` chevron `::after` | `12px × 1px`, `pointer-events: none` | chevron-to-child segment; absent on an expanded empty directory, and it cannot widen the chevron's hit area |
+
+Real projection fixture (15 rows): `Button.tsx`/`Card.tsx` received `[plain, plain, stub]`
+— no `stop`, so their line continues through them — while `Modal.tsx` received
+`[plain, plain, stub+stop]`. Before this pass all three stopped at 50%.
+
+## Phase 13: Purely Vertical Guides (final guide design)
+
+Supersedes the connector design of Phase 12: the Tree now draws **only vertical
+lines**. There is no `├`/`└`, no horizontal stub, no half-height stop and no hidden
+level — which makes the rendering rule collapse to "one full-height line per
+ancestor level", and the row only has to get the *count* right.
+
+Why that is sufficient, and why no per-level flag is needed: slot `j` corresponds to
+the ancestor at depth `j`, and by construction **every** row of a subtree has that
+slot, while the row after a subtree is always shallower (the sibling directory's own
+row) and therefore has no slot in that column. So each expanded directory's guide
+covers exactly its visible subtree and stops by itself. That ordering property is a
+property of the depth-first projection, not of the guide code, so it is now pinned by
+its own test in `explorerProjection.test.ts`.
+
+- [X] T234 Each expanded directory corresponds to exactly one purely vertical guide
+- [X] T235 The guide extends downward from below the parent directory and covers its entire visible subtree
+- [X] T236 It ends naturally after that directory's last visible descendant — because the next row in the flat order is shallower and has no slot in that column
+- [X] T237 Several expanded levels produce several parallel vertical lines, one per ancestor depth (verified: `leaf.ts` at depth 4 draws four)
+- [X] T238 A collapsed directory produces no downward subtree guide (`docs`, `junction`: no rows below them belong to their subtree)
+- [X] T239 Ancestor guides pass through every descendant row and are cut by neither the chevron nor the icon: the slots are positioned row children painted above the hover/selection feedback, and every guide column sits left of the row's own chevron column
+- [X] T240 Still 1px in the low-contrast `--color-tree-guide` (13%), purely a hierarchy aid
+- [X] T241 All elbow geometry deleted: no `::after` stub, no `--stop`/`--gap`/`--stub`/`--elbow`/`--branch` selectors, and no `bottom: 50%` remains — asserted over the whole stylesheet
+- [X] T242 Row height, indent, interaction, virtualization and Tree data semantics untouched. `explorerProjection.ts` is not in the diff; `ancestorContinuation` is still produced and still pinned by its own tests, but the pure-vertical design no longer needs its values — only the slot *count*, which `guideSlotCount` now names
+
+### Vertical guide evidence (computed styles, Default density)
+
+Row height 24px, indent 14px, read back from the real stylesheet in headless Chromium:
+
+| Check | Result |
+|---|---|
+| Horizontal segments anywhere | **none** — `getComputedStyle(slot, "::after").content === "none"` for every slot, and no guide/chevron `::after` rule exists |
+| Slot count per row | exactly `depth` (0,1,2,3,3,3,2,2,1,1,2,3,4,1,1 across the 15-row fixture) |
+| Line geometry | `top: 0; bottom: 0; width: 1px` on every slot — full height, so rows tile |
+| Colour | `#aeb3ba` at 13% — fainter than the selected fill, brighter than the hover tint |
+
+`npm run typecheck` 0 · `npm run test` 52 files / 1203 tests · `npm run build` pass ·
+`cargo test` 145. Still pending a real session: the 10,000-row fixture (T228) and the
+visual sign-off (T233).
+
+## Phase 14: Unseparated Top Chrome, Tighter Top Inset
+
+Direct maintainer checklist. The TopBar loses its full-width separator, and the work
+area's inset above the islands becomes the smaller `--island-inset-top`
+(`calc(var(--island-gap) / 2)` → 3/4/5px for Compact/Default/Comfortable) so the
+islands tuck in under the chrome while still keeping a real gap.
+
+- [X] T243 Delete the TopBar's `border-bottom` / full-width separator
+- [X] T244 Shrink the MainArea's *top* inset so both islands move up; sides and bottom keep the uniform `--island-inset`
+- [X] T245 Keep a small gap between the chrome and the islands — the top inset is half the island gap, never zero
+- [X] T246 Explorer/Editor keep their own rim borders untouched, so they remain the primary boundary
+- [X] T247 The purple ambient shows no visible cut at the TopBar's bottom: the TopBar's extra layer was changed from a horizontally-uniform `linear-gradient` to `--ambient-halo`, a second ellipse sized to the bar's own height, so it is already zero on the seam. Both sides of the seam are then the identical radial
+- [X] T248 TopBar height, drag region and window controls unchanged — only the bar's `border-bottom` and its layer sizing were edited, and the sub-element rules are untouched in the diff
+- [X] T249 Top layout verified at 640×400, 1200×780 and 1600×900 in all three densities: no overlap, no misalignment, and no size-dependent branch, so a maximize/restore re-measure cannot shift the top band
+
+### Seam and top-layout evidence
+
+Row height of the chrome band unchanged, measured in headless Chromium against the
+built stylesheet:
+
+| Check | Result |
+|---|---|
+| TopBar height | 30 / 34 / 38px, unchanged |
+| TopBar `border-bottom-width` | **0px** |
+| Drag region / window-control height | 30 / 34 / 38px — they fill the bar, as before |
+| MainArea `padding-top` | 3 / 4 / 5px (half of the 6 / 8 / 10 island gap) |
+| Gap between TopBar and the islands | 3 / 4 / 5px — non-zero at every density |
+| Side/bottom inset and inter-island gap | 6 / 8 / 10px, unchanged |
+| Overlap at 640×400 / 1200×780 / 1600×900 | none, in all three densities |
+
+**Ambient continuity across the seam**, measured by solving the light's effective
+alpha from the blue channel on each side (the surfaces differ by design — chrome
+above, canvas below — so the alpha, not the raw pixel, is what has to match):
+
+| x | alpha above the seam | alpha below | difference |
+|---|---|---|---|
+| 150 | 0.1526 | 0.1483 | −0.0043 |
+| 300 | 0.1421 | 0.1388 | −0.0033 |
+| 500 | 0.0579 | 0.0526 | −0.0053 |
+| 600 | 0.0263 | 0.0239 | −0.0024 |
+| 700 and beyond | 0.0000 | 0.0000 | 0.0000 |
+
+The residual is at the 8-bit quantisation floor (one step in a 190-unit span is
+≈0.004), so the light field is equal on both sides of the seam: the purple is not
+cut. Removing a 1px border inside a fixed-height flex item cannot move the layout
+either — the islands' outer geometry is byte-identical to Phase 13 apart from the
+4px they gain on top.
+
+## Phase 15: TopBar as a Light Overlay
+
+Direct maintainer checklist. The TopBar stops being an opaque raised band and
+becomes a translucent wash over the canvas, leaving the purple ambient as the only
+thing that gives the top of the window its presence.
+
+- [X] T250 Weaken the TopBar's solid fill toward the canvas: `--chrome-surface-top` is now `color-mix(in srgb, var(--chrome-surface) 20%, transparent)`, so the canvas carries 80% of the bar's colour
+- [X] T251 It is expressed as a *translucent* wash rather than a second opaque colour, which is what makes it behave like an overlay layer — and it keeps following the canvas if that ever moves
+- [X] T252 The purple ambient stays the main source of atmosphere: it is untouched, and it is now the only thing separating the bar from the canvas
+- [X] T253 The transition into the Explorer/Editor islands is softer. Measured: the bar-to-canvas separation fell from `#22242a` (1.197:1) to `#18191d` (**1.057:1**), which is now *below* the canvas-to-Editor separation of 1.089:1
+- [X] T254 The neutral `--chrome-sheen` was halved (4% → 2%). This was forced by measurement, not taste: at 4% white, even a 15% wash keeps the bar at 1.126:1, because a few percent of white is what actually lifts a surface this dark out of the canvas field
+- [X] T255 The window chrome text gains contrast rather than losing it — measured 5.6:1 for `--color-text-muted` over the ambient-tinted bar, against 4.9:1 before
+- [X] T256 Nothing else moved: TopBar height, drag region, window controls, the removed separator, the top inset and the islands' geometry are unchanged from Phase 14
+
+### Overlay evidence
+
+The invariant is stated against an existing ratio instead of an arbitrary ceiling:
+the bar must be **no more separated from the canvas than the canvas already is from
+the Editor island**. Both inputs are read back from the stylesheet, so raising
+either the wash or the sheen fails the audit rather than quietly restoring the band.
+
+| Wash | Sheen | bar ↔ canvas | canvas ↔ Editor | Verdict |
+|---|---|---|---|---|
+| 30% | 4% | 1.1586 | 1.0895 | separate band |
+| 30% | 2% | 1.0988 | 1.0895 | separate band |
+| 20% | 4% | 1.1365 | 1.0895 | separate band |
+| **20%** | **2%** | **1.0794** | **1.0895** | **inside the canvas field** |
+| 15% | 2% | 1.0700 | 1.0895 | inside the canvas field |
+
+Rendered pixels at Default 1200×780 (no purple region, so this is the base surface):
+
+| Sample | Before this pass | After |
+|---|---|---|
+| TopBar base | `#22242a` | `#18191d` |
+| canvas | `#121317` | `#121317` |
+| TopBar vs canvas | 1.1967 | **1.0569** |
+| Purple at the peak (x=150, y=4) | `#36314a`, B−R 20 | `#312b45`, B−R 20 |
+| TopBar base purple (no ambient) | B−R 8 | B−R 5 |
+
+The purple is unchanged at the peak while the bar's own surface has become almost
+neutral, so the ambient's contribution is now 15 B−R points against a 5-point base —
+the atmosphere comes from the light rather than from the band.
+
+`npm run typecheck` 0 · `npm run test` 52 files / 1205 tests · `npm run build` pass ·
+`cargo test` 145.

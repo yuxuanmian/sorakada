@@ -59,6 +59,15 @@ export interface DensityMetrics {
   sidebarDefaultWidth: number;
   /** Shared spacing step. */
   gap: number;
+  /**
+   * The island layout gap, and therefore the work-area inset (008 Visual Polish).
+   *
+   * This is a *new* metric rather than a 007 value: it is the space the AppShell
+   * canvas shows between the Sidebar and EditorWorkspace islands and around the
+   * work area. `global.css` derives `--island-inset` from it, so one number per
+   * density keeps the inset and the gap in agreement.
+   */
+  islandGap: number;
 }
 
 /** The authoritative metric values, one record per preset. */
@@ -76,6 +85,7 @@ export const DENSITY_METRICS: Readonly<Record<UiDensity, DensityMetrics>> = {
     footerHeight: 20,
     sidebarDefaultWidth: 240,
     gap: 3,
+    islandGap: 6,
   },
   default: {
     treeRowHeight: 24,
@@ -90,6 +100,7 @@ export const DENSITY_METRICS: Readonly<Record<UiDensity, DensityMetrics>> = {
     footerHeight: 22,
     sidebarDefaultWidth: 260,
     gap: 4,
+    islandGap: 8,
   },
   comfortable: {
     treeRowHeight: 28,
@@ -104,6 +115,7 @@ export const DENSITY_METRICS: Readonly<Record<UiDensity, DensityMetrics>> = {
     footerHeight: 26,
     sidebarDefaultWidth: 300,
     gap: 6,
+    islandGap: 10,
   },
 };
 
@@ -123,6 +135,7 @@ export const DENSITY_CSS_VARIABLES: Readonly<
   footerHeight: "--footer-height",
   sidebarDefaultWidth: "--sidebar-default-width",
   gap: "--ui-gap",
+  islandGap: "--island-gap",
 };
 
 /** The resolved metrics for one preset. */

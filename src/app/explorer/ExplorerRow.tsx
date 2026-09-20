@@ -29,7 +29,7 @@ import type { InlineCommitResult } from "./explorerActions";
 import { EXPLORER_ROW_PATH_ATTRIBUTE } from "./explorerContextTarget";
 import type { ExplorerState, InlineEditState } from "./explorerModel";
 import type { VisibleExplorerRow } from "./explorerProjection";
-import { rowIndent } from "./explorerTreeMetrics";
+import { guideSlotCount, rowIndent } from "./explorerTreeMetrics";
 
 export interface ExplorerRowProps {
   /** The projection row to render. */
@@ -66,17 +66,16 @@ export function ExplorerRow(props: ExplorerRowProps) {
       style={{ width: `${rowIndent(row.depth, metrics)}px` }}
       aria-hidden="true"
     >
-      {row.ancestorContinuation.map((continues, level) => {
-        const last = level === row.ancestorContinuation.length - 1;
-        const classes = ["explorer-row__guide"];
-        if (!continues && !last) {
-          classes.push("explorer-row__guide--gap");
-        }
-        if (last) {
-          classes.push("explorer-row__guide--elbow");
-        }
-        return <span key={level} className={classes.join(" ")} />;
-      })}
+      {/*
+       * One purely vertical guide per ancestor level: a directory's guide sits in
+       * the column of its own depth, so it spans every row of its visible subtree
+       * and simply stops existing when the subtree does. The projection still
+       * exposes `ancestorContinuation` and its own tests still pin it, but a
+       * full-height line per level no longer needs the continuation value.
+       */}
+      {Array.from({ length: guideSlotCount(row.depth) }, (_, level) => (
+        <span key={level} className="explorer-row__guide" />
+      ))}
     </span>
   );
 

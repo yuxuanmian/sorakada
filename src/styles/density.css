@@ -17,6 +17,11 @@
  * 008 T025 moves exactly one metric: the Tree row height becomes 20/24/28 for
  * Compact/Default/Comfortable, so the Explorer reads slightly more spacious
  * without enlarging Tabs, menus, controls or the shell (008 FR-039, FR-040).
+ *
+ * The 008 Visual Polish pass adds one more metric: `--island-gap` (6/8/10), the
+ * inset around the work area and the gap between the Sidebar and EditorWorkspace
+ * islands. It is a *new* metric rather than a 007 value, and the Shell derives
+ * `--island-inset` from it so both distances stay equal at every density.
  */
 
 :root {
@@ -33,6 +38,7 @@
   --sidebar-default-width: 260px;
   --footer-height: 22px;
   --ui-gap: 4px;
+  --island-gap: 8px;
 }
 
 [data-density="compact"] {
@@ -48,6 +54,7 @@
   --sidebar-default-width: 240px;
   --footer-height: 20px;
   --ui-gap: 3px;
+  --island-gap: 6px;
 }
 
 [data-density="default"] {
@@ -63,6 +70,7 @@
   --sidebar-default-width: 260px;
   --footer-height: 22px;
   --ui-gap: 4px;
+  --island-gap: 8px;
 }
 
 [data-density="comfortable"] {
@@ -78,4 +86,5 @@
   --sidebar-default-width: 300px;
   --footer-height: 26px;
   --ui-gap: 6px;
+  --island-gap: 10px;
 }

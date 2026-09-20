@@ -16,12 +16,19 @@
  * no per-Tab colour (008 FR-001, FR-066).
  */
 
+/*
+ * The strip is the *top band of the Editor island*, not a separate card: it and
+ * the EditorHost are one continuous surface inside one rounded, weakly bordered
+ * box. The 008 hard `border-bottom` divider is therefore gone — the band's own
+ * slightly raised surface is what distinguishes it from the reading plane, which
+ * is the island layout's whole point. Splitting these two into separate islands
+ * would have broken the 007 one-EditorGroup reading (008 Visual Polish).
+ */
 .tab-strip {
   display: flex;
   flex: 0 0 auto;
   align-items: stretch;
   min-width: 0;
-  border-bottom: 1px solid var(--color-border);
   background-color: var(--surface-tab-strip);
   user-select: none;
 }

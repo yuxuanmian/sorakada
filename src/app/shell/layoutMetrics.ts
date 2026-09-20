@@ -5,13 +5,15 @@
  * the Sidebar on a large display. 007 replaces that ceiling with a bound derived
  * from the *current* MainArea width: the Sidebar may grow until only
  * {@link MIN_EDITOR_WIDTH} is left for the EditorWorkspace, minus the fixed
- * MainArea chrome the splitter occupies.
+ * MainArea chrome the splitter and the island layout occupy.
  *
  * This module is the single owner of those numbers, so the component, the drag
  * handling and the persisted preference all clamp against one definition. The
  * values are CSS logical pixels and are deliberately independent of any physical
  * display resolution (FR-082).
  */
+
+import { DENSITY_METRICS } from "./density";
 
 /** The usable Sidebar width range for one MainArea width. */
 export interface SidebarWidthBounds {
@@ -26,12 +28,27 @@ export const SIDEBAR_MIN_WIDTH = 160;
  * The EditorWorkspace minimum, frozen for 007.
  *
  * It is a layout boundary — "the Editor must keep this much room" — not a
- * display heuristic, and it is applied after the splitter's fixed width.
+ * display heuristic, and it is applied after the MainArea chrome below.
  */
 export const MIN_EDITOR_WIDTH = 320;
 
-/** Fixed MainArea chrome the Sidebar bound has to leave room for. */
-export const MAIN_AREA_CHROME_WIDTH = 4;
+/** The widest island gap any density preset declares. */
+const MAX_ISLAND_GAP = Math.max(
+  ...Object.values(DENSITY_METRICS).map((metrics) => metrics.islandGap),
+);
+
+/**
+ * Fixed MainArea chrome the Sidebar bound has to leave room for.
+ *
+ * The island layout reserves the work-area inset on both sides of the MainArea
+ * plus the gap between the Sidebar and EditorWorkspace islands. `--island-inset`
+ * is an alias of the density-owned `--island-gap`, so the chrome is three gaps
+ * wide; using the *widest* preset keeps the Editor minimum true at every density
+ * without making this pure bound density-aware. The bound is therefore
+ * conservative by up to two gaps at the densest preset, which can only ever
+ * leave the Editor too much room, never too little.
+ */
+export const MAIN_AREA_CHROME_WIDTH = MAX_ISLAND_GAP * 3;
 
 /**
  * Bounds a *stored* preference may hold.

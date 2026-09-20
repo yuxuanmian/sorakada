@@ -11,7 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import densityCss from "../../styles/density.css?raw";
 
-import { DENSITY_METRICS } from "../shell/density";
+import { DENSITY_METRICS, UI_DENSITIES } from "../shell/density";
 import { createTenThousandRowExplorerTree } from "../performance/treeFixtures";
 import {
   createApproximateLabelMeasurer,
@@ -25,6 +25,7 @@ import {
   TREE_AFFORDANCE_SLACK,
   activeDescendantFor,
   computeTreeHorizontalExtent,
+  guideSlotCount,
   minimumRowWidth,
   rowIndent,
   rowLabel,
@@ -100,6 +101,34 @@ describe("row geometry", () => {
     expect(rowIndent(3, DENSITY_METRICS.comfortable)).toBeGreaterThan(
       rowIndent(3, DENSITY_METRICS.compact),
     );
+  });
+
+  /*
+   * 008 Explorer guide polish. The design is one purely vertical line per ancestor
+   * level — no horizontal connector and no per-level ending — so the only thing
+   * the row can get wrong is how many slots it draws.
+   */
+  describe("guide slots", () => {
+    it("draws exactly one guide per ancestor level", () => {
+      for (const depth of [0, 1, 2, 5, 10]) {
+        expect(guideSlotCount(depth)).toBe(depth);
+      }
+      expect(guideSlotCount(-1)).toBe(0);
+    });
+
+    it("fills the row's indent exactly, at every density", () => {
+      // Slots and `rowIndent` have to describe the same width, or the chevron and
+      // label would drift away from the guide columns.
+      for (const density of UI_DENSITIES) {
+        const metrics = DENSITY_METRICS[density];
+        for (const depth of [0, 1, 3, 10]) {
+          expect(
+            guideSlotCount(depth) * metrics.treeIndent,
+            `${density} depth ${depth}`,
+          ).toBe(rowIndent(depth, metrics));
+        }
+      }
+    });
   });
 
   it("derives every affordance width from the density metrics", () => {

@@ -291,13 +291,29 @@
 }
 
 /* ------------------------------------------------------------------------- */
-/* Indent guides (T093)                                                       */
+/* Indent guides (T093, guide polish)                                         */
 /* ------------------------------------------------------------------------- */
 
 /*
  * Guides are slots inside one row, never nested ancestor containers: each slot is
- * one indent step wide and draws its own line, which keeps the Tree flat no
- * matter how deep a node is.
+ * one indent step wide and draws one purely *vertical* line. There is no
+ * horizontal connector and no per-level variation, and that is exactly what makes
+ * a whole branch read as one continuous skeleton:
+ *
+ * - a row draws one slot per ancestor level, so a directory's guide occupies the
+ *   column of its own depth and therefore covers every row of its visible subtree;
+ * - the line is full height, so consecutive descendant rows tile into one
+ *   unbroken line. No "stop at the last sibling" rule is needed: the flat,
+ *   depth-first order guarantees the row after a subtree is shallower — a sibling
+ *   directory's own row — which has no slot in that column at all, so the line
+ *   simply stops existing there;
+ * - a collapsed directory has no descendant rows, so its column never appears;
+ * - several expanded levels produce several parallel vertical lines, one per
+ *   ancestor depth.
+ *
+ * The line is a positioned child of the row, so it paints *above* the hover and
+ * selection feedback instead of being cut by it, and every guide column sits left
+ * of the row's own chevron column, so a chevron can never interrupt it either.
  */
 .explorer-row__indent {
   display: flex;
@@ -312,10 +328,9 @@
 }
 
 /*
- * 008 FR-041, FR-047: the guide stays a one-pixel structural aid. It is drawn in
- * the dedicated low-contrast tree-guide colour, which is deliberately weaker than
- * the muted label/icon hierarchy, so guides stay readable through hover and
- * selection feedback without ever becoming the dominant visual grid.
+ * 008 FR-041, FR-047: one pixel in the dedicated low-contrast tree-guide colour.
+ * It is measured to stay weaker than the selected/active fill and still brighter
+ * than the hover tint, so it reads as hierarchy and never as decoration.
  */
 .explorer-row__guide::before {
   content: "";
@@ -324,26 +339,6 @@
   bottom: 0;
   left: calc(var(--tree-indent) / 2);
   width: 1px;
-  background-color: var(--color-tree-guide);
-}
-
-/* An ancestor whose last child is above this row stops at its own level. */
-.explorer-row__guide--gap::before {
-  display: none;
-}
-
-/* The level immediately above the row ends with an elbow into the row. */
-.explorer-row__guide--elbow::before {
-  bottom: 50%;
-}
-
-.explorer-row__guide--elbow::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: calc(var(--tree-indent) / 2);
-  width: calc(var(--tree-indent) / 2);
-  height: 1px;
   background-color: var(--color-tree-guide);
 }
 

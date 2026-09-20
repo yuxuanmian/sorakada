@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 
 import globalCss from "../../styles/global.css?raw";
 
+import { DENSITY_METRICS, UI_DENSITIES } from "./density";
 import {
   MAIN_AREA_CHROME_WIDTH,
   MIN_EDITOR_WIDTH,
@@ -127,13 +128,45 @@ describe("global.css agrees with the layout metrics", () => {
     return Number(match![1]);
   }
 
+  function declaredValue(variable: string): string | undefined {
+    const match = globalCss.match(
+      new RegExp(`${variable}\\s*:\\s*([^;}]+)`),
+    );
+    return match === null ? undefined : match[1].trim().replace(/\s+/g, " ");
+  }
+
   it("freezes the same Editor minimum", () => {
     expect(declaredPixels("--min-editor-width")).toBe(MIN_EDITOR_WIDTH);
   });
 
-  it("freezes the same splitter width", () => {
-    expect(declaredPixels("--sidebar-resizer-width")).toBe(
-      MAIN_AREA_CHROME_WIDTH,
+  /**
+   * The island layout is what makes this arithmetic worth re-checking: it
+   * reserves the work-area inset on *both* sides of the MainArea plus the gap
+   * between the two islands, so the horizontal chrome grew from the 4px splitter
+   * to three gaps. `--island-inset` aliases the density-owned `--island-gap`,
+   * which is the coupling the bound's `× 3` depends on.
+   */
+  it("keeps the Editor minimum at every density despite the island chrome", () => {
+    expect(declaredValue("--island-inset")).toBe("var(--island-gap)");
+
+    const bounds = sidebarWidthBounds(MIN_WINDOW);
+    for (const density of UI_DENSITIES) {
+      const chrome = DENSITY_METRICS[density].islandGap * 3;
+      expect(
+        MIN_WINDOW - bounds.max - chrome,
+        `${density} keeps the Editor minimum`,
+      ).toBeGreaterThanOrEqual(MIN_EDITOR_WIDTH);
+    }
+  });
+
+  it("keeps the resizer indicator inside the narrowest island gap", () => {
+    // The hit strip is the gap itself; the token is only the visible indicator,
+    // so it must never be wider than the tightest preset's gap.
+    const narrowestGap = Math.min(
+      ...Object.values(DENSITY_METRICS).map((metrics) => metrics.islandGap),
+    );
+    expect(declaredPixels("--sidebar-resizer-width")).toBeLessThanOrEqual(
+      narrowestGap,
     );
   });
 });

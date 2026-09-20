@@ -31,6 +31,14 @@
   --color-selection-text: #eef1f4;
   --color-accent: #4a8cff;
   --color-caret: #82aaff;
+  /*
+   * The AppShell canvas (island layout).
+   *
+   * Deliberately a step darker than every work surface (`--color-bg` is the
+   * darkest of them), so it only ever shows as the inset/gap around the islands
+   * rather than as a region a user reads content against.
+   */
+  --color-canvas: #121317;
 
   /* Interaction states shared by every surface. */
   --color-hover: #272a30;
@@ -47,6 +55,113 @@
    * rather than three local palettes.
    */
   --surface-editor: var(--color-bg);
+
+  /*
+   * 008 Visual Polish: canvas, island and window-chrome semantics.
+   *
+   * The shell canvas is what the uniform inset and the inter-island gap reveal,
+   * and every island draws one weak rim border instead of the old hard divider,
+   * so the regions read as separate surfaces rather than as columns cut apart by
+   * a full-height line. `--island-inset` is an alias of the density-owned gap, so
+   * the inset around the window and the gap between islands always agree and only
+   * one number has to be tuned per density.
+   *
+   * `--chrome-*` name the two full-width window bands (TopBar and Footer) that
+   * frame the work area without being islands themselves.
+   */
+  --surface-canvas: var(--color-canvas);
+  --border-island: color-mix(in srgb, var(--color-border) 70%, transparent);
+  --radius-island: var(--radius-md);
+  --island-inset: var(--island-gap);
+  /*
+   * The work-area inset *above* the islands, which is deliberately smaller than
+   * the side/bottom one: the TopBar no longer draws a separator, so the islands
+   * sit closer under it and the chrome reads as one band with the panels tucked
+   * beneath it. It still leaves a real gap so nothing is flush against the chrome.
+   */
+  --island-inset-top: calc(var(--island-gap) / 2);
+  --chrome-surface: var(--color-bg-raised);
+  /*
+   * The TopBar's own surface, deliberately a *translucent* wash rather than an
+   * opaque band: it lets the canvas underneath carry most of the colour, so the
+   * bar reads as a light overlay on the work area instead of as a separate dark
+   * strip. The ambient gradient above it is what gives the band its presence.
+   *
+   * Keeping it translucent (rather than hard-coding a darker opaque colour) also
+   * means it keeps following the canvas if that ever moves, and it lifts the
+   * contrast of the window chrome text instead of reducing it.
+   */
+  --chrome-surface-top: color-mix(
+    in srgb,
+    var(--chrome-surface) 20%,
+    transparent
+  );
+  /*
+   * The Footer's separator, deliberately translucent. The TopBar has none: with a
+   * full-width line removed the ambient light above the islands is carried by the
+   * gradient alone, and the islands' own rim borders are what frame the work.
+   */
+  --chrome-border: color-mix(in srgb, var(--color-border) 60%, transparent);
+
+  /*
+   * Top chrome ambient light (008 Visual Polish).
+   *
+   * This is one shared *definition* of the environment light that sits behind the
+   * top chrome and the canvas — never a purple background set per component. Two
+   * layers on purpose: a radial that owns the top-left ambient shape, and a faint
+   * second ellipse that only strengthens the TopBar's own band.
+   *
+   * The shape is a deliberately flat, wide horizontal ellipse: its centre sits at
+   * 12% (the brightest point is just right of the window corner, not clipped into
+   * it), it holds a bright plateau across roughly 10–30% of the width, keeps a
+   * weak afterglow to about 45%, and reaches zero at ~58%. Vertically it is short
+   * — the band is 128px, so the light never reaches the work islands, which stay
+   * opaque on top of it. That asymmetry (a wide plateau, a fast vertical falloff)
+   * is what makes this read as ambient light rather than a purple block.
+   *
+   * Presence comes from area and gradient length, never from saturation: the
+   * accent is only ever used through low-opacity mixes.
+   */
+  --ambient-accent: #9b75e8;
+  --ambient-height: 128px;
+  --ambient-peak: color-mix(in srgb, var(--ambient-accent) 17%, transparent);
+  --ambient-plateau: color-mix(in srgb, var(--ambient-accent) 14%, transparent);
+  --ambient-mid: color-mix(in srgb, var(--ambient-accent) 6%, transparent);
+  --ambient-afterglow: color-mix(in srgb, var(--ambient-accent) 4%, transparent);
+  /*
+   * The TopBar's "lit glass" cue. Deliberately neutral — a touch of light on the
+   * surface, not more purple — and it fades out inside the band, so it adds no
+   * step at the seam with the canvas below. It is kept faint on purpose: on a
+   * surface this close to the canvas, even a few percent of white is what would
+   * lift the bar back out of the canvas field.
+   */
+  --chrome-sheen: rgb(255 255 255 / 2%);
+  --ambient-radial: radial-gradient(
+    46% var(--ambient-height) at 12% 0%,
+    var(--ambient-peak) 0%,
+    var(--ambient-plateau) 40%,
+    var(--ambient-mid) 68%,
+    transparent 100%
+  );
+  /*
+   * The TopBar's own extra glow: the same 12% peak as the radial, but in a very
+   * flat ellipse that is exactly as tall as the TopBar, so it reaches zero at the
+   * bar's bottom edge. That is what lets the bar be the strongest area without
+   * leaving a step at the seam — a horizontally-uniform `linear-gradient` there
+   * would still be at full strength on the boundary row and would read as a cut
+   * once the separator line is gone.
+   */
+  --ambient-halo: radial-gradient(
+    46% 100% at 12% 0%,
+    var(--ambient-afterglow) 0%,
+    transparent 100%
+  );
+  /*
+   * The TopBar takes both layers. The canvas below takes `--ambient-radial` alone,
+   * which is why the two meet seamlessly: on the boundary the halo is already
+   * zero, so both sides of the seam are the same field.
+   */
+  --chrome-ambient: var(--ambient-radial), var(--ambient-halo);
   --surface-sidebar: color-mix(in srgb, var(--color-bg-raised) 94%, transparent);
   --surface-tab-strip: color-mix(
     in srgb,
@@ -84,7 +199,7 @@
   );
   --color-tree-guide: color-mix(
     in srgb,
-    var(--color-text-muted) 18%,
+    var(--color-text-muted) 13%,
     transparent
   );
 
@@ -187,7 +302,14 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* The shell root: three stacked structural regions (TopBar/MainArea/Footer). */
+/*
+ * The shell root: three stacked structural regions (TopBar/MainArea/Footer).
+ *
+ * It carries the canvas because the ambient light behind the top chrome needs a
+ * stable Dark field that is darker than the work islands, and because the work
+ * area is inset from the window — so the canvas is the application's bottom
+ * layer rather than only the MainArea background.
+ */
 .app {
   display: flex;
   flex-direction: column;
@@ -195,6 +317,7 @@ body {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  background-color: var(--surface-canvas);
 }
 
 /* Shared glyph sizing; colours always come from `currentColor`. */
