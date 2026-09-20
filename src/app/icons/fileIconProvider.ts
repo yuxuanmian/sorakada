@@ -9,6 +9,11 @@
  * directories, a generic file glyph for files, a generic marked glyph for
  * "other" entries, and a link badge for symlinks/junctions. It never reads file
  * contents and never looks beyond the metadata it is handed (FR-060).
+ *
+ * 008 SR-004 adds one thing and nothing else: the four generic primary glyphs are
+ * requested in the filled draw mode (008 FR-048). No filename, extension or
+ * language branch appears here, and the `link` badge stays stroke-oriented
+ * (008 FR-049).
  */
 
 import { iconDescriptor, type FileIconId, type FileIconNode, type FileIconProvider, type FileIconResolution } from "./iconTypes";
@@ -20,6 +25,20 @@ export const FILE_ICON_FALLBACKS: readonly FileIconId[] = [
   "folder-open",
   "other",
   "link",
+];
+
+/**
+ * The generic primary glyphs 008 paints filled (008 FR-048, SR-004).
+ *
+ * The *resolution* is unchanged — the same five fallbacks, chosen by the same
+ * metadata — only the requested draw mode differs, and the choice stays here in
+ * the provider rather than in a Tree row.
+ */
+const FILLED_PRIMARY_ICONS: readonly FileIconId[] = [
+  "file",
+  "folder",
+  "folder-open",
+  "other",
 ];
 
 /** Resolves the primary glyph for one entry. */
@@ -44,13 +63,20 @@ function fallbackIconFor(node: FileIconNode): FileIconId {
  */
 export const defaultFileIconProvider: FileIconProvider = {
   resolve(node: FileIconNode): FileIconResolution {
-    const icon = iconDescriptor(fallbackIconFor(node));
+    const id = fallbackIconFor(node);
+    const icon = iconDescriptor(
+      id,
+      undefined,
+      FILLED_PRIMARY_ICONS.includes(id) ? "fill" : "stroke",
+    );
 
     if (!node.isSymlink) {
       return { icon };
     }
 
-    return { icon, badge: iconDescriptor("link", "Link") };
+    // 008 FR-048/FR-050: the badge stays stroke-oriented, so it remains legible
+    // on top of a filled primary glyph at 16px.
+    return { icon, badge: iconDescriptor("link", "Link", "stroke") };
   },
 };
 

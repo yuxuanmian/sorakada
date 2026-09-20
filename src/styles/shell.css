@@ -129,6 +129,11 @@
   overflow: hidden;
 }
 
+/*
+ * 008 T029: the Sidebar consumes the semantic surface token instead of the raw
+ * raised colour, so its slight material impression stays a central decision.
+ * No Sidebar geometry, resizer or content change belongs to 008.
+ */
 .sidebar {
   position: relative;
   display: flex;
@@ -136,7 +141,7 @@
   flex-direction: column;
   min-height: 0;
   border-right: 1px solid var(--color-border);
-  background-color: var(--color-bg-raised);
+  background-color: var(--surface-sidebar);
 }
 
 .sidebar__content {

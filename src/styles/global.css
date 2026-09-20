@@ -1,35 +1,103 @@
 /*
  * Global application tokens, reset and shared primitives.
  *
- * 007 keeps this file as the *single* central token layer: palette literals exist
- * here and nowhere else, and every component consumes semantic variables
- * (FR-017..FR-019). Structural metrics that change per density live in
- * `density.css`; typography deliberately does not (FR-081, FR-160).
+ * This file stays the *single* central token layer: palette literals exist here
+ * and nowhere else, and every component consumes semantic variables
+ * (FR-017..FR-019, 008 FR-006). Structural metrics that change per density live
+ * in `density.css`; typography deliberately does not (FR-081, FR-160).
  *
- * This is temporary/default styling only: 007 does not build a theme engine,
- * Light/Dark switcher or appearance system (FR-020).
+ * 008 freezes a first Dark workspace baseline here. It is one Dark palette, not
+ * a theme engine: there is still no Light palette, no theme selector, no theme
+ * storage key and no appearance preference (008 FR-001, FR-067).
  */
 
 :root {
   color-scheme: dark;
 
-  /* Palette — the only place a literal colour is declared. */
-  --color-bg: #16181d;
-  --color-bg-raised: #1c1f26;
-  --color-border: #2a2e37;
-  --color-text: #d7dae0;
-  --color-text-muted: #8b93a1;
-  --color-text-subtle: #5c6472;
-  --color-line-active: #1e222a;
-  --color-selection: #2b4a75;
-  --color-caret: #7cb0ff;
+  /* Palette — the only place a literal colour is declared (008 FR-003..FR-005). */
+  --color-bg: #1b1c1f;
+  --color-bg-raised: #22242a;
+  --color-border: #343740;
+  --color-text: #e3e5e8;
+  --color-text-muted: #aeb3ba;
+  --color-text-subtle: #747a83;
+  --color-line-active: #292c33;
+  --color-selection: #3a4555;
+  /*
+   * The selection foreground. 008 ships no syntax highlighting, so this token is
+   * the contract a later syntax layer consumes instead of leaving every token
+   * coloured inside a selection (008 FR-022).
+   */
+  --color-selection-text: #eef1f4;
+  --color-accent: #4a8cff;
+  --color-caret: #82aaff;
 
   /* Interaction states shared by every surface. */
-  --color-hover: #23262e;
-  --color-active: #2b303b;
-  --color-focus-ring: #3b6ea8;
+  --color-hover: #272a30;
+  --color-active: #30343c;
+  --color-focus-ring: #4f83c5;
   /* Destructive hover, used by the window Close control only. */
   --color-danger: #b0403a;
+
+  /*
+   * Derived surfaces (008 FR-002, plan §2).
+   *
+   * Editor, TabStrip and Explorer consume these instead of rebuilding a mix of
+   * their own, which is what keeps the three core regions one material family
+   * rather than three local palettes.
+   */
+  --surface-editor: var(--color-bg);
+  --surface-sidebar: color-mix(in srgb, var(--color-bg-raised) 94%, transparent);
+  --surface-tab-strip: color-mix(
+    in srgb,
+    var(--color-bg-raised) 88%,
+    var(--color-bg)
+  );
+  --surface-tab: color-mix(in srgb, var(--color-bg-raised) 78%, var(--color-bg));
+  --surface-tab-hover: color-mix(
+    in srgb,
+    var(--surface-tab) 94%,
+    var(--color-text) 6%
+  );
+  --surface-tab-active: color-mix(
+    in srgb,
+    var(--surface-tab) 89%,
+    var(--color-text) 11%
+  );
+  --border-tab: color-mix(in srgb, var(--color-border) 84%, transparent);
+  --border-tab-hover: color-mix(
+    in srgb,
+    var(--color-border) 92%,
+    var(--color-text) 8%
+  );
+  --border-tab-active: color-mix(
+    in srgb,
+    var(--color-accent) 58%,
+    var(--color-border)
+  );
+  --highlight-tab: rgb(255 255 255 / 5%);
+  --surface-tree-hover: color-mix(in srgb, var(--color-text) 5%, transparent);
+  --surface-tree-selected: color-mix(
+    in srgb,
+    var(--color-selection) 72%,
+    var(--color-bg-raised)
+  );
+  --color-tree-guide: color-mix(
+    in srgb,
+    var(--color-text-muted) 18%,
+    transparent
+  );
+
+  /*
+   * Scrollbar appearance (008 FR-055..FR-059).
+   *
+   * Only the colour is tokenized; the lane/thumb geometry is a fixed-lane
+   * contract declared next to each scroller, because the lane must never change
+   * with state.
+   */
+  --scrollbar-thumb: rgb(174 179 186 / 28%);
+  --scrollbar-thumb-hover: rgb(174 179 186 / 45%);
+  --scrollbar-thumb-active: rgb(174 179 186 / 62%);
 
   /*
    * Explicit stacking layers (FR-015, plan §20).
@@ -48,7 +116,23 @@
   --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
   --font-size-ui: 13px;
+
+  /*
+   * Editor appearance defaults (008 FR-011..FR-019, plan §4).
+   *
+   * These are application appearance defaults consumed through the existing
+   * CodeMirror appearance boundary — never document state, and never persisted
+   * (008 FR-013, FR-067). JetBrains Mono is preferred but is not bundled or
+   * downloaded; the stack falls through to CJK-capable system faces and finally
+   * to a generic monospace, so a missing font degrades instead of showing tofu
+   * (008 FR-012).
+   */
+  --font-editor: "JetBrains Mono", "Sarasa Mono SC", "Noto Sans Mono CJK SC",
+    "Microsoft YaHei UI", ui-monospace, monospace;
   --font-size-editor: 14px;
+  --editor-line-height: 1.52;
+  --editor-padding-block: 10px;
+  --editor-line-padding-inline: 8px;
 
   /* Layout */
   --sidebar-resizer-width: 4px;
@@ -66,6 +150,16 @@
   --space-3: 12px;
   --radius-sm: 3px;
   --radius-md: 5px;
+
+  /*
+   * Motion (008 FR-009, SC-002).
+   *
+   * One short baseline for chrome background/border/opacity states only. Editor
+   * text, caret, selection, Tab geometry, Tree rows, scrollbar lanes and
+   * virtualizer transforms are deliberately not animated, because usability must
+   * never depend on an animation completing.
+   */
+  --motion-fast: 120ms;
 
   /* Popup elevation, shared by every floating surface. */
   --shadow-popup: 0 6px 18px rgb(0 0 0 / 45%);

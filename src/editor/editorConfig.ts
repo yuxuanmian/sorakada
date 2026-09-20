@@ -10,29 +10,47 @@ import { EditorView } from "@codemirror/view";
 /**
  * Editor appearance.
  *
- * Colours are read from the CSS custom properties declared in
- * `styles/global.css`, so the palette can be replaced without touching the
- * editor configuration. CodeMirror owns this styling because it also needs the
- * values for layout measurements (gutter width, cursor position, wrapping).
+ * Colours and typography are read from the CSS custom properties declared in
+ * `styles/global.css`, so the palette and the Editor preset can be replaced
+ * without touching the editor configuration. CodeMirror owns this styling
+ * because it also needs the values for layout measurements (gutter width,
+ * cursor position, wrapping).
+ *
+ * 008 gives the Editor the quietest surface in the application: a near-opaque
+ * neutral plane, softened text, a tuned 14px/1.52 rhythm, a gutter that stays
+ * integrated with the reading plane, a restrained current line and a selection
+ * that visibly dominates it (008 FR-016..FR-024, SC-002, SC-003). The family,
+ * size, line height and padding remain application appearance defaults — they
+ * are deliberately not document fields, and the existing `appearanceCompartment`
+ * below is still the single seam a later Settings surface would reconfigure
+ * (008 FR-013, FR-014).
  */
 const editorTheme = EditorView.theme(
   {
     "&": {
       height: "100%",
-      backgroundColor: "var(--color-bg)",
+      backgroundColor: "var(--surface-editor)",
       color: "var(--color-text)",
       fontSize: "var(--font-size-editor)",
     },
     ".cm-scroller": {
-      fontFamily: "var(--font-mono)",
-      lineHeight: "1.6",
+      fontFamily: "var(--font-editor)",
+      lineHeight: "var(--editor-line-height)",
     },
     ".cm-content": {
-      padding: "8px 0",
+      padding: "var(--editor-padding-block) 0",
       caretColor: "var(--color-caret)",
     },
+    // Inline breathing room for the text itself, without wrapping the code in a
+    // fake card or container (008 FR-016).
+    ".cm-line": {
+      padding: "0 var(--editor-line-padding-inline)",
+    },
+    // The gutter shares the reading plane's surface: no hard divider, no column
+    // that reads as a separate panel, and no reserved space for gutter icons 008
+    // does not have (008 FR-017, FR-025).
     ".cm-gutters": {
-      backgroundColor: "var(--color-bg)",
+      backgroundColor: "var(--surface-editor)",
       color: "var(--color-text-subtle)",
       border: "none",
       paddingRight: "4px",
@@ -41,14 +59,16 @@ const editorTheme = EditorView.theme(
     // the line elements, so an opaque active-line background would paint over the
     // selected characters. Mixing the token with transparency keeps the active
     // line visible without hiding or replacing the selection underneath it
-    // (FR-024, SC-007).
+    // (008 FR-020, FR-021, SC-002).
     ".cm-activeLine": {
       backgroundColor:
-        "color-mix(in srgb, var(--color-line-active) 45%, transparent)",
+        "color-mix(in srgb, var(--color-line-active) 72%, transparent)",
     },
+    // The current line number becomes more prominent without any line-number
+    // geometry change (008 FR-019).
     ".cm-activeLineGutter": {
       backgroundColor:
-        "color-mix(in srgb, var(--color-line-active) 45%, transparent)",
+        "color-mix(in srgb, var(--color-line-active) 72%, transparent)",
       color: "var(--color-text)",
     },
 
@@ -59,13 +79,24 @@ const editorTheme = EditorView.theme(
     // short application selector. The drawn focused selection would therefore
     // keep CodeMirror's built-in dark colour and the application token would
     // never apply. Naming the editor root, the focused state and the layer path
-    // keeps the application colour authoritative (FR-023, FR-025).
+    // keeps the application colour authoritative (008 FR-021, FR-023).
     "&.cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground":
       {
         backgroundColor: "var(--color-selection)",
       },
-    "&.cm-editor .cm-selectionBackground, .cm-content ::selection": {
+    "&.cm-editor .cm-selectionBackground": {
       backgroundColor: "var(--color-selection)",
+    },
+    /*
+     * The native selection additionally consumes the semantic selection
+     * foreground (008 FR-022). Only the native path is recoloured: 008 has no
+     * syntax highlighting, so building a brittle overlay purely to recolour every
+     * drawn-selection glyph is not earned. `--color-selection-text` is the
+     * contract future syntax work will consume.
+     */
+    ".cm-content ::selection": {
+      backgroundColor: "var(--color-selection)",
+      color: "var(--color-selection-text)",
     },
     ".cm-cursor, .cm-dropCursor": {
       borderLeftColor: "var(--color-caret)",

@@ -53,7 +53,19 @@ export type FileIconId = "file" | "folder" | "folder-open" | "other" | "link";
 /** Every id the default renderer knows how to draw. */
 export type IconId = UiIconId | FileIconId;
 
-/** A provider's answer: which glyph, and how to announce it. */
+/**
+ * How the renderer paints one glyph (008 FR-048, SR-004).
+ *
+ * This is provider-neutral *rendering* metadata, not a second icon vocabulary: it
+ * says nothing about which glyph an id names, only whether its artwork is drawn
+ * as an outline or filled. It defaults to `stroke`, so every 007 descriptor — and
+ * every shell action icon — keeps rendering exactly as before, while the Explorer
+ * can request the restrained filled generic filesystem glyphs without a
+ * component-level branch or an icon theme.
+ */
+export type IconDrawMode = "stroke" | "fill";
+
+/** A provider's answer: which glyph, how to draw it, and how to announce it. */
 export interface IconDescriptor {
   /** The provider-neutral glyph id. */
   id: IconId;
@@ -64,11 +76,24 @@ export interface IconDescriptor {
    * because the row text already names the entry.
    */
   title?: string;
+  /**
+   * How to paint the artwork. Omitted means `stroke`, which is the 007 renderer's
+   * behaviour and therefore what every existing caller already means.
+   */
+  drawMode?: IconDrawMode;
 }
 
-/** Builds a descriptor, keeping the optional label optional. */
-export function iconDescriptor(id: IconId, title?: string): IconDescriptor {
-  return title === undefined ? { id } : { id, title };
+/** Builds a descriptor, keeping the optional label and draw mode optional. */
+export function iconDescriptor(
+  id: IconId,
+  title?: string,
+  drawMode?: IconDrawMode,
+): IconDescriptor {
+  return {
+    id,
+    ...(title === undefined ? {} : { title }),
+    ...(drawMode === undefined ? {} : { drawMode }),
+  };
 }
 
 /** Resolves the icon for one shell/application action. */

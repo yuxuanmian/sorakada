@@ -12,12 +12,20 @@ import type { IconId } from "./iconTypes";
 /** The stroke path data of one glyph, drawn inside a 16×16 viewBox. */
 export const ICON_GLYPHS: Readonly<Record<IconId, readonly string[]>> = {
   // Filesystem fallbacks.
+  //
+  // `file` and `other` share one page silhouette, so `other`'s mark cannot be a
+  // separate `<path>`: the renderer fills *every* path element in the same
+  // `currentColor`, which makes a same-colour mark painted on top of the filled
+  // body invisible. The mark is therefore a second subpath inside the
+  // silhouette's own `d`, wound the opposite way, so the default nonzero fill
+  // rule subtracts it and it reads as a light hole in the page (008 FR-048,
+  // SR-004). The trailing fold polyline stays for stroke mode.
   file: ["M4 1.5h4.5L12 5v9.5H4z", "M8.5 1.5V5H12"],
   "folder-open": ["M1.5 4h4l1.5 2h7.5v1.5", "M1.5 7.5h13l-1.5 6.5h-13z"],
   folder: ["M1.5 4h4l1.5 2h7.5v8h-13z"],
   // A displayable entry that is neither a file nor a directory: the generic file
-  // shape plus a small mark, so it stays distinguishable at row size.
-  other: ["M4 1.5h4.5L12 5v9.5H4z", "M8.5 1.5V5H12", "M6.5 9.5h3"],
+  // shape plus a reversed-wound mark, so it stays distinguishable at row size.
+  other: ["M4 1.5h4.5L12 5v9.5H4zM6.5 8.5v3h3v-3z", "M8.5 1.5V5H12"],
   link: [
     "M6.5 9.5a2.5 2.5 0 0 1 0-3.5l1.5-1.5a2.5 2.5 0 0 1 3.5 3.5",
     "M9.5 6.5a2.5 2.5 0 0 1 0 3.5L8 11.5A2.5 2.5 0 0 1 4.5 8",

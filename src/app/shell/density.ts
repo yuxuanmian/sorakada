@@ -24,7 +24,13 @@ export const UI_DENSITIES: readonly UiDensity[] = [
 
 /** Structural metrics one density preset coordinates. */
 export interface DensityMetrics {
-  /** Height of one Tree row, node or sentinel. */
+  /**
+   * Height of one Tree row, node or sentinel.
+   *
+   * 008 T026 raises this to 20/24/28. It is the only metric 008 moves, and the
+   * virtualizer reads it from here rather than from a component constant
+   * (008 FR-039, FR-040, SC-006).
+   */
   treeRowHeight: number;
   /** Horizontal offset of one depth level. */
   treeIndent: number;
@@ -72,7 +78,7 @@ export const DENSITY_METRICS: Readonly<Record<UiDensity, DensityMetrics>> = {
     gap: 3,
   },
   default: {
-    treeRowHeight: 22,
+    treeRowHeight: 24,
     treeIndent: 14,
     treeChevronSize: 16,
     tabHeight: 30,
@@ -86,7 +92,7 @@ export const DENSITY_METRICS: Readonly<Record<UiDensity, DensityMetrics>> = {
     gap: 4,
   },
   comfortable: {
-    treeRowHeight: 26,
+    treeRowHeight: 28,
     treeIndent: 18,
     treeChevronSize: 18,
     tabHeight: 34,

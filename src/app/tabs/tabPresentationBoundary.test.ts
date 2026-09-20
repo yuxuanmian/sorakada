@@ -46,6 +46,25 @@ describe("DocumentSession carries no presentation state (T144)", () => {
     }
   });
 
+  it("gains no 008 frame or surface state (T072)", () => {
+    // 008 SR-002 frames every Tab in CSS only. The frame, its radius, gradient,
+    // hover and accent must therefore stay out of the document model entirely
+    // (008 FR-066): a model field would make Tab appearance document state.
+    const forbidden = [
+      "tabStyle",
+      "frameStyle",
+      "gradient",
+      "radius",
+      "hover",
+      "shadow",
+    ];
+
+    for (const field of forbidden) {
+      const pattern = new RegExp(`\\b${field}\\b`, "i");
+      expect(pattern.test(sessionSource!.text), field).toBe(false);
+    }
+  });
+
   it("still owns exactly the document facts the UI projects", () => {
     for (const field of [
       "id",

@@ -131,7 +131,6 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  scrollbar-width: thin;
   outline: none;
 }
 
@@ -139,9 +138,14 @@
   overflow-x: auto;
 }
 
-/* The stable focus owner: the keyboard scope survives any row being recycled. */
+/*
+ * The stable focus owner: the keyboard scope survives any row being recycled.
+ * 008 keeps the focus perceptible but quiet — the Tree is an interaction surface,
+ * not a webpage input, so the outline is toned down rather than removed, and
+ * focus ownership stays here (008 T090, FR-052).
+ */
 .explorer__body:focus-visible {
-  outline: 1px solid var(--color-focus-ring);
+  outline: 1px solid color-mix(in srgb, var(--color-focus-ring) 60%, transparent);
   outline-offset: -1px;
 }
 
@@ -169,26 +173,78 @@
 
 /* One visible row: guides, chevron, glyph, label. */
 .explorer-row {
+  position: relative;
+  /*
+   * 008 SR-003: the row box paints nothing. Hover/selection feedback is drawn by
+   * the decorative layer below, whose horizontal bounds are identical for every
+   * depth, so a deeper row never gets a shorter interaction surface (008 FR-042,
+   * FR-044). `isolation` keeps that layer's stacking local to the row.
+   */
+  isolation: isolate;
   display: flex;
   align-items: center;
   gap: var(--ui-gap);
   height: var(--tree-row-height);
   padding-right: var(--space-2);
+  background: transparent;
   color: var(--color-text-muted);
   white-space: nowrap;
   cursor: default;
   outline: none;
 }
 
+/*
+ * The stable hover/selection surface (008 FR-042..FR-046, SC-005).
+ *
+ * `left`/`right` are the same expression at every depth: it begins just inside
+ * the root-guide band and preserves the matching inset on the right, so ordinary
+ * rows look balanced and a deep unscrolled row still shows visible feedback even
+ * though its label starts far to the right. Nothing here may read `row.depth`.
+ */
+.explorer-row::before {
+  content: "";
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  left: calc(var(--tree-indent) / 2 + 1px);
+  right: calc(var(--tree-indent) / 2 + 1px);
+  border-radius: var(--radius-md);
+  background-color: transparent;
+  pointer-events: none;
+  transition:
+    background-color var(--motion-fast) ease,
+    border-color var(--motion-fast) ease;
+}
+
+/*
+ * Row content and guides paint above the feedback layer through local stacking
+ * only: positioned boxes with the same stacking level are painted in tree order,
+ * and `::before` is the first child. No ad-hoc z-index is introduced (008 T084).
+ */
+.explorer-row > * {
+  position: relative;
+}
+
 .explorer-row:hover {
-  background-color: var(--color-hover);
   color: var(--color-text);
 }
 
+.explorer-row:hover::before {
+  background-color: var(--surface-tree-hover);
+}
+
+/*
+ * Selection is visibly stronger than hover, and selection + hover stays the
+ * selection colour rather than becoming a third state (008 FR-043).
+ */
 .explorer-row--selected,
 .explorer-row--selected:hover {
-  background-color: var(--color-selection);
   color: var(--color-text);
+}
+
+.explorer-row--selected::before,
+.explorer-row--selected:hover::before {
+  background-color: var(--surface-tree-selected);
 }
 
 /*
@@ -255,6 +311,12 @@
   width: var(--tree-indent);
 }
 
+/*
+ * 008 FR-041, FR-047: the guide stays a one-pixel structural aid. It is drawn in
+ * the dedicated low-contrast tree-guide colour, which is deliberately weaker than
+ * the muted label/icon hierarchy, so guides stay readable through hover and
+ * selection feedback without ever becoming the dominant visual grid.
+ */
 .explorer-row__guide::before {
   content: "";
   position: absolute;
@@ -262,7 +324,7 @@
   bottom: 0;
   left: calc(var(--tree-indent) / 2);
   width: 1px;
-  background-color: var(--color-border);
+  background-color: var(--color-tree-guide);
 }
 
 /* An ancestor whose last child is above this row stops at its own level. */
@@ -282,7 +344,7 @@
   left: calc(var(--tree-indent) / 2);
   width: calc(var(--tree-indent) / 2);
   height: 1px;
-  background-color: var(--color-border);
+  background-color: var(--color-tree-guide);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -332,16 +394,75 @@
   color: var(--color-text-subtle);
 }
 
+/*
+ * The inline New/Rename editor (008 FR-051).
+ *
+ * It keeps the 007 row-relative height and the whole Enter/Escape/blur contract,
+ * and stays recognisable as an input: a dark base surface, a small radius that
+ * matches the Tree feedback language, and a visible 1px focus border. No
+ * transition is added, because an animation must never obscure a commit or a
+ * dismissal.
+ */
 .explorer-inline-input {
   flex: 1 1 auto;
   min-width: 0;
   height: calc(var(--tree-row-height) - 4px);
   padding: 0 var(--space-1);
   border: 1px solid var(--color-focus-ring);
-  border-radius: var(--radius-sm);
-  background-color: var(--color-bg);
+  border-radius: var(--radius-md);
+  background-color: var(--surface-editor);
   color: var(--color-text);
   font-family: inherit;
   font-size: var(--font-size-ui);
   outline: none;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Fixed-lane scrollbar (008 FR-054..FR-060, SC-007)                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The Tree viewport uses the same fixed 12px lane and the same ~6px/~8px thumb as
+ * the Editor and the Tab viewport. The horizontal modifier reuses the identical
+ * geometry, so both axes behave the same way (008 FR-060).
+ */
+.explorer__body::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.explorer__body::-webkit-scrollbar-track,
+.explorer__body::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.explorer__body::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+
+.explorer__body::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+  background-clip: content-box;
+  border-width: 2px;
+}
+
+.explorer__body::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-active);
+  background-clip: content-box;
+  border-width: 2px;
+}
+
+/*
+ * Standards fallback for a browser where the WebKit pseudo-elements are not
+ * available. It is gated because Chromium ignores `::-webkit-scrollbar` as soon
+ * as a standard scrollbar property is set on the element.
+ */
+@supports not selector(::-webkit-scrollbar) {
+  .explorer__body {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
 }

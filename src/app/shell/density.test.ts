@@ -72,6 +72,60 @@ describe("density tokens", () => {
       DENSITY_METRICS.comfortable.treeRowHeight,
     );
   });
+
+  /*
+   * 008 T024, FR-040, SC-006: the only structural metric 008 moves is the Tree
+   * row height, and it moves by the plan's frozen amount. Compact stays the
+   * densest practical mode; the change is +2px on Default and Comfortable, not a
+   * global control enlargement.
+   */
+  it("freezes the 008 Tree row heights at 20/24/28", () => {
+    expect(DENSITY_METRICS.compact.treeRowHeight).toBe(20);
+    expect(DENSITY_METRICS.default.treeRowHeight).toBe(24);
+    expect(DENSITY_METRICS.comfortable.treeRowHeight).toBe(28);
+  });
+
+  it("leaves every non-Tree metric at its 007 value (008 FR-040)", () => {
+    expect(DENSITY_METRICS.compact).toMatchObject({
+      treeIndent: 12,
+      treeChevronSize: 14,
+      tabHeight: 26,
+      tabMinWidth: 64,
+      tabMaxWidth: 200,
+      menuItemHeight: 22,
+      controlHeight: 22,
+      topBarHeight: 30,
+      footerHeight: 20,
+      sidebarDefaultWidth: 240,
+      gap: 3,
+    });
+    expect(DENSITY_METRICS.default).toMatchObject({
+      treeIndent: 14,
+      treeChevronSize: 16,
+      tabHeight: 30,
+      tabMinWidth: 72,
+      tabMaxWidth: 220,
+      menuItemHeight: 26,
+      controlHeight: 24,
+      topBarHeight: 34,
+      footerHeight: 22,
+      sidebarDefaultWidth: 260,
+      gap: 4,
+    });
+    expect(DENSITY_METRICS.comfortable).toMatchObject({
+      treeIndent: 18,
+      treeChevronSize: 18,
+      tabHeight: 34,
+      tabMinWidth: 84,
+      tabMaxWidth: 260,
+      menuItemHeight: 30,
+      controlHeight: 28,
+      topBarHeight: 38,
+      footerHeight: 26,
+      sidebarDefaultWidth: 300,
+      gap: 6,
+    });
+  });
 });
 
 describe("density.css agrees with the metric table", () => {
