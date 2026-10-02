@@ -29,6 +29,7 @@ import type { InlineCommitResult } from "./explorerActions";
 import { EXPLORER_ROW_PATH_ATTRIBUTE } from "./explorerContextTarget";
 import type { ExplorerState, InlineEditState } from "./explorerModel";
 import type { VisibleExplorerRow } from "./explorerProjection";
+import { completesExplorerDoubleClick } from "./explorerRowGesture";
 import { guideSlotCount, rowIndent } from "./explorerTreeMetrics";
 
 export interface ExplorerRowProps {
@@ -168,8 +169,14 @@ export function ExplorerRow(props: ExplorerRowProps) {
         event.preventDefault();
         props.onSelect(node.path);
         props.onReturnFocus();
-      }}
-      onDoubleClick={() => {
+
+        // A browser can count two rapid double-clicks as clicks 1..4 and may
+        // emit `dblclick` only for the first pair. Treat each positive even
+        // click count as one completed pair so repeated folder toggles and file
+        // opens are never swallowed.
+        if (!completesExplorerDoubleClick(event.detail)) {
+          return;
+        }
         if (node.kind === "file") {
           props.onOpenFile(node.path);
           return;
@@ -186,8 +193,13 @@ export function ExplorerRow(props: ExplorerRowProps) {
       {node.kind === "directory" ? (
         <button
           type="button"
-          className="explorer-row__chevron"
+          className={
+            node.expanded
+              ? "explorer-row__chevron explorer-row__chevron--expanded"
+              : "explorer-row__chevron"
+          }
           aria-label={node.expanded ? `Collapse ${node.name}` : `Expand ${node.name}`}
+          aria-expanded={node.expanded}
           onClick={(event: MouseEvent) => {
             // The chevron toggles expansion only; selection is unchanged.
             event.stopPropagation();
@@ -200,7 +212,7 @@ export function ExplorerRow(props: ExplorerRowProps) {
             event.stopPropagation();
           }}
         >
-          <AppIcon name={node.expanded ? "chevron-down" : "chevron-right"} />
+          <AppIcon name="chevron-right" />
         </button>
       ) : (
         <span className="explorer-row__chevron explorer-row__chevron--empty" />

@@ -71,7 +71,7 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   height: var(--tab-height);
   min-width: var(--tab-min-width);
   max-width: var(--tab-max-width);
@@ -216,11 +216,25 @@
   font-size: 14px;
   line-height: 1;
   cursor: default;
+  transition: opacity var(--motion-fast) ease;
 }
 
 .tab__close:hover {
   background-color: var(--color-active);
   color: var(--color-text);
+}
+
+/* Keep the hit box and label width stable while quieting inactive Tabs. */
+@media (hover: hover) and (pointer: fine) {
+  .tab:not(.tab--active):not(:hover):not(:focus-within) .tab__close {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab__close {
+    transition: none;
+  }
 }
 
 /* The fixed actions share one hit area, so they never move as Tabs scroll. */

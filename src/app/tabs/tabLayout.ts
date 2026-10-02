@@ -22,8 +22,8 @@ import type { LabelMeasurer } from "../shell/textMeasurement";
 /**
  * Fixed horizontal widths a Tab spends besides its label.
  *
- * These mirror the `.tab` geometry in `src/styles/tabs.css` (padding, the 6px
- * flex gap and the 18px close button plus its border). They are what turn a
+ * These mirror the `.tab` geometry in `src/styles/tabs.css` (padding, the 4px
+ * flex gap and the 18px close button). They are what turn a
  * measured label width into a Tab width; the stylesheet still owns the real
  * layout, so a drift here can only make a Tab slightly loose or tight, never
  * broken — and `tabStrip.test.ts` pins the arithmetic.
@@ -41,8 +41,6 @@ export interface TabAffordances {
   dirty: number;
   /** Width of the external-state marker, including its gap. */
   external: number;
-  /** The Tab's right border. */
-  border: number;
   /** Slack so a label at exactly the maximum is not clipped by rounding. */
   slack: number;
 }
@@ -51,11 +49,10 @@ export interface TabAffordances {
 export const TAB_AFFORDANCES: TabAffordances = {
   paddingLeft: 10,
   paddingRight: 4,
-  gap: 6,
+  gap: 4,
   close: 18,
   dirty: 16,
   external: 17,
-  border: 1,
   slack: 2,
 };
 
@@ -80,7 +77,6 @@ export function naturalTabWidth(
     affordances.paddingRight +
     affordances.gap +
     affordances.close +
-    affordances.border +
     affordances.slack +
     (input.dirty ? affordances.dirty : 0) +
     (input.hasExternalState ? affordances.external : 0);

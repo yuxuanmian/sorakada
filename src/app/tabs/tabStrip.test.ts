@@ -65,7 +65,7 @@ describe("naturalTabWidth (T134 regression)", () => {
       BOUNDS,
     );
 
-    expect(width).toBe(120 + TAB_AFFORDANCES.paddingLeft + TAB_AFFORDANCES.paddingRight + TAB_AFFORDANCES.gap + TAB_AFFORDANCES.close + TAB_AFFORDANCES.border + TAB_AFFORDANCES.slack);
+    expect(width).toBe(120 + TAB_AFFORDANCES.paddingLeft + TAB_AFFORDANCES.paddingRight + TAB_AFFORDANCES.gap + TAB_AFFORDANCES.close + TAB_AFFORDANCES.slack);
     expect(width).toBeLessThan(MAX);
   });
 
@@ -136,7 +136,7 @@ describe("naturalTabWidth (T134 regression)", () => {
       BOUNDS,
     );
 
-    expect(width).toBe(148);
+    expect(width).toBe(145);
     expect(width).toBeLessThan(MAX);
     expect(width).toBeGreaterThan(MIN);
   });

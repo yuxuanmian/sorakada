@@ -287,10 +287,12 @@ export function Explorer({
     // menu at all; its only action is opening a folder (FR-053, US8 acceptance 5).
     return (
       <div className="explorer explorer--empty">
-        <p className="explorer__hint">No folder is open.</p>
-        <button type="button" className="shell-button" onClick={onOpenFolder}>
-          Open Folder
-        </button>
+        <div className="explorer__empty-content">
+          <p className="explorer__hint">No folder is open.</p>
+          <button type="button" className="shell-button" onClick={onOpenFolder}>
+            Open Folder
+          </button>
+        </div>
       </div>
     );
   }

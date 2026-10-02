@@ -18,6 +18,7 @@ import {
   INTERACTIVE_SELECTOR,
   isInteractiveTarget,
   requestTopBarDrag,
+  requestTopBarMouseDown,
   requestTopBarToggleMaximize,
 } from "./topBarGesture";
 
@@ -173,6 +174,40 @@ function fakeTarget(options: {
 }
 
 describe("TopBar gesture decisions", () => {
+  it("starts a drag on the first primary press and toggles once on the second", () => {
+    const startDrag = vi.fn();
+    const toggleMaximize = vi.fn();
+    const handlers = { startDrag, toggleMaximize };
+    const target = fakeTarget({});
+
+    expect(requestTopBarMouseDown(target, 0, 1, handlers)).toBe("drag");
+    expect(requestTopBarMouseDown(target, 0, 2, handlers)).toBe(
+      "toggle-maximize",
+    );
+
+    expect(startDrag).toHaveBeenCalledTimes(1);
+    expect(toggleMaximize).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores non-primary presses, interactive targets and extra click counts", () => {
+    const startDrag = vi.fn();
+    const toggleMaximize = vi.fn();
+    const handlers = { startDrag, toggleMaximize };
+
+    expect(
+      requestTopBarMouseDown(fakeTarget({}), 2, 1, handlers),
+    ).toBeNull();
+    expect(
+      requestTopBarMouseDown(fakeTarget({ interactive: true }), 0, 2, handlers),
+    ).toBeNull();
+    expect(
+      requestTopBarMouseDown(fakeTarget({}), 0, 3, handlers),
+    ).toBeNull();
+
+    expect(startDrag).not.toHaveBeenCalled();
+    expect(toggleMaximize).not.toHaveBeenCalled();
+  });
+
   it("starts a window drag from the non-interactive drag region", () => {
     const startDrag = vi.fn();
     const toggleMaximize = vi.fn();

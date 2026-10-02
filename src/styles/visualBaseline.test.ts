@@ -304,12 +304,11 @@ describe("008 stays inside its presentation scope (T011, T133, T151)", () => {
   });
 
   it("adds no freestyle embellishment to a touched stylesheet (T132)", () => {
-    // 008 is a restrained baseline: no transforms, filters, blur, glow, shadows
-    // or decorative animation on the surfaces it owns. `text-transform` (an
-    // existing Explorer title style) and the pre-existing popup elevation token
-    // are deliberately not what this looks for.
+    // 008 is a restrained baseline: no filters, blur, glow, shadows or
+    // decorative animation on the surfaces it owns. The sole transform
+    // exception is the explicitly tested Explorer disclosure glyph below;
+    // geometry, text and caret transforms remain outside the baseline.
     const forbidden: readonly { name: string; pattern: RegExp }[] = [
-      { name: "transform", pattern: /(?<![\w-])transform\s*:/ },
       { name: "filter", pattern: /(?<![\w-])filter\s*:/ },
       { name: "backdrop-filter", pattern: /backdrop-filter/ },
       { name: "blur", pattern: /\bblur\s*\(/ },
@@ -323,6 +322,25 @@ describe("008 stays inside its presentation scope (T011, T133, T151)", () => {
       for (const { name, pattern } of forbidden) {
         expect(pattern.test(text), `${file.relativePath}: ${name}`).toBe(false);
       }
+
+      const transformRules = parseRules(file.text).filter((rule) =>
+        /(?<![\w-])transform\s*:/.test(rule.body),
+      );
+      const approvedChevronSelectors = new Set([
+        ".explorer-row__chevron .app-icon",
+        ".explorer-row__chevron--expanded .app-icon",
+      ]);
+      const unapprovedTransforms = transformRules.flatMap((rule) =>
+        rule.selectors.filter(
+          (selector) =>
+            file.relativePath !== "src/styles/explorer.css" ||
+            !approvedChevronSelectors.has(selector),
+        ),
+      );
+      expect(
+        unapprovedTransforms,
+        `${file.relativePath}: unapproved transform`,
+      ).toEqual([]);
     }
   });
 });
@@ -1124,6 +1142,56 @@ describe("Explorer feedback is depth-independent (T080..T081)", () => {
     expect(bodyValue(input, "border-radius")).toBe("var(--radius-md)");
     expect(bodyValue(input, "background-color")).toBe("var(--surface-editor)");
     expect(bodyValue(input, "color")).toBe("var(--color-text)");
+  });
+});
+
+describe("Explorer empty state stays isolated from the Workspace tree", () => {
+  it("centres one content group slightly above the available Sidebar midpoint", () => {
+    const empty = rulesFor(explorerCss, ".explorer--empty")[0].body;
+    expect(bodyValue(empty, "display")).toBe("grid");
+    expect(bodyValue(empty, "grid-template-rows")).toBe(
+      "minmax(0, 2fr) auto minmax(0, 3fr)",
+    );
+
+    const content = rulesFor(explorerCss, ".explorer__empty-content")[0].body;
+    expect(bodyValue(content, "display")).toBe("flex");
+    expect(bodyValue(content, "grid-row")).toBe("2");
+    expect(bodyValue(content, "flex-direction")).toBe("column");
+    expect(bodyValue(content, "align-items")).toBe("center");
+    expect(bodyValue(content, "justify-self")).toBe("center");
+    expect(bodyValue(content, "text-align")).toBe("center");
+  });
+
+  it("leaves the normal Explorer as a top-to-bottom flex layout", () => {
+    const explorer = rulesFor(explorerCss, ".explorer")[0].body;
+    expect(bodyValue(explorer, "display")).toBe("flex");
+    expect(bodyValue(explorer, "flex-direction")).toBe("column");
+  });
+});
+
+describe("Explorer directory expansion uses one geometry-safe micro-animation", () => {
+  it("rotates only the chevron glyph with the shared short-motion token", () => {
+    const chevron = rulesFor(
+      explorerCss,
+      ".explorer-row__chevron .app-icon",
+    )[0].body;
+    const expanded = rulesFor(
+      explorerCss,
+      ".explorer-row__chevron--expanded .app-icon",
+    )[0].body;
+
+    expect(bodyValue(chevron, "transform")).toBe("rotate(0deg)");
+    expect(bodyValue(chevron, "transition")).toBe(
+      "transform var(--motion-fast) ease-out",
+    );
+    expect(bodyValue(expanded, "transform")).toBe("rotate(90deg)");
+  });
+
+  it("disables the transition when reduced motion is requested", () => {
+    expect(explorerCss).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(explorerCss).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.explorer-row__chevron \.app-icon\s*\{[\s\S]*?transition:\s*none;/,
+    );
   });
 });
 

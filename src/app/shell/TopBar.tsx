@@ -8,11 +8,12 @@
  *
  * Interaction rules:
  *
- * - the drag surface reacts to a pointer press only when the press did not land
- *   on an interactive descendant, so a menu or window-control click is never
- *   swallowed by a window move (FR-006);
- * - a double-click on that same surface dispatches the canonical
- *   `window.toggleMaximize` command exactly once (FR-007);
+ * - the drag surface reacts to the first primary-button press only when it did
+ *   not land on an interactive descendant, so a menu or window-control click is
+ *   never swallowed by a window move (FR-006);
+ * - the second press of a double-click dispatches the canonical
+ *   `window.toggleMaximize` command before WebView2 can enter another native
+ *   drag loop, and therefore does so exactly once (FR-007);
  * - the visible Close control dispatches `window.close`, which reaches the
  *   ordinary close request and therefore the unsaved-work guard (FR-008).
  */
@@ -21,10 +22,7 @@ import type { ReactNode } from "react";
 
 import type { CommandId } from "../commands/commandIds";
 import { AppIcon } from "./AppIcon";
-import {
-  requestTopBarDrag,
-  requestTopBarToggleMaximize,
-} from "./topBarGesture";
+import { requestTopBarMouseDown } from "./topBarGesture";
 
 export interface TopBarProps {
   /** The compact App Menu slot. */
@@ -65,11 +63,13 @@ export function TopBar({
         className="top-bar__drag"
         // The whole strip is the gesture surface; the decision checks the actual
         // target, so an interactive descendant opts out of both behaviours.
-        onPointerDown={(event) => {
-          requestTopBarDrag(event.target, handlers);
-        }}
-        onDoubleClick={(event) => {
-          requestTopBarToggleMaximize(event.target, handlers);
+        onMouseDown={(event) => {
+          requestTopBarMouseDown(
+            event.target,
+            event.button,
+            event.detail,
+            handlers,
+          );
         }}
       >
         <div className="top-bar__menu">{appMenu}</div>

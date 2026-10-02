@@ -62,6 +62,37 @@ export interface TopBarGestureHandlers {
   toggleMaximize(): void;
 }
 
+/** The one native chrome action chosen for a TopBar mouse press. */
+export type TopBarMouseAction = "drag" | "toggle-maximize" | null;
+
+/**
+ * Handles a primary-button press on the non-interactive TopBar surface.
+ *
+ * Native `startDragging()` enters the platform's move loop immediately. In
+ * WebView2 that loop may consume the browser `dblclick` which would otherwise
+ * follow the second press, so maximize/restore has to be decided from the
+ * second press's click count *before* another native drag begins.
+ */
+export function requestTopBarMouseDown(
+  target: unknown,
+  button: number,
+  clickCount: number,
+  handlers: TopBarGestureHandlers,
+): TopBarMouseAction {
+  if (button !== 0 || isInteractiveTarget(target)) {
+    return null;
+  }
+  if (clickCount === 2) {
+    handlers.toggleMaximize();
+    return "toggle-maximize";
+  }
+  if (clickCount === 1) {
+    handlers.startDrag();
+    return "drag";
+  }
+  return null;
+}
+
 /**
  * Handles a pointer press on the TopBar surface.
  *
