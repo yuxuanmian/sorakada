@@ -57,7 +57,7 @@ import {
   type ExplorerState,
 } from "./explorer/explorerModel";
 import { SearchController } from "./search/searchController";
-import type { SearchState } from "./search/searchModel";
+import { isImeKeyboardEvent, type SearchState } from "./search/searchModel";
 import { SearchReplaceBar } from "./search/SearchReplaceBar";
 import { CompactAppMenu } from "./menu/CompactAppMenu";
 import {
@@ -407,6 +407,9 @@ export function App() {
     // which is what keeps a Tab switch from being credited to the wrong Tab.
     editorHandle.setStateUpdateListener((documentId, state, docChanged) => {
       manager.handleEditorStateUpdate(documentId, state, docChanged);
+      if (documentId === manager.getActiveDocumentId()) {
+        searchController.onEditorStateUpdate(docChanged);
+      }
     });
 
     const hasActiveDocument = (): boolean =>
@@ -718,6 +721,9 @@ export function App() {
      * undoing a second time for the same keypress.
      */
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (isImeKeyboardEvent(event)) {
+        return;
+      }
       const commandId = commandForKeyboardEvent(event);
       if (commandId === undefined) {
         return;
@@ -742,6 +748,9 @@ export function App() {
     };
 
     const onEscapeKeyDown = (event: KeyboardEvent): void => {
+      if (isImeKeyboardEvent(event)) {
+        return;
+      }
       escapeManager.handleKeyboardEvent(event);
     };
 

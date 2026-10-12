@@ -2,12 +2,27 @@
 
 A modern, good-looking desktop text editor aimed at programmers
 
-> **Status: Early Development.** Six milestones are implemented: single-file editing
+> **Status: Early Development.** Implemented milestones include single-file editing
 > (M1), multi-document tabs (M2), the Workspace Explorer (M3), interaction polish
 > (M4), opened-document external-change detection (M5) and Workspace filesystem
-> synchronization (M6). There is still no syntax highlighting, search/replace,
-> settings, multi-root Workspace or Git integration, and only UTF-8 (with or
+> synchronization (M6), UI structure and visual foundations (M7–M8), and current-document
+> search/replace (M9–M10). There is still no syntax highlighting, general settings,
+> multi-root Workspace or Git integration, and only UTF-8 (with or
 > without BOM) can be opened.
+
+## Current-document search and replace (M9–M10)
+
+Use `Ctrl+F` to find and `Ctrl+R` to replace in the active document. Search supports
+case sensitivity, regular expressions (`.*`, Alt+R), wrapping navigation, selection
+prefilling, immediate match highlights and bounded match counts. Searches select
+the nearest forward match automatically. All matches have a gold background;
+the current match has a white outline, and ordinary selections use blue.
+Regex replacement supports `$1`–`$99`, `$&` and `$$`, including zero-width matches.
+Replace All can be undone in one step, separately from surrounding typing.
+Switching tabs closes the search bar and clears its highlights.
+
+M9 and M10 are complete. Their scope and verification records live in
+`specs/009-search-replace/` and `specs/010-regex-search-colors/spec.md`.
 
 ## Workspace filesystem synchronization (M6)
 

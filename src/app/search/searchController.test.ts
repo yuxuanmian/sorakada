@@ -1,21 +1,25 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { EditorHandle, SearchMatchesResult } from "../../editor/editorHandle";
 import { createEscapeManager } from "../commands/escapeManager";
 import { SearchController } from "./searchController";
 import {
   formatMatchCountLabel,
+  isImeKeyboardEvent,
   normalizeSelectionForPrefill,
 } from "./searchModel";
 
 class MockEditorHandle implements Partial<EditorHandle> {
   selectedText = "";
+  cursorHead = 0;
+  currentMatchRange: { from: number; to: number } | null = null;
   ready = true;
   focused = false;
 
   lastSearchQuery = "";
   lastCaseSensitive = false;
   lastReplacement = "";
+  lastIsRegex = false;
 
   findNextCalled = 0;
   findPreviousCalled = 0;
@@ -36,9 +40,30 @@ class MockEditorHandle implements Partial<EditorHandle> {
     return this.selectedText;
   }
 
-  setSearch(query: string, caseSensitive: boolean, replacement = ""): void {
+  getCursorHead(): number {
+    return this.cursorHead;
+  }
+
+  getCurrentMatchRange(): { from: number; to: number } | null {
+    return this.currentMatchRange;
+  }
+
+  selectNearestMatch(
+    _fromPos?: number,
+    _preferCurrentRange?: { from: number; to: number },
+  ): SearchMatchesResult {
+    return this.mockMatchesResult;
+  }
+
+  setSearch(
+    query: string,
+    caseSensitive: boolean,
+    isRegex = false,
+    replacement = "",
+  ): void {
     this.lastSearchQuery = query;
     this.lastCaseSensitive = caseSensitive;
+    this.lastIsRegex = isRegex;
     this.lastReplacement = replacement;
   }
 
@@ -50,18 +75,30 @@ class MockEditorHandle implements Partial<EditorHandle> {
     this.findPreviousCalled += 1;
   }
 
-  replaceNext(query: string, replacement: string, caseSensitive: boolean): void {
+  replaceNext(
+    query: string,
+    replacement: string,
+    caseSensitive: boolean,
+    isRegex = false,
+  ): void {
     this.replaceNextCalled += 1;
     this.lastSearchQuery = query;
     this.lastReplacement = replacement;
     this.lastCaseSensitive = caseSensitive;
+    this.lastIsRegex = isRegex;
   }
 
-  replaceAll(query: string, replacement: string, caseSensitive: boolean): void {
+  replaceAll(
+    query: string,
+    replacement: string,
+    caseSensitive: boolean,
+    isRegex = false,
+  ): void {
     this.replaceAllCalled += 1;
     this.lastSearchQuery = query;
     this.lastReplacement = replacement;
     this.lastCaseSensitive = caseSensitive;
+    this.lastIsRegex = isRegex;
   }
 
   countMatches(): SearchMatchesResult {
@@ -73,10 +110,48 @@ class MockEditorHandle implements Partial<EditorHandle> {
   }
 }
 
+describe("isImeKeyboardEvent", () => {
+  it("detects standard DOM isComposing property", () => {
+    expect(isImeKeyboardEvent({ key: "Enter", isComposing: true })).toBe(true);
+    expect(isImeKeyboardEvent({ key: "Enter", isComposing: false })).toBe(false);
+  });
+
+  it("detects React synthetic nativeEvent.isComposing property", () => {
+    expect(
+      isImeKeyboardEvent({
+        key: "Enter",
+        nativeEvent: { isComposing: true },
+      }),
+    ).toBe(true);
+    expect(
+      isImeKeyboardEvent({
+        key: "Enter",
+        nativeEvent: { isComposing: false },
+      }),
+    ).toBe(false);
+  });
+
+  it("detects standard IME keyCode 229 and Process key identifiers", () => {
+    expect(isImeKeyboardEvent({ key: "Enter", keyCode: 229 })).toBe(true);
+    expect(isImeKeyboardEvent({ key: "Process" })).toBe(true);
+  });
+
+  it("honors active component composition state", () => {
+    expect(isImeKeyboardEvent({ key: "Escape" }, true)).toBe(true);
+    expect(isImeKeyboardEvent({ key: "Escape" }, false)).toBe(false);
+  });
+});
+
 describe("normalizeSelectionForPrefill", () => {
   it("accepts normal single-line text", () => {
     expect(normalizeSelectionForPrefill("hello")).toBe("hello");
     expect(normalizeSelectionForPrefill("foo_bar_123")).toBe("foo_bar_123");
+  });
+
+  it("escapes regex special characters when isRegex is true", () => {
+    expect(normalizeSelectionForPrefill("item.foo[0]*", true)).toBe(
+      "item\\.foo\\[0\\]\\*",
+    );
   });
 
   it("rejects empty or whitespace-only text", () => {
@@ -114,6 +189,12 @@ describe("formatMatchCountLabel", () => {
     expect(formatMatchCountLabel("foo", 1000, 5, true)).toBe("5 / 1000+");
     expect(formatMatchCountLabel("foo", 1000, 0, true)).toBe("1000+ 个结果");
   });
+
+  it("displays in-place error message when error is non-null", () => {
+    expect(
+      formatMatchCountLabel("foo", 0, 0, false, "无效的正则表达式"),
+    ).toBe("无效的正则表达式");
+  });
 });
 
 describe("SearchController", () => {
@@ -135,8 +216,24 @@ describe("SearchController", () => {
     expect(editor.lastSearchQuery).toBe("myFunction");
   });
 
-  it("retains existing query and replacement across find and replace mode switches", () => {
+  it("escapes candidate selection when prefilling in regex mode", () => {
     const editor = new MockEditorHandle();
+    editor.selectedText = "foo.bar[1]";
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    // Open first to toggle regex
+    controller.open("find");
+    controller.toggleRegex();
+    controller.close();
+
+    // Reopen with new selection
+    controller.open("find");
+    expect(controller.getState().query).toBe("foo\\.bar\\[1\\]");
+  });
+
+  it("retains existing query and replacement across find and replace mode switches without re-prefilling", () => {
+    const editor = new MockEditorHandle();
+    editor.selectedText = "highlightedMatch";
     const controller = new SearchController(editor as unknown as EditorHandle);
 
     controller.open("find");
@@ -146,11 +243,116 @@ describe("SearchController", () => {
     expect(controller.getState().query).toBe("alpha");
     expect(controller.getState().replacement).toBe("beta");
 
-    // Switch to replace mode
+    // Editor now has selected text from a match, but switching mode must NOT overwrite query
+    editor.selectedText = "alphaMatch";
     controller.open("replace");
     expect(controller.getState().mode).toBe("replace");
     expect(controller.getState().query).toBe("alpha");
     expect(controller.getState().replacement).toBe("beta");
+  });
+
+  it.each([false, true])("prefills a new manual selection on repeated Find (regex=%s)", (isRegex) => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+    controller.open("find");
+    if (isRegex) controller.toggleRegex();
+    editor.currentMatchRange = { from: 0, to: 4 };
+    controller.setQuery("item");
+
+    editor.currentMatchRange = { from: 20, to: 27 };
+    editor.cursorHead = 27;
+    editor.selectedText = "foo.[x]";
+    controller.onEditorStateUpdate(false);
+    const nearest = vi.spyOn(editor, "selectNearestMatch");
+    controller.open("find");
+
+    expect(controller.getState().query).toBe(isRegex ? "foo\\.\\[x\\]" : "foo.[x]");
+    expect(editor.lastSearchQuery).toBe(controller.getState().query);
+    expect(controller.getState().isRegex).toBe(isRegex);
+    expect(nearest).toHaveBeenCalledWith(27);
+    controller.close();
+  });
+
+  it("prefills a new manual selection when Find is invoked from Replace mode", () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+    controller.open("replace");
+    controller.toggleRegex();
+    editor.currentMatchRange = { from: 0, to: 5 };
+    controller.setQuery("item\\d+");
+    controller.setReplacement("$&!");
+
+    editor.currentMatchRange = { from: 20, to: 27 };
+    editor.cursorHead = 27;
+    editor.selectedText = "foo.[x]";
+    controller.onEditorStateUpdate(false);
+    const focusBefore = controller.getState().focusRequestId;
+    controller.open("find");
+
+    expect(controller.getState()).toMatchObject({
+      mode: "find", query: "foo\\.\\[x\\]", replacement: "$&!", isRegex: true,
+      focusRequestId: focusBefore + 1,
+    });
+    expect(editor.lastSearchQuery).toBe("foo\\.\\[x\\]");
+    controller.close();
+  });
+
+  it("preserves a regex and current match when repeated Find sees its automatic selection", () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+    controller.open("find");
+    controller.toggleRegex();
+    editor.currentMatchRange = { from: 10, to: 15 };
+    controller.setQuery("item\\d+");
+    editor.selectedText = "item1";
+    const nearest = vi.spyOn(editor, "selectNearestMatch");
+    const focusBefore = controller.getState().focusRequestId;
+
+    controller.open("find");
+    controller.open("find");
+
+    expect(controller.getState().query).toBe("item\\d+");
+    expect(editor.currentMatchRange).toEqual({ from: 10, to: 15 });
+    expect(nearest).not.toHaveBeenCalled();
+    expect(controller.getState().focusRequestId).toBe(focusBefore + 2);
+    controller.close();
+  });
+
+  it("requests focus again without a new selection, but never for query or feedback updates", () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+    controller.open("find");
+    const firstRequest = controller.getState().focusRequestId;
+    controller.setQuery("existing");
+    controller.syncMatchesImmediately();
+    expect(controller.getState().focusRequestId).toBe(firstRequest);
+
+    controller.open("find");
+    expect(controller.getState().query).toBe("existing");
+    expect(controller.getState().focusRequestId).toBe(firstRequest + 1);
+    controller.close();
+  });
+
+  it("keeps query, options, and current match across presentation mode changes", () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+    controller.open("find");
+    controller.toggleRegex();
+    controller.toggleCaseSensitive();
+    editor.currentMatchRange = { from: 10, to: 15 };
+    controller.setQuery("item\\d+");
+    controller.setReplacement("$&!");
+    editor.selectedText = "item1";
+    const nearest = vi.spyOn(editor, "selectNearestMatch");
+    controller.open("replace");
+    controller.open("find");
+
+    expect(controller.getState()).toMatchObject({
+      query: "item\\d+", replacement: "$&!", isRegex: true, caseSensitive: true,
+    });
+    expect(editor.currentMatchRange).toEqual({ from: 10, to: 15 });
+    expect(nearest).not.toHaveBeenCalled();
+    controller.close();
   });
 
   it("closes and resets mode and clears editor search query", () => {
@@ -179,6 +381,64 @@ describe("SearchController", () => {
     expect(editor.lastSearchQuery).toBe("");
   });
 
+  it("clears editor search query on onDocumentChange even when controller mode is already closed", () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    // Initial state: search was already closed
+    expect(controller.getState().mode).toBe("closed");
+
+    // Simulate switching back to a tab whose EditorState held a previous search query
+    editor.lastSearchQuery = "lingeringOldQuery";
+    controller.onDocumentChange();
+
+    // Must clear the newly bound state's search query to prevent ghost highlights
+    expect(editor.lastSearchQuery).toBe("");
+    expect(controller.getState().mode).toBe("closed");
+  });
+
+  it("ignores late setQuery, toggle, and replacement calls when controller is closed", () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    expect(controller.getState().mode).toBe("closed");
+    editor.lastSearchQuery = "";
+
+    // Late setQuery (e.g. late compositionend after close)
+    controller.setQuery("lateInput");
+    expect(editor.lastSearchQuery).toBe("");
+    expect(controller.getState().query).toBe("");
+
+    // Late toggleRegex
+    controller.toggleRegex();
+    expect(controller.getState().isRegex).toBe(false);
+
+    // Late toggleCaseSensitive
+    controller.toggleCaseSensitive();
+    expect(controller.getState().caseSensitive).toBe(false);
+
+    // Late setReplacement
+    controller.setReplacement("lateReplacement");
+    expect(controller.getState().replacement).toBe("");
+  });
+
+  it("searches from getCursorHead when editor selection was moved manually", () => {
+    const editor = new MockEditorHandle();
+    editor.cursorHead = 45;
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    controller.open("find");
+    editor.selectNearestMatch = vi.fn().mockReturnValue({ count: 1, currentIndex: 1, isCapped: false });
+
+    // Moving cursor manually
+    editor.currentMatchRange = { from: 40, to: 45 };
+    editor.cursorHead = 45;
+    controller.onEditorStateUpdate(false);
+
+    controller.setQuery("test");
+    expect(editor.selectNearestMatch).toHaveBeenCalledWith(45, undefined);
+  });
+
   it("toggles case sensitivity and updates editor search", () => {
     const editor = new MockEditorHandle();
     const controller = new SearchController(editor as unknown as EditorHandle);
@@ -191,6 +451,108 @@ describe("SearchController", () => {
     controller.toggleCaseSensitive();
     expect(controller.getState().caseSensitive).toBe(true);
     expect(editor.lastCaseSensitive).toBe(true);
+  });
+
+  it("toggles regex mode and guards against invalid regex expressions", () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    controller.open("find");
+    controller.toggleRegex();
+    expect(controller.getState().isRegex).toBe(true);
+
+    // Invalid regex
+    controller.setQuery("[unclosed");
+    expect(controller.getState().error).toBe("无效的正则表达式");
+    expect(controller.getState().matchCount).toBe(0);
+    expect(controller.getState().matchIndex).toBe(0);
+    expect(editor.lastSearchQuery).toBe("");
+
+    // Navigation and replace are guarded when error is present
+    controller.findNext();
+    expect(editor.findNextCalled).toBe(0);
+    controller.replaceNext();
+    expect(editor.replaceNextCalled).toBe(0);
+
+    // Fixed regex
+    controller.setQuery("[closed]");
+    expect(controller.getState().error).toBeNull();
+    expect(editor.lastSearchQuery).toBe("[closed]");
+  });
+
+  it("immediately clears match count to 0 when query produces no matches without waiting for debounce", () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    controller.open("find");
+    // Initially has 3 matches
+    editor.mockMatchesResult = { count: 3, currentIndex: 1, isCapped: false };
+    controller.setQuery("abc");
+    expect(controller.getState().matchIndex).toBe(1);
+
+    // Now query produces 0 matches
+    editor.mockMatchesResult = { count: 0, currentIndex: 0, isCapped: false };
+    controller.setQuery("abcd");
+
+    // Count is cleared immediately to 0 rather than waiting 100ms
+    expect(controller.getState().matchCount).toBe(0);
+    expect(controller.getState().matchIndex).toBe(0);
+  });
+
+  it("schedules 100ms debounce for positive match count updates", () => {
+    vi.useFakeTimers();
+    try {
+      const editor = new MockEditorHandle();
+      const controller = new SearchController(editor as unknown as EditorHandle);
+
+      controller.open("find");
+      editor.mockMatchesResult = { count: 42, currentIndex: 2, isCapped: false };
+      controller.setQuery("debounced");
+
+      // matchIndex is immediate
+      expect(controller.getState().matchIndex).toBe(2);
+      // matchCount updates after debounce
+      expect(controller.getState().matchCount).toBe(0);
+
+      vi.advanceTimersByTime(100);
+      expect(controller.getState().matchCount).toBe(42);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears previousMatchRange and updates count when editor cursor is moved externally", () => {
+    const editor = new MockEditorHandle();
+    editor.currentMatchRange = { from: 10, to: 15 };
+    editor.cursorHead = 100;
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    controller.open("find");
+    controller.setQuery("match");
+
+    // External cursor move in editor
+    editor.currentMatchRange = { from: 100, to: 100 };
+    controller.onEditorStateUpdate(false);
+
+    // When typing continues, previousMatchRange is no longer used, getCursorHead is passed
+    editor.selectNearestMatch = vi.fn().mockReturnValue({ count: 1, currentIndex: 1, isCapped: false });
+    controller.setQuery("match2");
+
+    expect(editor.selectNearestMatch).toHaveBeenCalledWith(100, undefined);
+  });
+
+  it("immediately syncs matches when document content changes via onEditorStateUpdate(true)", () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    controller.open("find");
+    controller.setQuery("item");
+
+    editor.mockMatchesResult = { count: 99, currentIndex: 5, isCapped: false };
+    controller.onEditorStateUpdate(true);
+
+    expect(controller.getState().matchCount).toBe(99);
+    expect(controller.getState().matchIndex).toBe(5);
   });
 
   it("dispatches navigation and replacement operations", () => {

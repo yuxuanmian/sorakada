@@ -316,6 +316,18 @@ class MinimalEditor implements EditorHandle {
     return "";
   }
 
+  getCursorHead(): number {
+    return 0;
+  }
+
+  getCurrentMatchRange(): { from: number; to: number } | null {
+    return null;
+  }
+
+  selectNearestMatch() {
+    return { count: 0, currentIndex: 0, isCapped: false };
+  }
+
   setSearch(): void {}
 
   findNext(): void {}

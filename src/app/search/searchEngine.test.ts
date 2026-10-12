@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { Text } from "@codemirror/state";
 import { undo, undoDepth } from "@codemirror/commands";
 import {
   replaceAll,
@@ -11,6 +12,36 @@ import {
   createEditorState,
   searchDecorationPlugin,
 } from "../../editor/editorConfig";
+import { computeReplacement, findAllMatches, getCachedMatches } from "./searchEngine";
+
+describe("shared matching rules", () => {
+  it("advances zero-width matches across complete Unicode code points", () => {
+    expect(findAllMatches("😀x", "(?=.)", true, true).map(m => m.from)).toEqual([0, 2]);
+    expect(findAllMatches("😀\nx", "$", true, true).map(m => m.from)).toEqual([2, 4]);
+  });
+
+  it("retains ordinary search escapes and literal regex punctuation", () => {
+    expect(findAllMatches("a\nb a\\nb .[", "\\n", true, false).map(m => m.from)).toEqual([1]);
+    expect(findAllMatches("a\nb a\\nb .[", ".[", true, false).map(m => [m.from, m.to])).toEqual([[9, 11]]);
+  });
+
+  it("expands captures up to 99 without interpreting captured backslashes", () => {
+    const groups = ["whole", "\\n", undefined, ...Array(96).fill("x"), "last"];
+    expect(computeReplacement("$1|$2|$99|$&|$$|$0", groups as string[], true))
+      .toBe("\\n||last|whole|$|$0");
+    expect(computeReplacement("$1\\n", ["whole"], false)).toBe("$1\n");
+  });
+
+  it("reuses matches without flattening an unchanged immutable document", () => {
+    const doc = Text.of(["x x"]);
+    const flatten = vi.spyOn(doc, "toString");
+    const first = getCachedMatches(doc, "x", true, false);
+    expect(getCachedMatches(doc, "x", true, false)).toBe(first);
+    expect(flatten).toHaveBeenCalledTimes(1);
+    expect(getCachedMatches(doc, "z", true, false)).toEqual([]);
+    expect(flatten).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("searchEngine transaction & cursor contracts", () => {
   it("counts matches correctly with case sensitivity toggle", () => {
@@ -191,7 +222,11 @@ describe("searchEngine transaction & cursor contracts", () => {
     );
 
     expect(updatedRanges).toEqual([
-      { from: 0, to: 5, className: "cm-searchMatch cm-searchMatch-selected" },
+      {
+        from: 0,
+        to: 5,
+        className: "cm-searchMatch cm-searchMatch-current cm-searchMatch-selected",
+      },
       { from: 11, to: 16, className: "cm-searchMatch" },
     ]);
 

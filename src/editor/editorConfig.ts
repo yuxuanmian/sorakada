@@ -13,7 +13,9 @@ import {
   EditorView,
   ViewPlugin,
   type ViewUpdate,
+  WidgetType,
 } from "@codemirror/view";
+import { getCachedMatches } from "../app/search/searchEngine";
 
 /**
  * Editor appearance.
@@ -63,12 +65,19 @@ const editorTheme = EditorView.theme(
       border: "none",
       paddingRight: "4px",
     },
-    // `drawSelection` paints the selection into its own layer, which sits *below*
-    // the line elements, so an opaque active-line background would paint over the
-    // selected characters. Mixing the token with transparency keeps the active
-    // line visible without hiding or replacing the selection underneath it
-    // (008 FR-020, FR-021, SC-002).
+    // Keep the row fill below drawSelection's layer (-2 in basicSetup).
+    // Painting it on the line itself would tint selected characters, giving
+    // partial selections a different blue from selections crossing a newline.
     ".cm-activeLine": {
+      position: "relative",
+      backgroundColor: "transparent",
+    },
+    ".cm-activeLine::before": {
+      content: "''",
+      position: "absolute",
+      inset: "0",
+      zIndex: "-3",
+      pointerEvents: "none",
       backgroundColor:
         "color-mix(in srgb, var(--color-line-active) 72%, transparent)",
     },
@@ -113,10 +122,29 @@ const editorTheme = EditorView.theme(
     // 009: Search match highlighting.
     ".cm-searchMatch": {
       backgroundColor: "var(--color-search-match)",
+      color: "var(--color-search-match-text)",
     },
-    ".cm-searchMatch.cm-searchMatch-selected": {
-      backgroundColor: "var(--color-search-match-active)",
-      color: "var(--color-search-match-active-text)",
+    ".cm-searchMatch::selection, .cm-searchMatch ::selection": {
+      color: "var(--color-search-match-text)",
+    },
+    ".cm-searchMatch.cm-searchMatch-current, .cm-searchMatch.cm-searchMatch-selected": {
+      backgroundColor: "var(--color-search-match)",
+      outline: "1px solid var(--color-search-match-current-outline)",
+      outlineOffset: "-1px",
+    },
+    ".cm-searchMatch-zero": {
+      display: "inline-block",
+      width: "0px",
+      height: "1.2em",
+      verticalAlign: "text-bottom",
+      borderLeft: "2px solid var(--color-search-match)",
+      marginLeft: "-1px",
+      marginRight: "-1px",
+      pointerEvents: "none",
+    },
+    ".cm-searchMatch-zero.cm-searchMatch-zero-current": {
+      borderLeft: "2px solid var(--color-search-match-current-outline)",
+      outline: "1px solid var(--color-search-match-current-outline)",
     },
     "&.cm-focused": {
       outline: "none",
@@ -166,8 +194,31 @@ export function reconfigureAppearance(
 
 const searchMatchMark = Decoration.mark({ class: "cm-searchMatch" });
 const searchMatchSelectedMark = Decoration.mark({
-  class: "cm-searchMatch cm-searchMatch-selected",
+  class: "cm-searchMatch cm-searchMatch-current cm-searchMatch-selected",
 });
+const searchMatchCurrentMark = searchMatchSelectedMark;
+
+export class ZeroWidthMatchWidget extends WidgetType {
+  constructor(readonly isCurrent: boolean) {
+    super();
+  }
+
+  eq(other: ZeroWidthMatchWidget): boolean {
+    return this.isCurrent === other.isCurrent;
+  }
+
+  toDOM(): HTMLElement {
+    const span = document.createElement("span");
+    span.className = this.isCurrent
+      ? "cm-searchMatch-zero cm-searchMatch-zero-current"
+      : "cm-searchMatch-zero";
+    return span;
+  }
+
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
 
 /**
  * Custom search match decoration plugin.
@@ -207,35 +258,45 @@ export const searchDecorationPlugin = ViewPlugin.fromClass(
       if (!querySpec || !querySpec.valid || !querySpec.search) {
         return Decoration.none;
       }
-      const builder = new RangeSetBuilder<Decoration>();
-      const rawRanges = view.visibleRanges;
-      const ranges =
-        rawRanges.length > 0 &&
-        !(
-          rawRanges.length === 1 &&
-          rawRanges[0].from === 0 &&
-          rawRanges[0].to === 0 &&
-          view.state.doc.length > 0
-        )
-          ? rawRanges
-          : [{ from: 0, to: view.state.doc.length }];
+      const isRegex = querySpec.regexp;
+      const matches = getCachedMatches(
+        view.state.doc,
+        querySpec.search,
+        querySpec.caseSensitive,
+        isRegex,
+      );
+      if (matches.length === 0) {
+        return Decoration.none;
+      }
 
-      for (let i = 0; i < ranges.length; i++) {
-        let { from, to } = ranges[i];
-        while (i < ranges.length - 1 && to > ranges[i + 1].from - 500) {
-          to = ranges[++i].to;
+      const builder = new RangeSetBuilder<Decoration>();
+      const vpFrom = view.viewport ? view.viewport.from : 0;
+      const vpTo =
+        view.viewport && (view.viewport.to > 0 || view.state.doc.length === 0)
+          ? view.viewport.to
+          : view.state.doc.length;
+      const mainSel = view.state.selection.main;
+
+      for (const m of matches) {
+        if (m.from > vpTo) break;
+        if (m.to < vpFrom || m.from > vpTo) {
+          continue;
         }
-        const cursor = querySpec.getCursor(view.state, from, to);
-        let match: IteratorResult<{ from: number; to: number }>;
-        while (!(match = cursor.next()).done) {
-          const { from: mFrom, to: mTo } = match.value;
-          const isSelected = view.state.selection.ranges.some(
-            (r) => r.from === mFrom && r.to === mTo,
-          );
+        const isCurrent = mainSel.from === m.from && mainSel.to === m.to;
+        if (m.isZeroWidth) {
           builder.add(
-            mFrom,
-            mTo,
-            isSelected ? searchMatchSelectedMark : searchMatchMark,
+            m.from,
+            m.to,
+            Decoration.widget({
+              widget: new ZeroWidthMatchWidget(isCurrent),
+              side: 1,
+            }),
+          );
+        } else {
+          builder.add(
+            m.from,
+            m.to,
+            isCurrent ? searchMatchCurrentMark : searchMatchMark,
           );
         }
       }

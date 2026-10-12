@@ -156,7 +156,7 @@ const FROZEN_PALETTE: Readonly<Record<string, string>> = {
   "--color-text-muted": "#aeb3ba",
   "--color-text-subtle": "#747a83",
   "--color-line-active": "#292c33",
-  "--color-selection": "#3a4555",
+  "--color-selection": "#264f78",
   "--color-selection-text": "#eef1f4",
   "--color-accent": "#4a8cff",
   "--color-caret": "#82aaff",
@@ -186,7 +186,7 @@ const FROZEN_SURFACES: Readonly<Record<string, string>> = {
   "--highlight-tab": "rgb(255 255 255 / 5%)",
   "--surface-tree-hover": "color-mix(in srgb, var(--color-text) 5%, transparent)",
   "--surface-tree-selected":
-    "color-mix(in srgb, var(--color-selection) 72%, var(--color-bg-raised))",
+    "color-mix(in srgb, var(--color-tree-selection) 72%, var(--color-bg-raised))",
   "--color-tree-guide":
     "color-mix(in srgb, var(--color-text-muted) 13%, transparent)",
 };
@@ -491,6 +491,7 @@ describe("the frozen palette stays legible and ordered (SC-001, SC-002)", () => 
   const subtle = token("--color-text-subtle");
   const lineActive = token("--color-line-active");
   const selection = token("--color-selection");
+  const treeSelection = token("--color-tree-selection");
   const danger = token("--color-danger");
 
   const sidebar = mix(raised, editorBase, 0.94);
@@ -499,7 +500,7 @@ describe("the frozen palette stays legible and ordered (SC-001, SC-002)", () => 
   const tabHover = mix(tab, text, 0.94);
   const tabActive = mix(tab, text, 0.89);
   const currentLine = composite(lineActive, 0.72, editorBase);
-  const treeSelected = mix(selection, raised, 0.72);
+  const treeSelected = mix(treeSelection, raised, 0.72);
   const treeHover = composite(text, 0.05, sidebar);
   const guideOverBase = composite(
     muted,
@@ -546,40 +547,23 @@ describe("the frozen palette stays legible and ordered (SC-001, SC-002)", () => 
     const base = contrast(currentLine, editorBase);
     expect(base).toBeGreaterThanOrEqual(1.05);
     expect(contrast(selection, editorBase)).toBeGreaterThan(base);
-    // This compares the two *treatments* as colours — is a selection painted
-    // where the current line is still tellable from the line itself? The case
-    // where they actually coexist is composited below.
+    // The opaque selection is painted above the current-line treatment.
     expect(contrast(selection, currentLine)).toBeGreaterThanOrEqual(1.2);
   });
 
-  it("keeps the selection distinguishable where it crosses the current line (SC-002)", () => {
-    // `basicSetup` installs `drawSelection()`, and CodeMirror declares that layer
-    // *below* the line elements, so the shipped stack composites the translucent
-    // active line *over* the selection rather than choosing between them.
-    // Measuring them as alternatives overstates the real margin: the composited
-    // figure is ~1.17:1, not the ~1.53:1 the assertion above reports.
-    //
-    // What actually holds on screen, and is therefore asserted here, is the
-    // ladder — the selected span stays strictly stronger than an unselected
-    // current line, which in turn stays above the editor base, so the selection
-    // is never swallowed by the current-line treatment (FR-021).
-    const crossing = composite(lineActive, 0.72, selection);
-    const lineOnly = currentLine;
-
-    expect(contrast(crossing, lineOnly)).toBeGreaterThan(1.1);
-
-    const ladder = [
-      contrast(editorBase, editorBase),
-      contrast(lineOnly, editorBase),
-      contrast(crossing, editorBase),
-      contrast(selection, editorBase),
-    ];
-    for (let step = 1; step < ladder.length; step += 1) {
-      expect(
-        ladder[step],
-        `step ${step} of base < current line < selection crossing it < selection`,
-      ).toBeGreaterThan(ladder[step - 1]);
-    }
+  it("keeps the current-line fill below the opaque selection (SC-002)", () => {
+    const activeLine = editorConfigSource.slice(
+      editorConfigSource.indexOf('".cm-activeLine":'),
+      editorConfigSource.indexOf('".cm-activeLine::before":'),
+    );
+    expect(activeLine).toContain('backgroundColor: "transparent"');
+    const rowFill = editorConfigSource.slice(
+      editorConfigSource.indexOf('".cm-activeLine::before":'),
+      editorConfigSource.indexOf('".cm-activeLineGutter":'),
+    );
+    expect(rowFill).toContain('zIndex: "-3"');
+    expect(rowFill).toContain('--color-line-active');
+    expect(contrast(selection, currentLine)).toBeGreaterThan(1.2);
   });
 
   it("keeps the chrome foreground legible on the ambient-tinted TopBar", () => {

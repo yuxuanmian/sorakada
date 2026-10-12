@@ -1,15 +1,20 @@
 import type { EditorState, Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { redo, undo } from "@codemirror/commands";
+import { isolateHistory, redo, undo } from "@codemirror/commands";
 import {
-  findNext,
-  findPrevious,
-  replaceNext,
-  replaceAll,
-  SearchCursor,
   SearchQuery,
   setSearchQuery,
 } from "@codemirror/search";
+import {
+  computeReplacement,
+  findAllMatches,
+  findNearestMatch,
+  findNextMatch,
+  findPreservedMatch,
+  findPreviousMatch,
+  getCachedMatches,
+  validateRegex,
+} from "../app/search/searchEngine";
 
 import type {
   DocumentId,
@@ -106,8 +111,25 @@ export interface EditorHandle {
   /** Gets the selected text from the active document, or empty string if none. */
   getSelectedText(): string;
 
-  /** Updates the active search query and case sensitivity. */
-  setSearch(query: string, caseSensitive: boolean, replacement?: string): void;
+  /** Gets the current cursor head position (anchor of primary selection). */
+  getCursorHead(): number;
+
+  /** Gets the current primary selection range, or null if view not attached. */
+  getCurrentMatchRange(): { from: number; to: number } | null;
+
+  /** Updates the active search query, options, and replacement. */
+  setSearch(
+    query: string,
+    caseSensitive: boolean,
+    isRegex?: boolean,
+    replacement?: string,
+  ): void;
+
+  /** Selects nearest forward match from head, preserving valid current match if applicable. */
+  selectNearestMatch(
+    fromPos?: number,
+    preferCurrentRange?: { from: number; to: number },
+  ): SearchMatchesResult;
 
   /** Navigates to the next match from the current cursor position. */
   findNext(): void;
@@ -116,13 +138,27 @@ export interface EditorHandle {
   findPrevious(): void;
 
   /** Replaces the current match (or jumps to it if not selected) and moves to the next. */
-  replaceNext(query: string, replacement: string, caseSensitive: boolean): void;
+  replaceNext(
+    query?: string,
+    replacement?: string,
+    caseSensitive?: boolean,
+    isRegex?: boolean,
+  ): void;
 
   /** Replaces all matches across the document in a single atomic transaction. */
-  replaceAll(query: string, replacement: string, caseSensitive: boolean): void;
+  replaceAll(
+    query?: string,
+    replacement?: string,
+    caseSensitive?: boolean,
+    isRegex?: boolean,
+  ): void;
 
   /** Calculates match statistics for the query against the current document. */
-  countMatches(query: string, caseSensitive: boolean): SearchMatchesResult;
+  countMatches(
+    query: string,
+    caseSensitive: boolean,
+    isRegex?: boolean,
+  ): SearchMatchesResult;
 }
 
 /**
@@ -140,6 +176,10 @@ class EditorHandleImpl implements EditorHandle {
   private view: EditorView | null = null;
   private boundDocumentId: DocumentId | null = null;
   private listener: StateUpdateListener | null = null;
+  private activeQuery = "";
+  private activeCaseSensitive = false;
+  private activeIsRegex = false;
+  private activeReplacement = "";
 
   /**
    * `EditorView.updateListener` reads the current binding at call time, so one
@@ -237,80 +277,296 @@ class EditorHandleImpl implements EditorHandle {
     return this.view.state.sliceDoc(from, to);
   }
 
-  setSearch(query: string, caseSensitive: boolean, replacement = ""): void {
+  getCursorHead(): number {
+    if (this.view === null) {
+      return 0;
+    }
+    return this.view.state.selection.main.head;
+  }
+
+  getCurrentMatchRange(): { from: number; to: number } | null {
+    if (this.view === null) {
+      return null;
+    }
+    const { from, to } = this.view.state.selection.main;
+    return { from, to };
+  }
+
+  setSearch(
+    query: string,
+    caseSensitive: boolean,
+    isRegex = false,
+    replacement = "",
+  ): void {
     const view = this.requireView();
-    view.dispatch({
-      effects: setSearchQuery.of(
-        new SearchQuery({
+    this.activeQuery = query;
+    this.activeCaseSensitive = caseSensitive;
+    this.activeIsRegex = isRegex;
+    this.activeReplacement = replacement;
+
+    let querySpec: SearchQuery;
+    if (isRegex) {
+      const validation = validateRegex(query, caseSensitive);
+      if (!validation.valid) {
+        querySpec = new SearchQuery({
+          search: "",
+          caseSensitive,
+          regexp: false,
+          replace: replacement,
+        });
+      } else {
+        querySpec = new SearchQuery({
           search: query,
           caseSensitive,
+          regexp: true,
           replace: replacement,
-        }),
-      ),
+        });
+      }
+    } else {
+      querySpec = new SearchQuery({
+        search: query,
+        caseSensitive,
+        regexp: false,
+        replace: replacement,
+      });
+    }
+    view.dispatch({
+      effects: setSearchQuery.of(querySpec),
     });
+  }
+
+  selectNearestMatch(
+    fromPos?: number,
+    preferCurrentRange?: { from: number; to: number },
+  ): SearchMatchesResult {
+    if (this.view === null || this.activeQuery.length === 0) {
+      return { count: 0, currentIndex: 0, isCapped: false };
+    }
+    const view = this.view;
+    const matches = getCachedMatches(
+      view.state.doc,
+      this.activeQuery,
+      this.activeCaseSensitive,
+      this.activeIsRegex,
+    );
+    if (matches.length === 0) {
+      return { count: 0, currentIndex: 0, isCapped: false };
+    }
+
+    let target = preferCurrentRange
+      ? findPreservedMatch(matches, preferCurrentRange)
+      : null;
+    if (!target) {
+      const head = fromPos ?? view.state.selection.main.head;
+      target = findNearestMatch(matches, head);
+    }
+    if (target) {
+      view.dispatch({
+        selection: { anchor: target.match.from, head: target.match.to },
+        effects: EditorView.scrollIntoView(target.match.from, { y: "center" }),
+        userEvent: "select.search",
+      });
+    }
+
+    const isCapped = matches.length > 1000;
+    const count = isCapped ? 1000 : matches.length;
+    return {
+      count,
+      currentIndex: target?.index ?? 0,
+      isCapped,
+    };
   }
 
   findNext(): void {
-    const view = this.requireView();
-    findNext(view);
+    if (this.view === null || this.activeQuery.length === 0) {
+      return;
+    }
+    const view = this.view;
+    const matches = getCachedMatches(
+      view.state.doc,
+      this.activeQuery,
+      this.activeCaseSensitive,
+      this.activeIsRegex,
+    );
+    if (matches.length === 0) {
+      return;
+    }
+    const currentRange = {
+      from: view.state.selection.main.from,
+      to: view.state.selection.main.to,
+    };
+    const found = findNextMatch(matches, currentRange);
+    if (found) {
+      view.dispatch({
+        selection: { anchor: found.match.from, head: found.match.to },
+        effects: EditorView.scrollIntoView(found.match.from, { y: "center" }),
+        userEvent: "select.search",
+      });
+    }
   }
 
   findPrevious(): void {
-    const view = this.requireView();
-    findPrevious(view);
+    if (this.view === null || this.activeQuery.length === 0) {
+      return;
+    }
+    const view = this.view;
+    const matches = getCachedMatches(
+      view.state.doc,
+      this.activeQuery,
+      this.activeCaseSensitive,
+      this.activeIsRegex,
+    );
+    if (matches.length === 0) {
+      return;
+    }
+    const currentRange = {
+      from: view.state.selection.main.from,
+      to: view.state.selection.main.to,
+    };
+    const found = findPreviousMatch(matches, currentRange);
+    if (found) {
+      view.dispatch({
+        selection: { anchor: found.match.from, head: found.match.to },
+        effects: EditorView.scrollIntoView(found.match.from, { y: "center" }),
+        userEvent: "select.search",
+      });
+    }
   }
 
-  replaceNext(query: string, replacement: string, caseSensitive: boolean): void {
+  replaceNext(
+    query = this.activeQuery,
+    replacement = this.activeReplacement,
+    caseSensitive = this.activeCaseSensitive,
+    isRegex = this.activeIsRegex,
+  ): void {
     const view = this.requireView();
-    view.dispatch({
-      effects: setSearchQuery.of(
-        new SearchQuery({
-          search: query,
-          caseSensitive,
-          replace: replacement,
-        }),
-      ),
+    if (view.state.readOnly) {
+      return;
+    }
+    this.setSearch(query, caseSensitive, isRegex, replacement);
+    const matches = getCachedMatches(
+      view.state.doc,
+      query,
+      caseSensitive,
+      isRegex,
+    );
+    if (matches.length === 0) {
+      return;
+    }
+    const sel = view.state.selection.main;
+    const currentIdx = matches.findIndex(
+      (m) => m.from === sel.from && m.to === sel.to,
+    );
+    if (currentIdx === -1) {
+      this.findNext();
+      return;
+    }
+
+    const currentMatch = matches[currentIdx];
+    const insertText = computeReplacement(replacement, currentMatch.match, isRegex);
+
+    // Apply change in projected state to inspect matches in the updated document
+    const tempTr = view.state.update({
+      changes: {
+        from: currentMatch.from,
+        to: currentMatch.to,
+        insert: insertText,
+      },
     });
-    replaceNext(view);
-  }
+    const nextDocText = tempTr.state.doc.toString();
+    const nextMatches = findAllMatches(
+      nextDocText,
+      query,
+      caseSensitive,
+      isRegex,
+    );
 
-  replaceAll(query: string, replacement: string, caseSensitive: boolean): void {
-    const view = this.requireView();
+    let nextAnchor = currentMatch.from + insertText.length;
+    let nextHead = nextAnchor;
+
+    if (nextMatches.length > 0) {
+      const searchAfterPos =
+        currentMatch.from +
+        Math.max(insertText.length, currentMatch.isZeroWidth ? 1 : 0);
+
+      const forwardTarget = nextMatches.find((m) => m.from >= searchAfterPos);
+      const targetMatch = forwardTarget ?? nextMatches[0];
+      nextAnchor = targetMatch.from;
+      nextHead = targetMatch.to;
+    }
+
     view.dispatch({
-      effects: setSearchQuery.of(
-        new SearchQuery({
-          search: query,
-          caseSensitive,
-          replace: replacement,
-        }),
-      ),
+      changes: {
+        from: currentMatch.from,
+        to: currentMatch.to,
+        insert: insertText,
+      },
+      selection: { anchor: nextAnchor, head: nextHead },
+      effects: EditorView.scrollIntoView(nextAnchor, { y: "center" }),
+      annotations: isolateHistory.of("full"),
+      userEvent: "input.replace",
     });
-    replaceAll(view);
   }
 
-  countMatches(query: string, caseSensitive: boolean): SearchMatchesResult {
+  replaceAll(
+    query = this.activeQuery,
+    replacement = this.activeReplacement,
+    caseSensitive = this.activeCaseSensitive,
+    isRegex = this.activeIsRegex,
+  ): void {
+    const view = this.requireView();
+    if (view.state.readOnly) {
+      return;
+    }
+    this.setSearch(query, caseSensitive, isRegex, replacement);
+    const matches = getCachedMatches(
+      view.state.doc,
+      query,
+      caseSensitive,
+      isRegex,
+    );
+    if (matches.length === 0) {
+      return;
+    }
+    const changes = [];
+    for (let i = matches.length - 1; i >= 0; i -= 1) {
+      const m = matches[i];
+      const insert = computeReplacement(replacement, m.match, isRegex);
+      changes.push({ from: m.from, to: m.to, insert });
+    }
+    view.dispatch({
+      changes,
+      annotations: isolateHistory.of("full"),
+      userEvent: "input.replace.all",
+    });
+  }
+
+  countMatches(
+    query: string,
+    caseSensitive: boolean,
+    isRegex = false,
+  ): SearchMatchesResult {
     if (this.view === null || query.length === 0) {
       return { count: 0, currentIndex: 0, isCapped: false };
     }
-    const doc = this.view.state.doc;
-    const normalize = caseSensitive ? undefined : (x: string) => x.toLowerCase();
-    const cursor = new SearchCursor(doc, query, 0, doc.length, normalize);
-    const { from, to } = this.view.state.selection.main;
-    let count = 0;
-    let currentIndex = 0;
-    let isCapped = false;
-    const MAX_MATCHES = 1000;
-
-    while (!cursor.next().done) {
-      count += 1;
-      if (cursor.value.from === from && cursor.value.to === to) {
-        currentIndex = count;
-      }
-      if (count >= MAX_MATCHES) {
-        isCapped = true;
-        break;
-      }
+    const view = this.view;
+    const matches = getCachedMatches(
+      view.state.doc,
+      query,
+      caseSensitive,
+      isRegex,
+    );
+    if (matches.length === 0) {
+      return { count: 0, currentIndex: 0, isCapped: false };
     }
+    const { from, to } = view.state.selection.main;
+    let currentIndex = 0;
+    const matchIdx = matches.findIndex((m) => m.from === from && m.to === to);
+    if (matchIdx !== -1) {
+      currentIndex = matchIdx + 1;
+    }
+    const isCapped = matches.length > 1000;
+    const count = isCapped ? 1000 : matches.length;
 
     return { count, currentIndex, isCapped };
   }

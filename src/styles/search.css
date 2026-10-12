@@ -1,5 +1,5 @@
 /*
- * 009: Pinned search and replace bar styles.
+ * 009 / 010: Pinned search and replace bar styles.
  *
  * Implements the IntelliJ IDEA pinned bar layout atop the editor host.
  * All colours strictly consume semantic tokens from `global.css`.
@@ -61,6 +61,15 @@
   outline: 1px solid var(--color-focus-ring);
 }
 
+.search-replace-bar__input-wrapper--error {
+  border-color: var(--color-danger);
+}
+
+.search-replace-bar__input-wrapper--error:focus-within {
+  border-color: var(--color-danger);
+  outline: 1px solid var(--color-danger);
+}
+
 .search-replace-bar__input {
   width: 100%;
   height: 24px;
@@ -115,6 +124,11 @@
   white-space: nowrap;
 }
 
+.search-replace-bar__count--error {
+  color: var(--color-danger);
+  font-weight: 500;
+}
+
 .search-replace-bar__actions {
   display: flex;
   align-items: center;
@@ -142,7 +156,7 @@
 
 .search-replace-bar__icon-btn:disabled {
   opacity: 0.35;
-  cursor: not-allowed;
+  cursor: default;
 }
 
 .search-replace-bar__text-btn {
@@ -167,5 +181,5 @@
 
 .search-replace-bar__text-btn:disabled {
   opacity: 0.35;
-  cursor: not-allowed;
+  cursor: default;
 }

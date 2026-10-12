@@ -1,6 +1,8 @@
 # Plan: 009-search-replace — 当前文档查找与替换 (IntelliJ IDEA 风格)
 
-**分支**: `feature-core` | **模式**: Lean Spec | **状态**: In Progress (UI Island Polish & Immediate Highlight Engine)
+**分支**: `feature-core` | **模式**: Lean Spec | **状态**: Completed | **完成日期**: 2026-10-12
+
+完成依据：`checklist.md` 中的功能、交互及四项验证均已记录为通过。010 接续正则表达式搜索与颜色统一；009 的排除项保留为本阶段的历史范围。
 
 ---
 
