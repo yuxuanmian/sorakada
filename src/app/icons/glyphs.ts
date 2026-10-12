@@ -55,4 +55,7 @@ export const ICON_GLYPHS: Readonly<Record<IconId, readonly string[]>> = {
   more: ["M4 8h.01", "M8 8h.01", "M12 8h.01"],
   filter: ["M2.5 3.5h11l-4.5 5V13l-2-1.2V8.5z"],
   list: ["M3 4h10", "M3 8h10", "M3 12h10"],
+  search: ["M6.5 11.5a5 5 0 1 0 0-10 5 5 0 0 0 0 10z", "M10 10l4.5 4.5"],
+  "arrow-up": ["M8 12.5V3.5", "M4.5 7L8 3.5 11.5 7"],
+  "arrow-down": ["M8 3.5v9", "M4.5 9L8 12.5 11.5 9"],
 };

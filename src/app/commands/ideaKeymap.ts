@@ -23,6 +23,8 @@ export const IDEA_M1_KEYMAP: KeymapProfile = Object.freeze({
   "file.close": "Ctrl+W",
   "editor.undo": "Ctrl+Z",
   "editor.redo": "Ctrl+Shift+Z",
+  "editor.find": "Ctrl+F",
+  "editor.replace": "Ctrl+R",
 });
 
 /** The accelerator this profile assigns to `id`, if any. */

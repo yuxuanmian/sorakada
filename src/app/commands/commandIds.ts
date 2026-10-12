@@ -19,6 +19,9 @@ export const COMMAND_IDS = [
   "app.exit",
   "editor.undo",
   "editor.redo",
+  // 009: In-file search and replace.
+  "editor.find",
+  "editor.replace",
   // 003: Workspace lifecycle.
   "workspace.openFolder",
   "workspace.closeFolder",

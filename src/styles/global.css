@@ -32,6 +32,15 @@
   --color-accent: #4a8cff;
   --color-caret: #82aaff;
   /*
+   * 009: Search and replace match highlights.
+   *
+   * Soft amber-gold background for all matches, and a crisp bright amber-gold
+   * background with dark foreground for the currently focused active match.
+   */
+  --color-search-match: #4a3e20;
+  --color-search-match-active: #dca829;
+  --color-search-match-active-text: #121317;
+  /*
    * The AppShell canvas (island layout).
    *
    * Deliberately a step darker than every work surface (`--color-bg` is the

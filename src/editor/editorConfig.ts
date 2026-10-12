@@ -1,11 +1,19 @@
 import { basicSetup } from "codemirror";
+import { getSearchQuery, search } from "@codemirror/search";
 import {
   Compartment,
   EditorSelection,
   EditorState,
   type Extension,
+  RangeSetBuilder,
 } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import {
+  Decoration,
+  type DecorationSet,
+  EditorView,
+  ViewPlugin,
+  type ViewUpdate,
+} from "@codemirror/view";
 
 /**
  * Editor appearance.
@@ -102,6 +110,14 @@ const editorTheme = EditorView.theme(
       borderLeftColor: "var(--color-caret)",
       borderLeftWidth: "2px",
     },
+    // 009: Search match highlighting.
+    ".cm-searchMatch": {
+      backgroundColor: "var(--color-search-match)",
+    },
+    ".cm-searchMatch.cm-searchMatch-selected": {
+      backgroundColor: "var(--color-search-match-active)",
+      color: "var(--color-search-match-active-text)",
+    },
     "&.cm-focused": {
       outline: "none",
     },
@@ -148,6 +164,89 @@ export function reconfigureAppearance(
   });
 }
 
+const searchMatchMark = Decoration.mark({ class: "cm-searchMatch" });
+const searchMatchSelectedMark = Decoration.mark({
+  class: "cm-searchMatch cm-searchMatch-selected",
+});
+
+/**
+ * Custom search match decoration plugin.
+ *
+ * `@codemirror/search`'s built-in `searchHighlighter` checks `if (!panel || !query.spec.valid) return Decoration.none;`.
+ * Because Sorakada hosts its own React-based SearchReplaceBar instead of CodeMirror's
+ * built-in panel DOM, CodeMirror's `panel` is always null, which suppresses all match
+ * decorations.
+ *
+ * This ViewPlugin inspects `getSearchQuery(view.state)` and decorates visible ranges
+ * directly whenever a valid non-empty query exists, ensuring matches are highlighted
+ * immediately on the very first frame.
+ */
+export const searchDecorationPlugin = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+
+    constructor(readonly view: EditorView) {
+      this.decorations = this.build(view);
+    }
+
+    update(update: ViewUpdate) {
+      const querySpec = getSearchQuery(update.state);
+      const prevQuerySpec = getSearchQuery(update.startState);
+      if (
+        !querySpec.eq(prevQuerySpec) ||
+        update.docChanged ||
+        update.selectionSet ||
+        update.viewportChanged
+      ) {
+        this.decorations = this.build(update.view);
+      }
+    }
+
+    private build(view: EditorView): DecorationSet {
+      const querySpec = getSearchQuery(view.state);
+      if (!querySpec || !querySpec.valid || !querySpec.search) {
+        return Decoration.none;
+      }
+      const builder = new RangeSetBuilder<Decoration>();
+      const rawRanges = view.visibleRanges;
+      const ranges =
+        rawRanges.length > 0 &&
+        !(
+          rawRanges.length === 1 &&
+          rawRanges[0].from === 0 &&
+          rawRanges[0].to === 0 &&
+          view.state.doc.length > 0
+        )
+          ? rawRanges
+          : [{ from: 0, to: view.state.doc.length }];
+
+      for (let i = 0; i < ranges.length; i++) {
+        let { from, to } = ranges[i];
+        while (i < ranges.length - 1 && to > ranges[i + 1].from - 500) {
+          to = ranges[++i].to;
+        }
+        const cursor = querySpec.getCursor(view.state, from, to);
+        let match: IteratorResult<{ from: number; to: number }>;
+        while (!(match = cursor.next()).done) {
+          const { from: mFrom, to: mTo } = match.value;
+          const isSelected = view.state.selection.ranges.some(
+            (r) => r.from === mFrom && r.to === mTo,
+          );
+          builder.add(
+            mFrom,
+            mTo,
+            isSelected ? searchMatchSelectedMark : searchMatchMark,
+          );
+        }
+      }
+      return builder.finish();
+    }
+  },
+  {
+    decorations: (v) => v.decorations,
+  },
+);
+
 /**
  * Creates the state for a document showing `doc` (empty by default).
  *
@@ -173,7 +272,13 @@ export function createEditorState(
 ): EditorState {
   return EditorState.create({
     doc,
-    extensions: [basicSetup, appearanceBoundary(), runtimeExtensions],
+    extensions: [
+      basicSetup,
+      search({ top: true }),
+      searchDecorationPlugin,
+      appearanceBoundary(),
+      runtimeExtensions,
+    ],
   });
 }
 

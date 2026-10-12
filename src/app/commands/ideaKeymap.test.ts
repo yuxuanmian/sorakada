@@ -42,6 +42,8 @@ describe("IDEA M1 keymap profile", () => {
       "file.close": "Ctrl+W",
       "editor.undo": "Ctrl+Z",
       "editor.redo": "Ctrl+Shift+Z",
+      "editor.find": "Ctrl+F",
+      "editor.replace": "Ctrl+R",
     });
   });
 
@@ -50,7 +52,9 @@ describe("IDEA M1 keymap profile", () => {
     // accelerator: F2/Delete are Explorer-local triggers, and Open/Close Folder
     // and View > Explorer are reachable from the native menu.
     expect(Object.keys(IDEA_M1_KEYMAP).sort()).toEqual([
+      "editor.find",
       "editor.redo",
+      "editor.replace",
       "editor.undo",
       "file.close",
       "file.new",
@@ -74,6 +78,8 @@ describe("IDEA M1 keymap profile", () => {
     expect(acceleratorFor("file.close")).toBe("Ctrl+W");
     expect(acceleratorFor("editor.undo")).toBe("Ctrl+Z");
     expect(acceleratorFor("editor.redo")).toBe("Ctrl+Shift+Z");
+    expect(acceleratorFor("editor.find")).toBe("Ctrl+F");
+    expect(acceleratorFor("editor.replace")).toBe("Ctrl+R");
   });
 
   it("never binds one accelerator to two commands", () => {
@@ -114,6 +120,8 @@ describe("CommandId catalogue", () => {
       "app.exit",
       "editor.undo",
       "editor.redo",
+      "editor.find",
+      "editor.replace",
       "workspace.openFolder",
       "workspace.closeFolder",
       "explorer.newFile",

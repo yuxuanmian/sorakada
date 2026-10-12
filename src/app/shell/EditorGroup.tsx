@@ -12,15 +12,18 @@ import type { ReactNode } from "react";
 export interface EditorGroupProps {
   /** The group's own Tab strip, or nothing when the group is unadorned. */
   tabStrip?: ReactNode;
+  /** Optional pinned bar directly above the editor host (e.g. search/replace). */
+  pinnedBar?: ReactNode;
   /** Editor host or Empty State. */
   children: ReactNode;
 }
 
 /** Renders one editor group. */
-export function EditorGroup({ tabStrip, children }: EditorGroupProps) {
+export function EditorGroup({ tabStrip, pinnedBar, children }: EditorGroupProps) {
   return (
     <section className="editor-group" aria-label="Editor group">
       {tabStrip}
+      {pinnedBar}
       <div className="editor-group__host">{children}</div>
     </section>
   );

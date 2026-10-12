@@ -135,6 +135,24 @@ class FakeEditor implements EditorHandle {
     this.listener = listener;
   }
 
+  getSelectedText(): string {
+    return "";
+  }
+
+  setSearch(): void {}
+
+  findNext(): void {}
+
+  findPrevious(): void {}
+
+  replaceNext(): void {}
+
+  replaceAll(): void {}
+
+  countMatches() {
+    return { count: 0, currentIndex: 0, isCapped: false };
+  }
+
   /** Models a user edit in the bound document, which CodeMirror reports as `docChanged`. */  type(text: string): void {
     // A real edit is a transaction against the live state, which is what keeps
     // history (and therefore a meaningful undo depth) around.

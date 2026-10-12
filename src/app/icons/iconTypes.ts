@@ -40,7 +40,10 @@ export type UiIconId =
   | "collapse-all"
   | "more"
   | "filter"
-  | "list";
+  | "list"
+  | "search"
+  | "arrow-up"
+  | "arrow-down";
 
 /**
  * The fallback glyphs a filesystem entry may resolve to.

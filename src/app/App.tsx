@@ -32,6 +32,7 @@ import { nativeWorkspaceDialogService } from "../services/workspaceDialogs";
 import { tauriWorkspaceFileService } from "../services/workspaceFileService";
 import { createCommandRegistry } from "./commands/commandRegistry";
 import type { CommandId } from "./commands/commandIds";
+import { createEscapeManager } from "./commands/escapeManager";
 import { commandForKeyboardEvent } from "./commands/ideaKeymap";
 import { DiskValidator } from "./document/diskValidation";
 import { DocumentManager } from "./document/documentManager";
@@ -55,6 +56,9 @@ import {
   createEmptyExplorerState,
   type ExplorerState,
 } from "./explorer/explorerModel";
+import { SearchController } from "./search/searchController";
+import type { SearchState } from "./search/searchModel";
+import { SearchReplaceBar } from "./search/SearchReplaceBar";
 import { CompactAppMenu } from "./menu/CompactAppMenu";
 import {
   createActivationBenchmark,
@@ -272,6 +276,24 @@ export function App() {
 
   // Purely visual: the manager owns what a drop actually does.
   const [isFileDragActive, setIsFileDragActive] = useState(false);
+
+  // 009: In-file search and replace controller & hierarchical Escape dismissal.
+  const [escapeManager] = useState(createEscapeManager);
+  const [searchController] = useState(
+    () => new SearchController(editorHandle, escapeManager),
+  );
+  const [searchState, setSearchState] = useState<SearchState>(() =>
+    searchController.getState(),
+  );
+
+  useEffect(() => {
+    return searchController.subscribe(setSearchState);
+  }, [searchController]);
+
+  // Tab isolation: close search bar and reset query whenever active document changes
+  useEffect(() => {
+    searchController.onDocumentChange();
+  }, [snapshot.activeDocumentId, searchController]);
 
   /** Runs a command and reports anything that escapes its handler. */
   const dispatch = useCallback(
@@ -503,6 +525,18 @@ export function App() {
         },
         isEnabled: hasActiveDocument,
       }),
+      registry.register("editor.find", {
+        execute: () => {
+          searchController.open("find");
+        },
+        isEnabled: hasActiveDocument,
+      }),
+      registry.register("editor.replace", {
+        execute: () => {
+          searchController.open("replace");
+        },
+        isEnabled: hasActiveDocument,
+      }),
       registry.register("workspace.openFolder", {
         execute: async () => {
           const result = await workContext.openFromDialog();
@@ -689,12 +723,30 @@ export function App() {
         return;
       }
 
+      // If typing in an input/textarea element (e.g. search/replace input),
+      // allow native undo/redo rather than hijacking document undo/redo.
+      const target = event.target as HTMLElement | null;
+      const isInput =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement;
+      if (
+        isInput &&
+        (commandId === "editor.undo" || commandId === "editor.redo")
+      ) {
+        return;
+      }
+
       event.preventDefault();
       event.stopPropagation();
       void registry.execute(commandId).catch(reportError);
     };
 
+    const onEscapeKeyDown = (event: KeyboardEvent): void => {
+      escapeManager.handleKeyboardEvent(event);
+    };
+
     window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keydown", onEscapeKeyDown, false);
 
     let disposed = false;
     let disposeWindow: (() => void) | null = null;
@@ -773,6 +825,7 @@ export function App() {
     return () => {
       disposed = true;
       window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keydown", onEscapeKeyDown, false);
       editorHandle.setStateUpdateListener(null);
       unsubscribeDocuments();
       unsubscribeExplorer();
@@ -798,6 +851,7 @@ export function App() {
     controller,
     debugStore,
     editorHandle,
+    escapeManager,
     manager,
     preferencesStore,
     registry,
@@ -906,6 +960,14 @@ export function App() {
                     dispatch("file.new");
                   }}
                 />
+              }
+              pinnedBar={
+                activeSession !== null ? (
+                  <SearchReplaceBar
+                    controller={searchController}
+                    state={searchState}
+                  />
+                ) : null
               }
             >
               {activeSession === null ? (

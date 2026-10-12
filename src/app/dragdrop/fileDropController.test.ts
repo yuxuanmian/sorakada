@@ -312,6 +312,24 @@ class MinimalEditor implements EditorHandle {
     this.listener = listener;
   }
 
+  getSelectedText(): string {
+    return "";
+  }
+
+  setSearch(): void {}
+
+  findNext(): void {}
+
+  findPrevious(): void {}
+
+  replaceNext(): void {}
+
+  replaceAll(): void {}
+
+  countMatches() {
+    return { count: 0, currentIndex: 0, isCapped: false };
+  }
+
   currentListener(): StateUpdateListener | null {
     return this.listener;
   }

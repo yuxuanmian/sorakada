@@ -1,11 +1,32 @@
 import type { EditorState, Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { redo, undo } from "@codemirror/commands";
+import {
+  findNext,
+  findPrevious,
+  replaceNext,
+  replaceAll,
+  SearchCursor,
+  SearchQuery,
+  setSearchQuery,
+} from "@codemirror/search";
 
 import type {
   DocumentId,
   DocumentViewState,
 } from "../app/document/documentSession";
+
+/**
+ * Result of counting matches in the active document.
+ */
+export interface SearchMatchesResult {
+  /** Total number of matches up to the safety cap. */
+  count: number;
+  /** 1-based index of the currently selected match, or 0 if none. */
+  currentIndex: number;
+  /** Whether the count reached the safety cap (e.g. 1000). */
+  isCapped: boolean;
+}
 
 /**
  * Invoked for every CodeMirror update.
@@ -81,6 +102,27 @@ export interface EditorHandle {
 
   /** Registers the single receiver of state updates. */
   setStateUpdateListener(listener: StateUpdateListener | null): void;
+
+  /** Gets the selected text from the active document, or empty string if none. */
+  getSelectedText(): string;
+
+  /** Updates the active search query and case sensitivity. */
+  setSearch(query: string, caseSensitive: boolean, replacement?: string): void;
+
+  /** Navigates to the next match from the current cursor position. */
+  findNext(): void;
+
+  /** Navigates to the previous match before the current cursor position. */
+  findPrevious(): void;
+
+  /** Replaces the current match (or jumps to it if not selected) and moves to the next. */
+  replaceNext(query: string, replacement: string, caseSensitive: boolean): void;
+
+  /** Replaces all matches across the document in a single atomic transaction. */
+  replaceAll(query: string, replacement: string, caseSensitive: boolean): void;
+
+  /** Calculates match statistics for the query against the current document. */
+  countMatches(query: string, caseSensitive: boolean): SearchMatchesResult;
 }
 
 /**
@@ -182,6 +224,95 @@ class EditorHandleImpl implements EditorHandle {
 
   setStateUpdateListener(listener: StateUpdateListener | null): void {
     this.listener = listener;
+  }
+
+  getSelectedText(): string {
+    if (this.view === null) {
+      return "";
+    }
+    const { from, to } = this.view.state.selection.main;
+    if (from === to) {
+      return "";
+    }
+    return this.view.state.sliceDoc(from, to);
+  }
+
+  setSearch(query: string, caseSensitive: boolean, replacement = ""): void {
+    const view = this.requireView();
+    view.dispatch({
+      effects: setSearchQuery.of(
+        new SearchQuery({
+          search: query,
+          caseSensitive,
+          replace: replacement,
+        }),
+      ),
+    });
+  }
+
+  findNext(): void {
+    const view = this.requireView();
+    findNext(view);
+  }
+
+  findPrevious(): void {
+    const view = this.requireView();
+    findPrevious(view);
+  }
+
+  replaceNext(query: string, replacement: string, caseSensitive: boolean): void {
+    const view = this.requireView();
+    view.dispatch({
+      effects: setSearchQuery.of(
+        new SearchQuery({
+          search: query,
+          caseSensitive,
+          replace: replacement,
+        }),
+      ),
+    });
+    replaceNext(view);
+  }
+
+  replaceAll(query: string, replacement: string, caseSensitive: boolean): void {
+    const view = this.requireView();
+    view.dispatch({
+      effects: setSearchQuery.of(
+        new SearchQuery({
+          search: query,
+          caseSensitive,
+          replace: replacement,
+        }),
+      ),
+    });
+    replaceAll(view);
+  }
+
+  countMatches(query: string, caseSensitive: boolean): SearchMatchesResult {
+    if (this.view === null || query.length === 0) {
+      return { count: 0, currentIndex: 0, isCapped: false };
+    }
+    const doc = this.view.state.doc;
+    const normalize = caseSensitive ? undefined : (x: string) => x.toLowerCase();
+    const cursor = new SearchCursor(doc, query, 0, doc.length, normalize);
+    const { from, to } = this.view.state.selection.main;
+    let count = 0;
+    let currentIndex = 0;
+    let isCapped = false;
+    const MAX_MATCHES = 1000;
+
+    while (!cursor.next().done) {
+      count += 1;
+      if (cursor.value.from === from && cursor.value.to === to) {
+        currentIndex = count;
+      }
+      if (count >= MAX_MATCHES) {
+        isCapped = true;
+        break;
+      }
+    }
+
+    return { count, currentIndex, isCapped };
   }
 
   private requireView(): EditorView {
