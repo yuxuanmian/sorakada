@@ -1,6 +1,6 @@
 import type { EditorHandle } from "../../editor/editorHandle";
 import { ESCAPE_PRIORITY, type EscapeManager } from "../commands/escapeManager";
-import { validateRegex } from "./searchEngine";
+import { INVALID_REGEX_ERROR, validateRegex } from "./searchEngine";
 import {
   INITIAL_SEARCH_STATE,
   normalizeSelectionForPrefill,
@@ -80,7 +80,7 @@ export class SearchController {
         const validation = validateRegex(query, this.state.caseSensitive);
         if (!validation.valid) {
           this.setState({
-            error: "无效的正则表达式",
+            error: INVALID_REGEX_ERROR,
             matchIndex: 0,
             matchCount: 0,
             isCapped: false,
@@ -267,7 +267,7 @@ export class SearchController {
       const validation = validateRegex(query, this.state.caseSensitive);
       if (!validation.valid) {
         this.setState({
-          error: "无效的正则表达式",
+          error: INVALID_REGEX_ERROR,
           matchIndex: 0,
           matchCount: 0,
           isCapped: false,
@@ -353,7 +353,7 @@ export class SearchController {
       const validation = validateRegex(this.state.query, this.state.caseSensitive);
       if (!validation.valid) {
         this.setState({
-          error: "无效的正则表达式",
+          error: INVALID_REGEX_ERROR,
           matchIndex: 0,
           matchCount: 0,
           isCapped: false,
@@ -433,7 +433,7 @@ export class SearchController {
       const validation = validateRegex(this.state.query, caseSensitive);
       if (!validation.valid) {
         this.setState({
-          error: "无效的正则表达式",
+          error: INVALID_REGEX_ERROR,
           matchIndex: 0,
           matchCount: 0,
           isCapped: false,

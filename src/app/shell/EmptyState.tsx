@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 /**
  * The Editor Area's zero-document state.
  *
@@ -22,20 +24,21 @@ export function EmptyState({
   onOpenFile,
   onOpenFolder,
 }: EmptyStateProps) {
+  const { t } = useTranslation();
   return (
     <div className="empty-state" role="status">
-      <p className="empty-state__title">No file is open</p>
+      <p className="empty-state__title">{t("ui.emptyState.title")}</p>
       <p className="empty-state__hint">
         {workspaceName === null
-          ? "Open a file to start editing, or open a folder to browse a Workspace."
-          : `Open a file to start editing. ${workspaceName} stays open in the Explorer.`}
+          ? t("ui.emptyState.hintWithoutWorkspace")
+          : t("ui.emptyState.hintWithWorkspace", { workspaceName })}
       </p>
       <div className="empty-state__actions">
         <button type="button" className="shell-button" onClick={onOpenFile}>
-          Open File
+          {t("ui.emptyState.openFile")}
         </button>
         <button type="button" className="shell-button" onClick={onOpenFolder}>
-          Open Folder
+          {t("ui.emptyState.openFolder")}
         </button>
       </div>
     </div>

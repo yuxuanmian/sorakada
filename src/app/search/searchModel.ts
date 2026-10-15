@@ -1,3 +1,6 @@
+import type { AppTranslator } from "../../i18n";
+import { t } from "../../i18n";
+import { INVALID_REGEX_ERROR } from "./searchEngine";
 /**
  * Search and replace state models, helpers, and constants.
  */
@@ -84,21 +87,35 @@ export function formatMatchCountLabel(
   matchIndex: number,
   isCapped: boolean,
   error?: string | null,
+  translate: AppTranslator = t,
 ): string {
   if (error) {
+    if (error === INVALID_REGEX_ERROR) {
+      return translate("ui.search.errors.invalidRegex");
+    }
     return error;
   }
   if (query.length === 0) {
     return "";
   }
   if (matchCount === 0) {
-    return "0 个结果";
+    return translate("ui.search.matches.noResults");
   }
-  const capSuffix = isCapped ? "+" : "";
   if (matchIndex > 0) {
-    return `${matchIndex} / ${matchCount}${capSuffix}`;
+    return isCapped
+      ? translate("ui.search.matches.positionCapped", {
+          current: matchIndex,
+          total: matchCount,
+        })
+      : translate("ui.search.matches.position", {
+          current: matchIndex,
+          total: matchCount,
+        });
   }
-  return `${matchCount}${capSuffix} 个结果`;
+  if (isCapped) {
+    return translate("ui.search.matches.countCapped", { count: matchCount });
+  }
+  return translate("ui.search.matches.count", { count: matchCount });
 }
 
 /**

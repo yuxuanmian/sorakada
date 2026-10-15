@@ -58,7 +58,8 @@ export type DiskValidationTrigger =
    * snapshot read is what keeps a real content conflict from being silently
    * cleared (FR-061, plan §11).
    */
-  | "external-relocation";
+  | "external-relocation"
+  | "forced-overwrite";
 
 /**
  * Triggers that must read the supported snapshot instead of trusting a matching
@@ -67,6 +68,7 @@ export type DiskValidationTrigger =
  */
 const FORCED_SNAPSHOT_TRIGGERS: ReadonlySet<DiskValidationTrigger> = new Set([
   "external-relocation",
+  "forced-overwrite",
 ]);
 
 /** The exact binding a result may still be applied to. */

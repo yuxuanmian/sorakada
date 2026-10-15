@@ -39,6 +39,7 @@ import {
   useVirtualizer,
   type Range,
 } from "@tanstack/react-virtual";
+import { useTranslation } from "react-i18next";
 
 import type { DensityMetrics } from "../shell/density";
 import type { UiDebugOptions } from "../shell/uiDebugState";
@@ -121,6 +122,7 @@ function createMeasurer(): LabelMeasurer {
 /** Renders the virtual Tree viewport. */
 export function ExplorerVirtualTree(props: ExplorerVirtualTreeProps) {
   const { metrics, rows, state } = props;
+  const { t } = useTranslation();
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
@@ -301,7 +303,7 @@ export function ExplorerVirtualTree(props: ExplorerVirtualTreeProps) {
       // Tree, never to a recyclable row (T096).
       tabIndex={0}
       role="tree"
-      aria-label="Workspace files"
+      aria-label={t("ui.explorer.workspaceFilesAria")}
       aria-activedescendant={activeDescendant}
       data-virtual-rendered={virtualItems.length}
     >

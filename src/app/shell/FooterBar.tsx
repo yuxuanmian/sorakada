@@ -11,6 +11,7 @@
  */
 
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 export interface FooterBarProps {
   /** Filesystem/document context; truncates first when space runs out. */
@@ -21,8 +22,9 @@ export interface FooterBarProps {
 
 /** Renders the Footer. */
 export function FooterBar({ left, right }: FooterBarProps) {
+  const { t } = useTranslation();
   return (
-    <footer className="footer-bar" role="contentinfo" aria-label="Status">
+    <footer className="footer-bar" role="contentinfo" aria-label={t("ui.footer.region")}>
       <div className="footer-bar__left">{left}</div>
       <div className="footer-bar__right">{right}</div>
     </footer>

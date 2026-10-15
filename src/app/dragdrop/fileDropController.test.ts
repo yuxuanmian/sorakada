@@ -262,6 +262,18 @@ describe("processDroppedPaths", () => {
     expect(lastId).toBe("doc-b");
     expect(manager.activated).toEqual(["doc-b"]);
   });
+
+  it("ignores dropped paths when isBlocked reports true", async () => {
+    const manager = new FakeDropManager();
+    manager.script(VALID_A, { status: "opened", documentId: "doc-a" });
+
+    const result = await processDroppedPaths([VALID_A], manager, {
+      isBlocked: () => true,
+    });
+
+    expect(result).toBeNull();
+    expect(manager.requestedPaths()).toEqual([]);
+  });
 });
 
 /* -------------------------------------------------------------------------- */

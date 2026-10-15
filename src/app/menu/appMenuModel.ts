@@ -15,6 +15,8 @@
 import type { CommandId } from "../commands/commandIds";
 import { acceleratorFor } from "../commands/ideaKeymap";
 import type { UiDensity } from "../shell/uiPreferences";
+import type { AppTranslator, TranslationKey } from "../../i18n";
+import { t } from "../../i18n";
 import type {
   SoraMenuItem,
   SoraMenuModel,
@@ -26,19 +28,66 @@ import { withMenuAvailability } from "../../ui/menu/menuModel";
 /** One entry of the static catalogue. */
 export interface AppMenuEntry {
   commandId: CommandId;
-  label: string;
+  labelKey: TranslationKey;
+  readonly label?: string;
+}
+
+export interface AppMenuSubmenuSpec {
+  id: string;
+  labelKey: TranslationKey;
+  items: readonly AppMenuEntry[];
+  readonly label?: string;
 }
 
 /** A section of the static catalogue, with any submenus it owns. */
 export interface AppMenuSectionSpec {
   id: string;
-  label: string;
+  labelKey: TranslationKey;
   items: readonly AppMenuEntry[];
-  submenus?: readonly {
-    id: string;
-    label: string;
-    items: readonly AppMenuEntry[];
-  }[];
+  submenus?: readonly AppMenuSubmenuSpec[];
+  readonly label?: string;
+}
+
+function entry(commandId: CommandId, labelKey: TranslationKey): AppMenuEntry {
+  return {
+    commandId,
+    labelKey,
+    get label() {
+      return t(labelKey);
+    },
+  };
+}
+
+function submenu(
+  id: string,
+  labelKey: TranslationKey,
+  items: readonly AppMenuEntry[],
+): AppMenuSubmenuSpec {
+  return {
+    id,
+    labelKey,
+    items,
+    get label() {
+      return t(labelKey);
+    },
+  };
+}
+
+function section(
+  id: string,
+  labelKey: TranslationKey,
+  items: readonly AppMenuEntry[],
+  submenus?: readonly AppMenuSubmenuSpec[],
+): AppMenuSectionSpec {
+  return {
+    id,
+    labelKey,
+    items,
+    ...(submenus === undefined ? {} : { submenus }),
+    get label() {
+      return t(labelKey);
+    },
+  };
 }
 
 /**
@@ -49,57 +98,41 @@ export interface AppMenuSectionSpec {
  * are all still one popup away (FR-021, FR-025, T062).
  */
 export const APP_MENU_SECTIONS: readonly AppMenuSectionSpec[] = [
-  {
-    id: "file",
-    label: "File",
-    items: [
-      { commandId: "file.new", label: "New" },
-      { commandId: "file.open", label: "Open..." },
-      { commandId: "workspace.openFolder", label: "Open Folder..." },
-      { commandId: "workspace.closeFolder", label: "Close Folder" },
-      { commandId: "file.save", label: "Save" },
-      { commandId: "file.saveAs", label: "Save As..." },
-      { commandId: "file.close", label: "Close" },
-      { commandId: "app.exit", label: "Exit" },
+  section("file", "ui.menu.sections.file", [
+    entry("file.new", "ui.menu.items.file.new"),
+    entry("file.open", "ui.menu.items.file.open"),
+    entry("workspace.openFolder", "ui.menu.items.file.openFolder"),
+    entry("workspace.closeFolder", "ui.menu.items.file.closeFolder"),
+    entry("file.save", "ui.menu.items.file.save"),
+    entry("file.saveAs", "ui.menu.items.file.saveAs"),
+    entry("file.close", "ui.menu.items.file.close"),
+    entry("app.exit", "ui.menu.items.file.exit"),
+  ]),
+  section("edit", "ui.menu.sections.edit", [
+    entry("editor.undo", "ui.menu.items.edit.undo"),
+    entry("editor.redo", "ui.menu.items.edit.redo"),
+  ]),
+  section(
+    "view",
+    "ui.menu.sections.view",
+    [
+      entry("view.toggleExplorer", "ui.menu.items.view.explorer"),
+      entry("view.resetSidebarWidth", "ui.menu.items.view.resetSidebarWidth"),
     ],
-  },
-  {
-    id: "edit",
-    label: "Edit",
-    items: [
-      { commandId: "editor.undo", label: "Undo" },
-      { commandId: "editor.redo", label: "Redo" },
+    [
+      submenu("density", "ui.menu.submenus.density.label", [
+        entry("view.densityCompact", "ui.menu.submenus.density.compact"),
+        entry("view.densityDefault", "ui.menu.submenus.density.default"),
+        entry("view.densityComfortable", "ui.menu.submenus.density.comfortable"),
+      ]),
+      submenu("debug", "ui.menu.submenus.debug.label", [
+        entry("view.toggleVirtualRange", "ui.menu.submenus.debug.virtualRange"),
+        entry("view.toggleTreeRowBounds", "ui.menu.submenus.debug.treeRowBounds"),
+        entry("view.debugLargeTree", "ui.menu.submenus.debug.largeTree"),
+        entry("view.debugManyTabs", "ui.menu.submenus.debug.manyTabs"),
+      ]),
     ],
-  },
-  {
-    id: "view",
-    label: "View",
-    items: [
-      { commandId: "view.toggleExplorer", label: "Explorer" },
-      { commandId: "view.resetSidebarWidth", label: "Reset Sidebar Width" },
-    ],
-    submenus: [
-      {
-        id: "density",
-        label: "Density",
-        items: [
-          { commandId: "view.densityCompact", label: "Compact" },
-          { commandId: "view.densityDefault", label: "Default" },
-          { commandId: "view.densityComfortable", label: "Comfortable" },
-        ],
-      },
-      {
-        id: "debug",
-        label: "UI Debug",
-        items: [
-          { commandId: "view.toggleVirtualRange", label: "Virtual Range" },
-          { commandId: "view.toggleTreeRowBounds", label: "Tree Row Bounds" },
-          { commandId: "view.debugLargeTree", label: "10,000-Row Tree" },
-          { commandId: "view.debugManyTabs", label: "100 Tabs" },
-        ],
-      },
-    ],
-  },
+  ),
 ];
 
 /** The command id a density preset is selected through (FR-088, T155). */
@@ -124,16 +157,10 @@ export interface BuildAppMenuOptions {
    * without changing any other command's behaviour (T065, T184).
    */
   developer?: boolean;
-}
-
-function toItem(entry: AppMenuEntry): SoraMenuItem {
-  const accelerator = acceleratorFor(entry.commandId);
-  return {
-    id: entry.commandId,
-    label: entry.label,
-    commandId: entry.commandId,
-    ...(accelerator === undefined ? {} : { accelerator }),
-  };
+  /**
+   * Optional translate function; defaults to calling `t` from `src/i18n` at build time.
+   */
+  t?: AppTranslator;
 }
 
 /**
@@ -147,7 +174,17 @@ function toItem(entry: AppMenuEntry): SoraMenuItem {
 export function buildAppMenuModel(
   options: BuildAppMenuOptions,
 ): SoraMenuModel {
-  const { isEnabled, developer = false } = options;
+  const { isEnabled, developer = false, t: translate = t } = options;
+
+  const toItem = (entryItem: AppMenuEntry): SoraMenuItem => {
+    const accelerator = acceleratorFor(entryItem.commandId);
+    return {
+      id: entryItem.commandId,
+      label: translate(entryItem.labelKey),
+      commandId: entryItem.commandId,
+      ...(accelerator === undefined ? {} : { accelerator }),
+    };
+  };
 
   const sections: SoraMenuSection[] = APP_MENU_SECTIONS.map((spec) => {
     const submenus: SoraSubmenu[] = (spec.submenus ?? [])
@@ -156,13 +193,13 @@ export function buildAppMenuModel(
       .filter((submenu) => submenu.id !== "debug" || developer)
       .map((submenu) => ({
         id: submenu.id,
-        label: submenu.label,
+        label: translate(submenu.labelKey),
         items: submenu.items.map(toItem),
       }));
 
     return {
       id: spec.id,
-      label: spec.label,
+      label: translate(spec.labelKey),
       items: spec.items.map(toItem),
       ...(submenus.length === 0 ? {} : { submenus }),
     };

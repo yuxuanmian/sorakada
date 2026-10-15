@@ -15,6 +15,7 @@
  */
 
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 /** The transient search presentation, or `null` for the normal header. */
 export interface ExplorerSearchSlot {
@@ -43,11 +44,13 @@ export function ExplorerHeader({
   search,
   actions,
 }: ExplorerHeaderProps) {
+  const { t } = useTranslation();
+
   if (search === null) {
     return (
       <div className="explorer__header">
         <span className="explorer__title" title={workspaceName ?? undefined}>
-          {workspaceName ?? "Files"}
+          {workspaceName ?? t("ui.explorer.header.defaultTitle")}
         </span>
         <div className="explorer__actions">{actions}</div>
       </div>
@@ -62,8 +65,8 @@ export function ExplorerHeader({
         // trigger must not fire again from inside it (FR-050).
         autoFocus
         value={search.query}
-        aria-label="Search visible files"
-        placeholder="Search files"
+        aria-label={t("ui.explorer.header.search.aria")}
+        placeholder={t("ui.explorer.header.search.placeholder")}
         spellCheck={false}
         onChange={(event) => {
           search.onQueryChange(event.target.value);
@@ -93,7 +96,7 @@ export function ExplorerHeader({
         }}
       />
       <span className="explorer__search-count" aria-live="polite">
-        {search.matchCount === 0 ? "No matches" : `${search.matchCount} matches`}
+        {search.matchCount === 0 ? t("ui.explorer.header.search.noMatches") : t("ui.explorer.header.search.matchCount", { count: search.matchCount })}
       </span>
       <div className="explorer__actions">{actions}</div>
     </div>

@@ -20,6 +20,9 @@ import type {
   WorkspaceFileService,
 } from "../../services/workspaceFileService";
 import type { WorkspaceDialogService } from "../../services/workspaceDialogs";
+import type { OperationErrorContext } from "../../services/errorContext";
+import type { DialogValidity } from "../../ui/dialog/dialogManager";
+import type { Text } from "@codemirror/state";
 import {
   displayNameForPath,
   type DocumentId,
@@ -391,6 +394,34 @@ export const SOURCE_ENTRY_CHANGED_MESSAGE =
 /**
  * Reserves, mutates and reconciles Explorer filesystem operations.
  */
+interface AffectedSessionSnapshot {
+  readonly id: DocumentId;
+  readonly path: string | null;
+  readonly comparisonKey: string;
+  readonly bindingGeneration: number;
+  readonly latestSaveGeneration: number;
+  readonly dirty: boolean;
+  readonly doc: Text;
+}
+
+function captureAffectedSnapshots(
+  affected: readonly DocumentSession[],
+): Map<DocumentId, AffectedSessionSnapshot> {
+  const map = new Map<DocumentId, AffectedSessionSnapshot>();
+  for (const s of affected) {
+    map.set(s.id, {
+      id: s.id,
+      path: s.path,
+      comparisonKey: s.pathIdentity?.comparisonKey ?? s.path ?? "",
+      bindingGeneration: s.bindingGeneration,
+      latestSaveGeneration: s.latestSaveGeneration,
+      dirty: s.dirty,
+      doc: s.editorState.doc,
+    });
+  }
+  return map;
+}
+
 export class ExplorerActions {
   private readonly deps: ExplorerActionDeps;
 
@@ -566,7 +597,7 @@ export class ExplorerActions {
         true,
       );
     } catch (error) {
-      await this.reportError(error, "path_resolution");
+      await this.reportError(error, "path_resolution", { operation: "create", path: parentPath });
       return "retained";
     }
 
@@ -577,7 +608,7 @@ export class ExplorerActions {
       sourceKey: destinationIdentity.comparisonKey,
     });
     if (reservation.status === "failed") {
-      await this.deps.dialogs.showError(reservation.error.message);
+      await this.deps.dialogs.showError(reservation.error.message, { operation: "create", path: destinationPath, code: reservation.error.code });
       return "retained";
     }
 
@@ -699,7 +730,7 @@ export class ExplorerActions {
         true,
       );
     } catch (error) {
-      await this.reportError(error, "path_resolution");
+      await this.reportError(error, "path_resolution", { operation: "rename", path: sourcePath });
       return "retained";
     }
 
@@ -712,7 +743,7 @@ export class ExplorerActions {
       destinationKey: destinationIdentity.comparisonKey,
     });
     if (reservation.status === "failed") {
-      await this.deps.dialogs.showError(reservation.error.message);
+      await this.deps.dialogs.showError(reservation.error.message, { operation: "rename", path: sourcePath, code: reservation.error.code });
       return "retained";
     }
 
@@ -727,7 +758,7 @@ export class ExplorerActions {
     if (identified.status === "failed") {
       // Without a trustworthy affected set the path commit would silently skip
       // documents that the disk rename just moved (FR-062, FR-103).
-      await this.deps.dialogs.showError(identified.error.message);
+      await this.deps.dialogs.showError(identified.error.message, { operation: "rename", path: sourcePath, code: identified.error.code });
       reservation.reservation.release();
       return "retained";
     }
@@ -739,7 +770,7 @@ export class ExplorerActions {
       // identification — has already settled, so the window between proving the
       // source object and mutating it is as small as this design allows.
       if (!(await this.sourceEntryIsUnchanged(sourcePath, sourceEntry))) {
-        await this.deps.dialogs.showError(SOURCE_ENTRY_CHANGED_MESSAGE);
+        await this.deps.dialogs.showError(SOURCE_ENTRY_CHANGED_MESSAGE, { operation: "rename", path: sourcePath, code: "path_resolution" });
         return "retained";
       }
 
@@ -776,7 +807,7 @@ export class ExplorerActions {
     } catch (error) {
       // FR-064: the disk rename failed, so neither document paths nor Tree
       // state may change — and the draft stays for correction.
-      await this.reportError(error, "io_rename");
+      await this.reportError(error, "io_rename", { operation: "rename", path: sourcePath });
       return "retained";
     } finally {
       reservation.reservation.release();
@@ -810,7 +841,7 @@ export class ExplorerActions {
         false,
       );
     } catch (error) {
-      await this.reportError(error, "path_resolution");
+      await this.reportError(error, "path_resolution", { operation: "delete", path: targetPath });
       return;
     }
 
@@ -827,11 +858,41 @@ export class ExplorerActions {
       sourceKey: targetKey,
     });
     if (reservation.status === "failed") {
-      await this.deps.dialogs.showError(reservation.error.message);
+      await this.deps.dialogs.showError(reservation.error.message, { operation: "delete", path: targetPath, code: reservation.error.code });
       return;
     }
 
     const generation = this.deps.explorer.getState().generation;
+    const origin = this.captureOrigin();
+
+    const makeDeleteValidity = (
+      snapshots: Map<DocumentId, AffectedSessionSnapshot>,
+    ): DialogValidity => {
+      return {
+        isValid: () => {
+          if (!this.isCurrentOrigin(origin)) return false;
+          const currentAffected = this.deps.documents.findSessionsUnder(targetKey);
+          const currentById = new Map(currentAffected.map((s) => [s.id, s]));
+          if (currentById.size !== snapshots.size) {
+            return false;
+          }
+          for (const [id, snap] of snapshots) {
+            const live = currentById.get(id);
+            if (!live) return false;
+            if (
+              live.path !== snap.path ||
+              (live.pathIdentity?.comparisonKey ?? live.path) !== snap.comparisonKey ||
+              live.bindingGeneration !== snap.bindingGeneration ||
+              live.dirty !== snap.dirty ||
+              !live.editorState.doc.eq(snap.doc)
+            ) {
+              return false;
+            }
+          }
+          return true;
+        },
+      };
+    };
 
     try {
       const first = await this.describeDelete(
@@ -840,59 +901,162 @@ export class ExplorerActions {
         targetIsDirectory,
       );
       if (first.status === "failed") {
-        // The affected set could not be established, so the destructive
-        // operation must not run on the assumption that nothing is open.
-        await this.deps.dialogs.showError(first.error.message);
+        await this.deps.dialogs.showError(first.error.message, {
+          operation: "delete",
+          path: targetPath,
+          code: first.error.code,
+        });
         return;
       }
-      if (!(await this.deps.dialogs.confirmDelete(first.confirmation.request))) {
-        return; // FR-070: a cancelled Delete changes nothing.
+
+      const firstSnapshots = captureAffectedSnapshots(first.confirmation.affected);
+      const firstDirtyNames = new Set(first.confirmation.dirtyNames);
+
+      if (
+        !(await this.deps.dialogs.confirmDelete(
+          first.confirmation.request,
+          makeDeleteValidity(firstSnapshots),
+        ))
+      ) {
+        return;
       }
 
-      // The dialog is asynchronous, so the target's dirty state is re-checked
-      // afterwards; work that became unsaved while the user was deciding must
-      // be warned about again rather than silently discarded (FR-069).
       const second = await this.describeDelete(
         targetPath,
         targetKey,
         targetIsDirectory,
       );
       if (second.status === "failed") {
-        await this.deps.dialogs.showError(second.error.message);
+        await this.deps.dialogs.showError(second.error.message, {
+          operation: "delete",
+          path: targetPath,
+          code: second.error.code,
+        });
         return;
       }
 
       const escalated = [...second.confirmation.dirtyNames].filter(
-        (name) => !first.confirmation.dirtyNames.has(name),
+        (name) => !firstDirtyNames.has(name),
       );
-      if (
-        escalated.length > 0 &&
-        !(await this.deps.dialogs.confirmDelete(second.confirmation.request))
-      ) {
-        return;
+
+      let confirmedSnapshots: Map<DocumentId, AffectedSessionSnapshot>;
+      let confirmedDirtyNames: Set<string>;
+
+      if (escalated.length > 0) {
+        const secondSnapshots = captureAffectedSnapshots(second.confirmation.affected);
+        const secondDirtyNames = new Set(second.confirmation.dirtyNames);
+
+        if (
+          !(await this.deps.dialogs.confirmDelete(
+            second.confirmation.request,
+            makeDeleteValidity(secondSnapshots),
+          ))
+        ) {
+          return;
+        }
+
+        const third = await this.describeDelete(
+          targetPath,
+          targetKey,
+          targetIsDirectory,
+        );
+        if (third.status === "failed") {
+          await this.deps.dialogs.showError(third.error.message, {
+            operation: "delete",
+            path: targetPath,
+            code: third.error.code,
+          });
+          return;
+        }
+
+        const newlyDirtyAfterSecond = [...third.confirmation.dirtyNames].some(
+          (name) => !secondDirtyNames.has(name),
+        );
+        const newlyEditedAfterSecond = Array.from(secondSnapshots.values()).some((snap) => {
+          const live = this.deps.documents.findSessionsUnder(targetKey).find((s) => s.id === snap.id);
+          return !live || !live.editorState.doc.eq(snap.doc) || live.dirty !== snap.dirty;
+        });
+        if (newlyDirtyAfterSecond || newlyEditedAfterSecond) {
+          return;
+        }
+
+        confirmedSnapshots = secondSnapshots;
+        confirmedDirtyNames = secondDirtyNames;
+      } else {
+        const currentById = new Map(second.confirmation.affected.map((s) => [s.id, s]));
+        if (currentById.size !== firstSnapshots.size) {
+          return;
+        }
+        for (const [id, snap] of firstSnapshots) {
+          const live = currentById.get(id);
+          if (
+            !live ||
+            live.path !== snap.path ||
+            (live.pathIdentity?.comparisonKey ?? live.path) !== snap.comparisonKey ||
+            live.bindingGeneration !== snap.bindingGeneration ||
+            live.dirty !== snap.dirty ||
+            !live.editorState.doc.eq(snap.doc)
+          ) {
+            return;
+          }
+        }
+        confirmedSnapshots = firstSnapshots;
+        confirmedDirtyNames = firstDirtyNames;
       }
 
-      // Last gate before the destructive call, after every dialog, the
-      // reservation and both affected-session identifications have settled.
       if (!(await this.sourceEntryIsUnchanged(targetPath, sourceEntry))) {
-        await this.deps.dialogs.showError(SOURCE_ENTRY_CHANGED_MESSAGE);
+        await this.deps.dialogs.showError(SOURCE_ENTRY_CHANGED_MESSAGE, {
+          operation: "delete",
+          path: targetPath,
+          code: "path_resolution",
+        });
         return;
       }
 
-      // Trash first: only a successful OS trash operation may remove sessions,
-      // and a failure leaves both Tabs and nodes exactly as they were
-      // (FR-066, FR-071, FR-073).
+      // Re-verify affected state after sourceEntryIsUnchanged await
+      const finalAffected = this.deps.documents.findSessionsUnder(targetKey);
+      const finalById = new Map(finalAffected.map((s) => [s.id, s]));
+
+      if (finalById.size !== confirmedSnapshots.size) {
+        return;
+      }
+
+      for (const [id, snap] of confirmedSnapshots) {
+        const live = finalById.get(id);
+        if (!live) {
+          return;
+        }
+        if (
+          live.path !== snap.path ||
+          (live.pathIdentity?.comparisonKey ?? live.path) !== snap.comparisonKey ||
+          live.bindingGeneration !== snap.bindingGeneration ||
+          live.dirty !== snap.dirty ||
+          !live.editorState.doc.eq(snap.doc)
+        ) {
+          return;
+        }
+      }
+
+      for (const live of finalAffected) {
+        if (live.dirty && !confirmedDirtyNames.has(live.displayName)) {
+          return;
+        }
+      }
+
       await this.deps.workspaceFileService.trashWorkspaceEntry(targetPath);
 
       this.deps.documents.removeDeletedSessions(
-        second.confirmation.affected.map((session) => session.id),
+        finalAffected.map((session) => session.id),
       );
 
       if (this.deps.explorer.getState().generation === generation) {
         this.deps.explorer.applyDeletedEntry(targetPath);
       }
     } catch (error) {
-      await this.reportError(error, "io_trash");
+      await this.reportError(error, "io_trash", {
+        operation: "delete",
+        path: targetPath,
+      });
     } finally {
       reservation.reservation.release();
     }
@@ -1145,8 +1309,13 @@ export class ExplorerActions {
   private async reportError(
     error: unknown,
     fallbackCode: FileCommandError["code"],
+    context?: OperationErrorContext,
   ): Promise<void> {
     const fileError = toFileCommandError(error, fallbackCode);
-    await this.deps.dialogs.showError(fileError.message);
+    await this.deps.dialogs.showError(fileError.message, {
+      operation: "unknown",
+      ...context,
+      code: context?.code ?? fileError.code,
+    });
   }
 }

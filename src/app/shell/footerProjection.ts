@@ -17,6 +17,9 @@
 
 import type { TextFormat } from "../document/documentSession";
 import { pathComponents, relativeWithinDirectory } from "../workspace/workContext";
+import type { AppTranslator } from "../../i18n";
+import { t } from "../../i18n";
+import { localizedDocumentName } from "../../i18n/documentName";
 
 /** The Workspace facts the Footer needs. */
 export interface FooterWorkspace {
@@ -106,7 +109,10 @@ export function breadcrumbSegments(
 }
 
 /** The read-only format items for a document. */
-export function formatStatusItems(format: TextFormat): FooterStatusItem[] {
+export function formatStatusItems(
+  format: TextFormat,
+  translate: AppTranslator = t,
+): FooterStatusItem[] {
   const encoding =
     format.encoding === "utf8"
       ? format.bom === "utf8"
@@ -119,12 +125,12 @@ export function formatStatusItems(format: TextFormat): FooterStatusItem[] {
     {
       id: "encoding",
       label: encoding,
-      title: `Encoding: ${encoding}`,
+      title: translate("ui.footer.encodingTitle", { encoding }),
     },
     {
       id: "line-ending",
       label: lineEnding,
-      title: `Line ending on save: ${lineEnding}`,
+      title: translate("ui.footer.lineEndingTitle", { lineEnding }),
     },
   ];
 }
@@ -135,7 +141,10 @@ export function formatStatusItems(format: TextFormat): FooterStatusItem[] {
  * The right side describes the *active document only*, so it disappears cleanly
  * when nothing is active while Workspace context may remain (FR-077).
  */
-export function projectFooter(input: FooterProjectionInput): FooterProjection {
+export function projectFooter(
+  input: FooterProjectionInput,
+  translate: AppTranslator = t,
+): FooterProjection {
   const { workspace, document } = input;
 
   if (document === null) {
@@ -154,8 +163,11 @@ export function projectFooter(input: FooterProjectionInput): FooterProjection {
 
   if (document.path === null) {
     return {
-      left: { kind: "untitled", displayName: document.displayName },
-      right: formatStatusItems(document.format),
+      left: {
+        kind: "untitled",
+        displayName: localizedDocumentName(document),
+      },
+      right: formatStatusItems(document.format, translate),
     };
   }
 
@@ -170,7 +182,7 @@ export function projectFooter(input: FooterProjectionInput): FooterProjection {
         segments,
         title: document.path,
       },
-      right: formatStatusItems(document.format),
+      right: formatStatusItems(document.format, translate),
     };
   }
 
@@ -182,6 +194,6 @@ export function projectFooter(input: FooterProjectionInput): FooterProjection {
       segments: pathComponents(document.path),
       title: document.path,
     },
-    right: formatStatusItems(document.format),
+    right: formatStatusItems(document.format, translate),
   };
 }

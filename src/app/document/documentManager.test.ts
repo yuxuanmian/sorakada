@@ -17,6 +17,8 @@ import type {
   FileDialogService,
   UnsavedChoice,
 } from "../../services/fileDialogs";
+import type { OperationErrorContext } from "../../services/errorContext";
+import { NotificationManager } from "../../ui/notification/notificationManager";
 import { DiskValidator } from "./diskValidation";
 import type { DiskValidationResult, DiskValidationTrigger } from "./diskValidation";
 import { DocumentManager } from "./documentManager";
@@ -781,6 +783,8 @@ class FakeDialogs implements FileDialogService {
   savePaths: string[] = [];
 
   readonly errors: string[] = [];
+  readonly errorContexts: (OperationErrorContext | undefined)[] = [];
+  readonly clearErrorCalls: OperationErrorContext[] = [];
   unsavedPromptCount = 0;
   readonly unsavedPrompts: string[] = [];
   /** 005: documents the overwrite decision was requested for. */
@@ -798,12 +802,17 @@ class FakeDialogs implements FileDialogService {
     );
   }
 
-  showError(text: string): Promise<void> {
+  showError(text: string, context?: OperationErrorContext): Promise<void> {
     this.errors.push(text);
+    this.errorContexts.push(context);
     return Promise.resolve();
   }
 
-  confirmUnsavedChanges(displayName: string): Promise<UnsavedChoice> {
+  clearError(context: OperationErrorContext): void {
+    this.clearErrorCalls.push(context);
+  }
+
+  confirmUnsavedChanges(displayName: string, _validity?: unknown): Promise<UnsavedChoice> {
     this.unsavedPromptCount += 1;
     this.unsavedPrompts.push(displayName);
     return Promise.resolve(
@@ -813,12 +822,13 @@ class FakeDialogs implements FileDialogService {
 
   confirmExternalOverwrite(
     displayName: string,
+    _validity?: unknown,
   ): Promise<ExternalConflictChoice> {
     this.overwritePrompts.push(displayName);
     return Promise.resolve(this.externalConflictChoice);
   }
 
-  confirmDiscardForReload(displayName: string): Promise<boolean> {
+  confirmDiscardForReload(displayName: string, _validity?: unknown): Promise<boolean> {
     this.discardPrompts.push(displayName);
     return Promise.resolve(this.discardConfirmed);
   }
@@ -2122,7 +2132,7 @@ describe("DocumentManager close (US3)", () => {
       status: "closed",
     });
 
-    expect(harness.dialogs.unsavedPrompts).toEqual(["Untitled1"]);
+    expect(harness.dialogs.unsavedPrompts).toEqual(["未命名1"]);
     expect(harness.manager.getSnapshot().activeDocumentId).toBe(second);
     expect(harness.manager.getSession(first)).toBeUndefined();
   });
@@ -5487,6 +5497,120 @@ describe("DocumentManager external relocation (006 US2)", () => {
     expect(harness.manager.getSession(id)!.path).toBe(DOCUMENT);
   });
 
+  it("does not discard edits made while waiting for unsaved prompt on closeDocument when user chooses dontSave", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("first edit");
+
+    let promptCount = 0;
+    harness.dialogs.confirmUnsavedChanges = async (_displayName) => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        harness.editor.type("second edit while waiting");
+        return "dontSave";
+      }
+      return "cancel";
+    };
+
+    const outcome = await harness.manager.closeDocument(id);
+    expect(outcome).toEqual({ status: "cancelled" });
+    expect(promptCount).toBe(2);
+
+    expect(harness.manager.getSession(id)).toBeDefined();
+    expect(harness.manager.getSession(id)!.editorState.doc.toString()).toBe(
+      "second edit while waiting",
+    );
+  });
+
+  it("prepareCloseAll aborts exit if in-flight edit dirties a document after approval", async () => {
+    const harness = createHarness();
+    const idA = await openSmallA(harness);
+    harness.editor.type("dirty A");
+    const _idB = harness.manager.createUntitled();
+    void _idB;
+    harness.editor.type("dirty B");
+
+    harness.dialogs.choices = ["dontSave"];
+    harness.dialogs.confirmUnsavedChanges = async (displayName) => {
+      if (displayName.includes("Untitled") || displayName.includes("未命名")) {
+        const sessionA = harness.manager.getSession(idA)!;
+        sessionA.editorState = EditorState.create({ doc: "brand new unauthorized edit on A" });
+      }
+      return "dontSave";
+    };
+
+    const approved = await harness.manager.prepareCloseAll();
+    expect(approved).toBe(false);
+  });
+
+  it("resolveSaveDivergence aborts overwrite if disk content changes to an unconfirmed version after prompt", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("user edit");
+
+    harness.files.updateFile(SMALL_A, "external edit v1");
+    harness.dialogs.externalConflictChoice = "overwrite";
+
+    const originalValidate = harness.validator.validate.bind(harness.validator);
+    harness.validator.validate = async (options) => {
+      const res = await originalValidate(options);
+      if (options.trigger === "forced-overwrite") {
+        harness.files.updateFile(SMALL_A, "external edit v2");
+        return {
+          outcome: "changed",
+          binding: options.binding,
+          identity: {
+            ...options.binding.identity,
+            objectIdentity: harness.files.objectIdentityFor(SMALL_A),
+          },
+          content: {
+            text: "external edit v2",
+            format: DEFAULT_FORMAT,
+          },
+        };
+      }
+      return res;
+    };
+
+    const result = await harness.manager.saveDocument(id);
+    expect(result).toEqual({ status: "cancelled" });
+
+    expect(harness.files.textFor(SMALL_A)).toBe("external edit v2");
+    expect(harness.manager.getSession(id)!.editorState.doc.toString()).toBe("user edit");
+    expect(harness.manager.getSession(id)!.dirty).toBe(true);
+    expect(harness.manager.getSession(id)!.externalState).toBe("modified");
+  });
+
+  it("attaches OperationErrorContext on write failure and clears it on successful retry", async () => {
+    const harness = createHarness();
+    const id = await openSmallA(harness);
+    harness.editor.type("edited");
+    harness.files.writeError = { code: "io_write", message: "disk full" };
+
+    const saveResult = await harness.manager.saveDocument(id);
+    expect(saveResult.status).toBe("failed");
+    expect(harness.dialogs.errors).toEqual(["disk full"]);
+
+    const lastErrorContext = harness.dialogs.errorContexts[harness.dialogs.errorContexts.length - 1];
+    expect(lastErrorContext).toMatchObject({
+      operation: "save",
+      documentId: id,
+      path: SMALL_A,
+      code: "io_write",
+      critical: true,
+    });
+    expect(lastErrorContext?.generation).toBeDefined();
+
+    harness.files.writeError = null;
+    const retryResult = await harness.manager.saveDocument(id);
+    expect(retryResult.status).toBe("success");
+
+    const clearCall = harness.dialogs.clearErrorCalls.find(
+      (c) => c.operation === "save" && c.documentId === id,
+    );
+    expect(clearCall).toBeDefined();
+    expect(clearCall?.generation).toBeGreaterThanOrEqual(lastErrorContext?.generation!);
+  });
   it("does not adopt a same-tail entry that lives in another directory", async () => {
     const harness = createHarness();
     const DOCUMENT = "C:\\work\\other\\a.ts";
@@ -5513,3 +5637,418 @@ describe("DocumentManager external relocation (006 US2)", () => {
     expect(outcomes).toEqual([]);
     expect(harness.manager.getSession(id)!.path).toBe(DOCUMENT);
   });
+
+  it("surfaces persistent critical Toast on pre-save validation failure after prior successful save without being swallowed by previous success watermark", async () => {
+    const harness = createHarness();
+    const notifications = new NotificationManager();
+    harness.dialogs.showError = async (text, context) => {
+      notifications.report(text, context);
+    };
+    harness.dialogs.clearError = (context) => {
+      notifications.resolve(context);
+    };
+
+    const DOCUMENT = "C:\\work\\test.ts";
+    harness.files.addFile(DOCUMENT, "initial content");
+    const opened = await harness.manager.openPath(DOCUMENT);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    // 1. Initial save success
+    harness.editor.type("first edit");
+    const save1 = await harness.manager.saveDocument(id);
+    expect(save1.status).toBe("success");
+    expect(notifications.visible()).toHaveLength(0);
+
+    // 2. New edit makes it dirty
+    harness.editor.type("second edit");
+    expect(harness.manager.getSession(id)!.dirty).toBe(true);
+
+    // 3. Disk becomes unverifiable / unreadable before pre-save validation
+    harness.files.setPathState(DOCUMENT, {
+      state: "unreadable",
+      message: "disk I/O error during pre-save",
+      canonicalPath: DOCUMENT,
+      comparisonKey: harness.files.comparisonKeyFor(DOCUMENT),
+      diskRevision: null,
+    });
+
+    const save2 = await harness.manager.saveDocument(id);
+    expect(save2.status).toBe("failed");
+
+    // 4. Critical toast is reported and visible in notificationManager
+    const visible = notifications.visible();
+    expect(visible).toHaveLength(1);
+    expect(visible[0].critical).toBe(true);
+    expect(visible[0].details[0].context).toMatchObject({
+      operation: "save",
+      documentId: id,
+      path: DOCUMENT,
+      code: "io_read",
+      critical: true,
+    });
+    // Generation must be strictly greater than the initial save generation
+    expect(visible[0].details[0].context.generation).toBeGreaterThan(1);
+
+    // 5. Critical toast does not expire on elapse
+    notifications.elapse(60000, new Set());
+    expect(notifications.visible()).toHaveLength(1);
+
+    // 6. Restoring disk and retrying save clears the notification
+    (harness.files as any).pathStates.delete(harness.files.comparisonKeyFor(DOCUMENT));
+    const save3 = await harness.manager.saveDocument(id);
+    expect(save3.status).toBe("success");
+    expect(notifications.visible()).toHaveLength(0);
+  });
+
+  it("upgrades ordinary watcher error to persistent critical toast on dirty save failure without suppression by markValidationError cache", async () => {
+    const harness = createHarness();
+    const notifications = new NotificationManager();
+    harness.dialogs.showError = async (text, context) => {
+      notifications.report(text, context);
+    };
+    harness.dialogs.clearError = (context) => {
+      notifications.resolve(context);
+    };
+
+    const DOCUMENT = "C:\\work\\watch-test.ts";
+    harness.files.addFile(DOCUMENT, "initial content");
+    const opened = await harness.manager.openPath(DOCUMENT);
+    const id = opened.status === "opened" ? opened.documentId : "";
+    const binding = harness.manager.getBinding(id)!;
+
+    // 1. Watcher reports ordinary non-critical error
+    const watcherErr = { code: "io_read" as const, message: "access denied" };
+    await harness.manager.markValidationError(binding, watcherErr, {
+      operation: "open",
+      critical: false,
+    });
+
+    let visible = notifications.visible();
+    expect(visible).toHaveLength(1);
+    expect(visible[0].critical).toBe(false);
+
+    // 2. User edits document: now dirty
+    harness.editor.type("dirty edit");
+    harness.files.setPathState(DOCUMENT, {
+      state: "unreadable",
+      message: watcherErr.message,
+      canonicalPath: DOCUMENT,
+      comparisonKey: harness.files.comparisonKeyFor(DOCUMENT),
+      diskRevision: null,
+    });
+
+    // 3. User attempts save: dirty save fails with same error message
+    const saveResult = await harness.manager.saveDocument(id);
+    expect(saveResult.status).toBe("failed");
+
+    // 4. Error is NOT suppressed by reportedValidationErrors cache and critical error is prioritized
+    visible = notifications.visible();
+    expect(visible.length).toBeGreaterThanOrEqual(1);
+    expect(visible[0].critical).toBe(true);
+    expect(visible[0].details[0].context.operation).toBe("save");
+
+    // Ordinary open warning expires while critical save error persists past expiry
+    notifications.elapse(60000, new Set());
+    expect(notifications.visible()).toHaveLength(1);
+    expect(notifications.visible()[0].critical).toBe(true);
+  });
+
+  it("cancels reload and preserves edits when user types during confirmDiscardForReload or deferred validation", async () => {
+    const harness = createHarness();
+    const DOCUMENT = "C:\\work\\reload.ts";
+    harness.files.addFile(DOCUMENT, "on disk");
+    const opened = await harness.manager.openPath(DOCUMENT);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    harness.editor.type("unsaved edits");
+    expect(harness.manager.getSession(id)!.dirty).toBe(true);
+
+    // Simulate user typing new edit while confirming discard
+    harness.dialogs.confirmDiscardForReload = async (_displayName?: string, _validity?: unknown) => {
+      // User types additional content while prompt is open
+      harness.editor.type("unsaved edits + new edit during prompt");
+      return true;
+    };
+
+    const result = await harness.manager.reloadDocumentFromDisk(id);
+    expect(result.status).toBe("cancelled");
+    // Text was NOT replaced by on-disk content
+    expect(harness.editor.read()).toBe("unsaved edits + new edit during prompt");
+    expect(harness.manager.getSession(id)!.dirty).toBe(true);
+  });
+
+  it("cancels overwrite and avoids writing unconfirmed edits when user types during overwrite prompt or recheck", async () => {
+    const harness = createHarness();
+    const DOCUMENT = "C:\\work\\conflict.ts";
+    harness.files.addFile(DOCUMENT, "original");
+    const opened = await harness.manager.openPath(DOCUMENT);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    harness.editor.type("my changes");
+    // External modification on disk
+    harness.files.updateFile(DOCUMENT, "external changes");
+    harness.files.touchFile(DOCUMENT);
+
+    harness.dialogs.confirmExternalOverwrite = async (_displayName?: string, _validity?: unknown) => {
+      // User types during overwrite prompt
+      harness.editor.type("my changes + typed during overwrite prompt");
+      return "overwrite";
+    };
+
+    const result = await harness.manager.saveDocument(id);
+    expect(result.status).toBe("cancelled");
+    // On-disk file was NOT overwritten with unconfirmed changes
+    expect(harness.files.textFor(DOCUMENT)).toBe("external changes");
+  });
+
+  it("does not close or discard document when user types new edits while deciding dontSave in closeDocument", async () => {
+    const harness = createHarness();
+    const DOCUMENT = "C:\\work\\close.ts";
+    harness.files.addFile(DOCUMENT, "saved baseline");
+    const opened = await harness.manager.openPath(DOCUMENT);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    harness.editor.type("unsaved work");
+
+    let promptCount = 0;
+    harness.dialogs.confirmUnsavedChanges = async (_displayName?: string, _validity?: unknown) => {
+      promptCount += 1;
+      if (promptCount === 1) {
+        // User types new content during prompt, but clicks dontSave
+        harness.editor.type("unsaved work + typed during prompt");
+        return "dontSave";
+      }
+      return "cancel";
+    };
+
+    const result = await harness.manager.closeDocument(id);
+    // Because new edits arrived, first dontSave looped and did not close
+    expect(result.status).toBe("cancelled");
+    expect(harness.manager.getSession(id)).toBeDefined();
+    expect(harness.editor.read()).toBe("unsaved work + typed during prompt");
+  });
+
+describe("DocumentManager save intent generations and notification isolation (011)", () => {
+  it("deferred older save does not clear newer pre-save validation failure (011 isolation)", async () => {
+    const harness = createHarness();
+    const notifications = new NotificationManager();
+
+    harness.dialogs.showError = async (text: string, context?: OperationErrorContext) => {
+      harness.dialogs.errors.push(text);
+      harness.dialogs.errorContexts.push(context);
+      if (context) {
+        notifications.report(text, context);
+      }
+    };
+    harness.dialogs.clearError = (context: OperationErrorContext) => {
+      harness.dialogs.clearErrorCalls.push(context);
+      notifications.resolve(context);
+    };
+
+    const id = await openSmallA(harness);
+    harness.editor.type(" modified");
+
+    let releaseFirstValidation: (() => void) | null = null;
+    let validateCall = 0;
+    const originalValidate = harness.validator.validate.bind(harness.validator);
+
+    harness.validator.validate = async (options) => {
+      if (options.trigger === "pre-save") {
+        validateCall += 1;
+        if (validateCall === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirstValidation = resolve;
+          });
+          return originalValidate(options);
+        } else if (validateCall === 2) {
+          return {
+            outcome: "unverifiable",
+            error: {
+              code: "io_read",
+              message: "newer save validation denied",
+            },
+          };
+        }
+      }
+      return originalValidate(options);
+    };
+
+    // 1. First save starts and is deferred in pre-save validation
+    const firstSavePromise = harness.manager.saveDocument(id);
+
+    // 2. Second save starts and fails validation
+    const secondSaveResult = await harness.manager.saveDocument(id);
+    expect(secondSaveResult.status).toBe("failed");
+
+    expect(notifications.visible().length).toBe(1);
+    expect(notifications.visible()[0].details[0].raw).toBe("newer save validation denied");
+    const failureContext = harness.dialogs.errorContexts.find(
+      (c) => c?.code === "io_read" && c?.operation === "save",
+    );
+    expect(failureContext?.generation).toBe(2);
+
+    // 3. Release first validator and let write succeed
+    releaseFirstValidation!();
+    const firstSaveResult = await firstSavePromise;
+    expect(firstSaveResult.status).toBe("success");
+
+    // Acceptance: Intent 1's write success does NOT clear Intent 2's validation failure
+    expect(notifications.visible().length).toBe(1);
+    expect(notifications.visible()[0].details[0].raw).toBe("newer save validation denied");
+
+    // 4. A newer save retry (Intent 3) succeeds and clears the failure
+    harness.editor.type(" more edits");
+    const thirdSaveResult = await harness.manager.saveDocument(id);
+    expect(thirdSaveResult.status).toBe("success");
+    expect(notifications.visible().length).toBe(0);
+  });
+
+  it("late-arriving older failure is dropped by watermark and does not overwrite newer success", async () => {
+    const harness = createHarness();
+    const notifications = new NotificationManager();
+
+    harness.dialogs.showError = async (text: string, context?: OperationErrorContext) => {
+      harness.dialogs.errors.push(text);
+      harness.dialogs.errorContexts.push(context);
+      if (context) {
+        notifications.report(text, context);
+      }
+    };
+    harness.dialogs.clearError = (context: OperationErrorContext) => {
+      harness.dialogs.clearErrorCalls.push(context);
+      notifications.resolve(context);
+    };
+
+    const id = await openSmallA(harness);
+    harness.editor.type(" modified");
+
+    // Success with generation 3
+    await harness.manager.saveDocument(id);
+
+    // Late arriving older failure with generation 1
+    notifications.report("delayed older failure", {
+      operation: "save",
+      documentId: id,
+      path: SMALL_A,
+      generation: 1,
+      critical: true,
+    });
+    // Dropped by watermark!
+    expect(notifications.visible().length).toBe(0);
+
+    // Newer failure with generation 4
+    notifications.report("brand new failure", {
+      operation: "save",
+      documentId: id,
+      path: SMALL_A,
+      generation: 4,
+      critical: true,
+    });
+    // Not dropped
+    expect(notifications.visible().length).toBe(1);
+  });
+
+  it("Save As to different target paths does not clear other target failure", async () => {
+    const harness = createHarness();
+    const notifications = new NotificationManager();
+
+    harness.dialogs.showError = async (text: string, context?: OperationErrorContext) => {
+      harness.dialogs.errors.push(text);
+      harness.dialogs.errorContexts.push(context);
+      if (context) {
+        notifications.report(text, context);
+      }
+    };
+    harness.dialogs.clearError = (context: OperationErrorContext) => {
+      harness.dialogs.clearErrorCalls.push(context);
+      notifications.resolve(context);
+    };
+
+    const id = await openSmallA(harness);
+    const TARGET_B = "C:\work\b.txt";
+    const TARGET_C = "C:\work\c.txt";
+
+    // 1. Save As to target B fails
+    harness.files.writeError = { code: "io_write", message: "Cannot write B" };
+    harness.dialogs.savePaths = [TARGET_B];
+    const resultB = await harness.manager.saveDocumentAs(id);
+    expect(resultB.status).toBe("failed");
+    expect(notifications.visible().length).toBe(1);
+    expect(notifications.visible()[0].details[0].raw).toBe("Cannot write B");
+
+    // 2. Save As to target C succeeds
+    harness.files.writeError = null;
+    harness.dialogs.savePaths = [TARGET_C];
+    const resultC = await harness.manager.saveDocumentAs(id);
+    expect(resultC.status).toBe("success");
+
+    // Target B failure remains visible
+    expect(notifications.visible().length).toBe(1);
+    expect(notifications.visible()[0].details[0].raw).toBe("Cannot write B");
+
+    // 3. Retry Save As to target B succeeds
+    harness.dialogs.savePaths = [TARGET_B];
+    const retryB = await harness.manager.saveDocumentAs(id);
+    expect(retryB.status).toBe("success");
+    // Target B failure is cleared
+    expect(notifications.visible().length).toBe(0);
+  });
+
+  it("dirty save unverifiable validation failure produces persistent critical Toast even if watcher previously reported ordinary error", async () => {
+    const harness = createHarness();
+    const notifications = new NotificationManager();
+
+    harness.dialogs.showError = async (text: string, context?: OperationErrorContext) => {
+      harness.dialogs.errors.push(text);
+      harness.dialogs.errorContexts.push(context);
+      if (context) {
+        notifications.report(text, context);
+      }
+    };
+    harness.dialogs.clearError = (context: OperationErrorContext) => {
+      harness.dialogs.clearErrorCalls.push(context);
+      notifications.resolve(context);
+    };
+
+    const id = await openSmallA(harness);
+    const binding = harness.manager.getBinding(id)!;
+
+    // Watcher reports ordinary non-critical error
+    await harness.manager.markValidationError(
+      binding,
+      { code: "io_read", message: "disk read error" },
+      { operation: "open", critical: false },
+    );
+    expect(notifications.visible().length).toBe(1);
+    expect(notifications.visible()[0].critical).toBe(false);
+
+    // Non-critical notification expires with elapsed time
+    notifications.elapse(5000, new Set());
+    expect(notifications.visible().length).toBe(0);
+
+    // Document is edited to dirty
+    harness.editor.type(" dirty text");
+
+    // Pre-save validator fails with same error
+    harness.validator.validate = async (options) => {
+      if (options.trigger === "pre-save") {
+        return {
+          outcome: "unverifiable",
+          error: { code: "io_read", message: "disk read error" },
+        };
+      }
+      return { outcome: "unchanged", identity: harness.manager.getSession(id)!.pathIdentity! };
+    };
+
+    const saveResult = await harness.manager.saveDocument(id);
+    expect(saveResult.status).toBe("failed");
+
+    // Critical persistent notification must be visible
+    expect(notifications.visible().length).toBe(1);
+    expect(notifications.visible()[0].critical).toBe(true);
+
+    // Critical notification does NOT expire with elapsed time
+    notifications.elapse(100000, new Set());
+    expect(notifications.visible().length).toBe(1);
+  });
+});

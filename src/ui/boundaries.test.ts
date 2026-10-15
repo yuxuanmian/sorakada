@@ -58,6 +58,7 @@ describe("Base UI import boundary (T017, FR-014)", () => {
       // The Tab Overview needs interactive popup content (a filter field plus a
       // selectable list), which the menu keyboard model cannot host (T139).
       `${BASE_UI}/popover`,
+      `${BASE_UI}/dialog`,
     ]);
     const deepImports = findPackageImports(sourceFiles, BASE_UI).filter(
       (entry) => !allowedSpecifiers.has(entry.specifier),

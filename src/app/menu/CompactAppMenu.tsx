@@ -13,6 +13,7 @@
  */
 
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { CommandId } from "../commands/commandIds";
 import { SoraMenu } from "../../ui/menu/SoraMenu";
@@ -34,6 +35,7 @@ export function CompactAppMenu({
   developer,
   onCommand,
 }: CompactAppMenuProps) {
+  const { t } = useTranslation();
   /**
    * The popup's open state is owned here, and that is load-bearing.
    *
@@ -51,14 +53,14 @@ export function CompactAppMenu({
 
   // Rebuilt on every render, so enabled state and accelerator text are always the
   // current registry/keymap answer rather than a cached menu snapshot.
-  const model = buildAppMenuModel({ isEnabled, developer });
+  const model = buildAppMenuModel({ isEnabled, developer, t });
 
   return (
     <SoraMenu
       model={model}
       open={open}
       onOpenChange={setOpen}
-      triggerLabel="Application menu"
+      triggerLabel={t("ui.menu.trigger")}
       triggerClassName="compact-app-menu__trigger"
       trigger={
         <>

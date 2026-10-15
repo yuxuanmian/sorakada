@@ -20,7 +20,7 @@
  * development diagnostics (`UiDebugOptionsStore`) as the only new owners, and
  * deliberately does **not** add document or Tree state here.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { Editor } from "../editor/Editor";
@@ -30,6 +30,7 @@ import { tauriFileService } from "../services/fileService";
 import { tauriFilesystemWatcher } from "../services/filesystemWatcher";
 import { nativeWorkspaceDialogService } from "../services/workspaceDialogs";
 import { tauriWorkspaceFileService } from "../services/workspaceFileService";
+import type { OperationErrorContext } from "../services/errorContext";
 import { createCommandRegistry } from "./commands/commandRegistry";
 import type { CommandId } from "./commands/commandIds";
 import { createEscapeManager } from "./commands/escapeManager";
@@ -93,7 +94,11 @@ import {
   createWindowChromeController,
 } from "./shell/windowChrome";
 import { OverlayRoot } from "../ui/overlay/OverlayRoot";
+import { dialogManager } from "../ui/dialog/dialogManager";
+import { DialogHost } from "../ui/dialog/DialogHost";
+import { NotificationHost } from "../ui/notification/NotificationHost";
 import { TabStrip } from "./tabs/TabStrip";
+import { ExitCoordinator } from "./window/exitCoordinator";
 import { installWindowLifecycle } from "./window/windowLifecycle";
 import { WorkContextManager } from "./workspace/workContextManager";
 import { WorkspaceWatchCoordinator } from "./workspace/workspaceWatchCoordinator";
@@ -117,8 +122,8 @@ function describeError(error: unknown): string {
 }
 
 /** Reports a failure through the application's existing error surface. */
-function reportError(error: unknown): void {
-  void nativeFileDialogService.showError(describeError(error));
+function reportError(error: unknown, context?: OperationErrorContext): void {
+  void nativeFileDialogService.showError(describeError(error), context ?? { operation: "window" });
 }
 
 export function App() {
@@ -146,6 +151,43 @@ export function App() {
         internalFsOperations,
       }),
   );
+  const [exitCoordinator] = useState(
+    () =>
+      new ExitCoordinator({
+        hasDirtyDocuments: () => manager.hasDirtyDocuments(),
+        prepareCloseAll: () => manager.prepareCloseAll(),
+        destroyWindow: async () => {
+          if (isTauriRuntime()) {
+            await getCurrentWindow().destroy();
+          }
+        },
+        isModalActive: () => dialogManager.isActive(),
+        onError: reportError,
+      }),
+  );
+
+  const isDialogActive = useSyncExternalStore(
+    dialogManager.subscribe,
+    dialogManager.isActive,
+  );
+  const isExiting = useSyncExternalStore(
+    exitCoordinator.subscribe,
+    exitCoordinator.getSnapshot,
+  );
+  const isModalActive = isDialogActive || isExiting;
+
+  const isInteractionBlocked = useCallback((): boolean => {
+    return dialogManager.isActive() || exitCoordinator.isExiting();
+  }, [exitCoordinator]);
+
+  useEffect(() => {
+    registry.setExecutionGuard(
+      () => !dialogManager.isActive() && !exitCoordinator.isExiting(),
+    );
+    return () => {
+      registry.setExecutionGuard(null);
+    };
+  }, [registry, exitCoordinator]);
   const [watcher] = useState(
     () =>
       new OpenedDocumentWatchCoordinator({
@@ -316,6 +358,9 @@ export function App() {
    */
   const selectTab = useCallback(
     (id: DocumentId): void => {
+      if (dialogManager.isActive() || exitCoordinator.isExiting()) {
+        return;
+      }
       if (isFixtureDocumentId(id)) {
         setDebugTabFixture((current) =>
           current === null ? current : activateFixtureTab(current, id),
@@ -329,6 +374,9 @@ export function App() {
 
   const closeTab = useCallback(
     (id: DocumentId): void => {
+      if (dialogManager.isActive() || exitCoordinator.isExiting()) {
+        return;
+      }
       if (isFixtureDocumentId(id)) {
         setDebugTabFixture((current) =>
           current === null ? current : closeFixtureTab(current, id),
@@ -502,13 +550,7 @@ export function App() {
       }),
       registry.register("app.exit", {
         execute: async () => {
-          // Exit asks the manager once, then destroys directly: the normal
-          // last-Tab behaviour must not run during application exit. This is the
-          // one approved forced-destroy path, and it runs only after the guard
-          // approved the close (FR-008, T197).
-          if (await manager.prepareCloseAll()) {
-            await getCurrentWindow().destroy();
-          }
+          await exitCoordinator.requestExit();
         },
         // Exit is a native window operation, so it is offered exactly when native
         // window control exists — the same runtime gate the window controls use.
@@ -748,7 +790,7 @@ export function App() {
     };
 
     const onEscapeKeyDown = (event: KeyboardEvent): void => {
-      if (isImeKeyboardEvent(event)) {
+      if (event.defaultPrevented || isImeKeyboardEvent(event)) {
         return;
       }
       escapeManager.handleKeyboardEvent(event);
@@ -771,7 +813,7 @@ export function App() {
       const stopWindowLifecycle = await installWindowLifecycle(
         manager,
         appWindow,
-        { onError: reportError },
+        { onError: reportError, exitCoordinator },
       );
 
       // 005 fallback trigger (FR-012): regaining focus revalidates every bound
@@ -795,6 +837,9 @@ export function App() {
         const payload = event.payload;
 
         if (payload.type === "enter" || payload.type === "over") {
+          if (isInteractionBlocked()) {
+            return;
+          }
           setIsFileDragActive(true);
           return;
         }
@@ -804,10 +849,15 @@ export function App() {
         }
 
         setIsFileDragActive(false);
+        if (isInteractionBlocked()) {
+          return;
+        }
         // The batch drives the same open pipeline as File > Open and reports
         // its own failures, and dropped directories are ignored without
         // touching the Workspace or the Explorer.
-        void processDroppedPaths(payload.paths, manager);
+        void processDroppedPaths(payload.paths, manager, {
+          isBlocked: isInteractionBlocked,
+        });
       });
 
       // React Strict Mode mounts, unmounts and mounts again; an installation that
@@ -861,6 +911,8 @@ export function App() {
     debugStore,
     editorHandle,
     escapeManager,
+    exitCoordinator,
+    isInteractionBlocked,
     manager,
     preferencesStore,
     registry,
@@ -916,6 +968,7 @@ export function App() {
 
   return (
     <OverlayRoot>
+      <div inert={isModalActive || undefined} style={{ display: "contents" }}>
       <AppShell
         topBar={
           <TopBar
@@ -1016,6 +1069,9 @@ export function App() {
           preferencesStore.setSidebarWidth(requestedWidth);
         }}
       />
+      </div>
+      <DialogHost escapeManager={escapeManager} />
+      <NotificationHost />
     </OverlayRoot>
   );
 }

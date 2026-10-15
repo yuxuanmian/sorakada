@@ -18,6 +18,7 @@
  */
 
 import type { LabelMeasurer } from "../shell/textMeasurement";
+import { localizedDocumentName } from "../../i18n/documentName";
 
 /**
  * Fixed horizontal widths a Tab spends besides its label.
@@ -98,6 +99,7 @@ export function naturalTabWidths(
 export function measureTabWidths(
   tabs: readonly {
     displayName: string;
+    path?: string | null;
     dirty: boolean;
     externalState: string;
   }[],
@@ -107,7 +109,11 @@ export function measureTabWidths(
 ): number[] {
   return naturalTabWidths(
     tabs.map((tab) => ({
-      labelWidth: measurer.measure(tab.displayName),
+      labelWidth: measurer.measure(
+        tab.path !== undefined
+          ? localizedDocumentName({ path: tab.path, displayName: tab.displayName })
+          : tab.displayName,
+      ),
       dirty: tab.dirty,
       hasExternalState: tab.externalState !== "normal",
     })),

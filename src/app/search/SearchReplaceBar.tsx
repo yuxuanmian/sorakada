@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import {
   useEffect,
   useRef,
@@ -29,6 +30,7 @@ export interface SearchReplaceBarProps {
  * Supports single-row Find mode (Ctrl+F) and dual-row Replace mode (Ctrl+R).
  */
 export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
+  const { t } = useTranslation();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
 
@@ -190,12 +192,13 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
     state.matchIndex,
     state.isCapped,
     state.error,
+    t,
   );
 
   const hasMatches = state.matchCount > 0 && state.error === null;
 
   return (
-    <div className="search-replace-bar" role="search" aria-label="Find and Replace">
+    <div className="search-replace-bar" role="search" aria-label={t("ui.search.region")}>
       {/* Search Row */}
       <div className="search-replace-bar__row">
         <span className="search-replace-bar__icon" aria-hidden="true">
@@ -216,8 +219,8 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
             onCompositionStart={handleQueryCompositionStart}
             onCompositionEnd={handleQueryCompositionEnd}
             onKeyDown={handleSearchKeyDown}
-            placeholder="搜索"
-            aria-label="搜索文本"
+            placeholder={t("ui.search.input.placeholder")}
+            aria-label={t("ui.search.input.aria")}
             aria-invalid={state.error !== null}
             aria-describedby="search-count-label"
             spellCheck={false}
@@ -229,8 +232,8 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
               state.caseSensitive ? "search-replace-bar__toggle-btn--active" : ""
             }`}
             onClick={() => controller.toggleCaseSensitive()}
-            title="区分大小写 (Alt+C)"
-            aria-label="区分大小写"
+            title={t("ui.search.caseSensitive.title")}
+            aria-label={t("ui.search.caseSensitive.aria")}
             aria-pressed={state.caseSensitive}
           >
             Cc
@@ -241,8 +244,8 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
               state.isRegex ? "search-replace-bar__toggle-btn--active" : ""
             }`}
             onClick={() => controller.toggleRegex()}
-            title="正则表达式 (Alt+R)"
-            aria-label="正则表达式"
+            title={t("ui.search.regex.title")}
+            aria-label={t("ui.search.regex.aria")}
             aria-pressed={state.isRegex}
           >
             .*
@@ -266,8 +269,8 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
             className="search-replace-bar__icon-btn"
             onClick={() => controller.findPrevious()}
             disabled={!hasMatches}
-            title="上一个 (Shift+Enter)"
-            aria-label="上一个匹配项"
+            title={t("ui.search.prev.title")}
+            aria-label={t("ui.search.prev.aria")}
           >
             <AppIcon name="arrow-up" />
           </button>
@@ -276,8 +279,8 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
             className="search-replace-bar__icon-btn"
             onClick={() => controller.findNext()}
             disabled={!hasMatches}
-            title="下一个 (Enter)"
-            aria-label="下一个匹配项"
+            title={t("ui.search.next.title")}
+            aria-label={t("ui.search.next.aria")}
           >
             <AppIcon name="arrow-down" />
           </button>
@@ -285,8 +288,8 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
             type="button"
             className="search-replace-bar__icon-btn"
             onClick={() => controller.close()}
-            title="关闭 (Esc)"
-            aria-label="关闭搜索栏"
+            title={t("ui.search.close.title")}
+            aria-label={t("ui.search.close.aria")}
           >
             <AppIcon name="close" />
           </button>
@@ -312,8 +315,8 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
               onCompositionStart={handleReplacementCompositionStart}
               onCompositionEnd={handleReplacementCompositionEnd}
               onKeyDown={handleReplaceKeyDown}
-              placeholder="替换为"
-              aria-label="替换文本"
+              placeholder={t("ui.search.replaceInput.placeholder")}
+              aria-label={t("ui.search.replaceInput.aria")}
               spellCheck={false}
               autoComplete="off"
             />
@@ -324,9 +327,9 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
             className="search-replace-bar__text-btn"
             onClick={() => controller.replaceNext()}
             disabled={!hasMatches}
-            title="替换当前 (Alt+P)"
+            title={t("ui.search.replace.title")}
           >
-            替换
+            {t("ui.search.replace.label")}
           </button>
 
           <button
@@ -334,9 +337,9 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
             className="search-replace-bar__text-btn"
             onClick={() => controller.replaceAll()}
             disabled={!hasMatches}
-            title="全部替换 (Alt+A)"
+            title={t("ui.search.replaceAll.title")}
           >
-            全部替换
+            {t("ui.search.replaceAll.label")}
           </button>
         </div>
       )}

@@ -16,6 +16,7 @@
  */
 
 import type { VisibleExplorerRow } from "./explorerProjection";
+import { t } from "../../i18n";
 
 /**
  * Case-insensitive substring matching over what a row shows.
@@ -45,6 +46,12 @@ function rowLabelText(row: VisibleExplorerRow): string {
     return row.node.name;
   }
   if (row.kind === "notice") {
+    if (row.noticeType === "loading") {
+      return t("ui.explorer.notice.loading");
+    }
+    if (row.noticeType === "cycle") {
+      return t("ui.explorer.notice.cycle");
+    }
     return row.message;
   }
   return row.edit.draftName;

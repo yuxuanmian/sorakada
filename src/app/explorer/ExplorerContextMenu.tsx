@@ -18,6 +18,7 @@
  */
 
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { CommandId } from "../commands/commandIds";
 import { IconGlyph } from "../shell/AppIcon";
@@ -83,8 +84,9 @@ export function ExplorerContextMenu({
   isEnabled,
   suppressPopup = false,
 }: ExplorerContextMenuProps) {
+  const { t } = useTranslation();
   const model =
-    context === null ? [] : buildExplorerMenuModel(context, { isEnabled });
+    context === null ? [] : buildExplorerMenuModel(context, { isEnabled, t });
 
   // Icons are presentation, so they are attached here rather than in the pure
   // model: the grouping/target rules stay testable without React.
@@ -104,7 +106,7 @@ export function ExplorerContextMenu({
       // scroll viewport stays a direct flex child of the Explorer region rather
       // than being wrapped in an extra box (T099).
       model={withIcons}
-      ariaLabel="Explorer actions"
+      ariaLabel={t("ui.explorer.contextMenu.aria")}
       // Controlled closed while suppressed, so an empty popup is never shown and
       // the gesture target is still reported (T229).
       open={suppressPopup ? false : undefined}

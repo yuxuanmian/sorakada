@@ -24,6 +24,7 @@
  */
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import { renderSidebarWidth } from "./layoutMetrics";
 import { Sidebar } from "./Sidebar";
@@ -62,6 +63,7 @@ export function AppShell({
   sidebarWidth,
   onSidebarWidthChange,
 }: AppShellProps) {
+  const { t } = useTranslation();
   const mainAreaRef = useRef<HTMLDivElement>(null);
   const [mainAreaWidth, setMainAreaWidth] = useState(0);
 
@@ -113,7 +115,7 @@ export function AppShell({
           <Sidebar
             width={renderedSidebarWidth}
             onResize={onSidebarWidthChange}
-            label="Explorer"
+            label={t("ui.sidebar.explorer")}
           >
             {sidebar}
           </Sidebar>

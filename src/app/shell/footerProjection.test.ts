@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { i18n } from "../../i18n";
 import { NEW_DOCUMENT_FORMAT, type TextFormat } from "../document/documentSession";
 import {
   breadcrumbSegments,
@@ -68,7 +69,22 @@ describe("Footer left context", () => {
     });
     expect(projection.left).toEqual({
       kind: "untitled",
-      displayName: "Untitled1",
+      displayName: "未命名1",
+    });
+  });
+
+  it("does not translate a real file named Untitled1 on disk", () => {
+    const projection = projectFooter({
+      workspace,
+      document: document({
+        displayName: "Untitled1",
+        path: "C:\\work\\Untitled1",
+        pathKey: "c:\\work\\untitled1",
+      }),
+    });
+    expect(projection.left).toMatchObject({
+      kind: "inside",
+      segments: ["Untitled1"],
     });
   });
 
@@ -209,9 +225,21 @@ describe("breadcrumbSegments", () => {
 describe("Footer right status (T171)", () => {
   it("shows UTF-8 and the preferred line ending", () => {
     expect(formatStatusItems(format())).toEqual([
-      { id: "encoding", label: "UTF-8", title: "Encoding: UTF-8" },
-      { id: "line-ending", label: "CRLF", title: "Line ending on save: CRLF" },
+      { id: "encoding", label: "UTF-8", title: "编码：UTF-8" },
+      { id: "line-ending", label: "CRLF", title: "保存时的换行符：CRLF" },
     ]);
+  });
+
+  it("translates status item titles under English fallback", async () => {
+    await i18n.changeLanguage("en-US");
+    try {
+      expect(formatStatusItems(format())).toEqual([
+        { id: "encoding", label: "UTF-8", title: "Encoding: UTF-8" },
+        { id: "line-ending", label: "CRLF", title: "Line ending on save: CRLF" },
+      ]);
+    } finally {
+      await i18n.changeLanguage("zh-CN");
+    }
   });
 
   it("shows LF for a document that prefers LF", () => {

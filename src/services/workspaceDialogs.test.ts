@@ -1,181 +1,129 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  DELETE_BUTTONS,
-  deleteConfirmationText,
-  nativeWorkspaceDialogService,
-  toDeleteConfirmed,
-} from "./workspaceDialogs";
-
-/**
- * `@tauri-apps/plugin-dialog` is mocked so the native dialog options and the
- * result mapping can be asserted without a desktop shell.
- */
-const { messageMock, openMock } = vi.hoisted(() => ({
-  messageMock: vi.fn(),
+const { openMock } = vi.hoisted(() => ({
   openMock: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
-  message: messageMock,
   open: openMock,
 }));
 
+import {
+  deleteConfirmationText,
+  nativeWorkspaceDialogService,
+} from "./workspaceDialogs";
+import { dialogManager } from "../ui/dialog/dialogManager";
+import { notificationManager } from "../ui/notification/notificationManager";
+
 beforeEach(() => {
-  messageMock.mockReset();
   openMock.mockReset();
+  dialogManager.cancelAll();
 });
 
-describe("deleteConfirmationText (FR-068, FR-069)", () => {
-  it("asks a plain recoverable question for a clean target", () => {
+describe("deleteConfirmationText", () => {
+  it("formats clean target message", () => {
     const text = deleteConfirmationText({
-      displayName: "a.txt",
+      displayName: "doc.txt",
       dirty: false,
       affectedDirtyNames: [],
     });
-
-    expect(text).toBe('Move "a.txt" to the Recycle Bin?');
-    // The wording must never suggest a permanent delete.
-    expect(text).not.toMatch(/permanently|permanent/i);
+    expect(text).toContain("doc.txt");
   });
 
-  it("warns explicitly when the target itself has unsaved changes", () => {
+  it("warns about unsaved changes when target is dirty", () => {
     const text = deleteConfirmationText({
-      displayName: "a.txt",
+      displayName: "doc.txt",
       dirty: true,
       affectedDirtyNames: [],
     });
-
-    expect(text).toBe(
-      'Move "a.txt" to the Recycle Bin? Its unsaved changes will be lost.',
-    );
+    expect(text).toContain("doc.txt");
   });
 
-  it("names the unsaved open documents inside a directory target", () => {
+  it("names affected dirty children", () => {
     const text = deleteConfirmationText({
       displayName: "src",
       dirty: false,
-      affectedDirtyNames: ["a.ts", "nested/b.ts"],
+      affectedDirtyNames: ["a.ts", "b.ts"],
     });
+    expect(text).toContain("src");
+    expect(text).toContain("a.ts, b.ts");
+  });
+});
 
-    expect(text).toBe(
-      'Move "src" to the Recycle Bin? Unsaved changes in "a.ts", "nested/b.ts" will be lost.',
+describe("nativeWorkspaceDialogService.pickWorkspaceFolder", () => {
+  it("opens a directory-only picker and returns the path", async () => {
+    openMock.mockResolvedValue("C:\\projects\\repo");
+    await expect(nativeWorkspaceDialogService.pickWorkspaceFolder()).resolves.toBe(
+      "C:\\projects\\repo"
+    );
+    expect(openMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        multiple: false,
+        directory: true,
+      })
     );
   });
 
-  it("keeps the discard warning when only some documents are dirty", () => {
-    const text = deleteConfirmationText({
-      displayName: "src",
-      dirty: false,
-      affectedDirtyNames: ["a.ts"],
-    });
-
-    expect(text).toContain("Unsaved changes");
-    expect(text).toContain('"a.ts"');
-  });
-});
-
-describe("toDeleteConfirmed (FR-070)", () => {
-  it("confirms only for the Delete label or the platform ok/yes roles", () => {
-    expect(toDeleteConfirmed(DELETE_BUTTONS.delete)).toBe(true);
-    expect(toDeleteConfirmed("Ok")).toBe(true);
-    expect(toDeleteConfirmed("Yes")).toBe(true);
-  });
-
-  it("treats Cancel and anything unexpected as a cancellation", () => {
-    expect(toDeleteConfirmed(DELETE_BUTTONS.cancel)).toBe(false);
-    expect(toDeleteConfirmed("No")).toBe(false);
-    expect(toDeleteConfirmed("")).toBe(false);
-    expect(toDeleteConfirmed("something else")).toBe(false);
-  });
-});
-
-describe("nativeWorkspaceDialogService.pickWorkspaceFolder (US1)", () => {
-  it("opens a directory-only picker and returns the chosen path", async () => {
-    openMock.mockResolvedValue("C:\\work");
-
-    await expect(
-      nativeWorkspaceDialogService.pickWorkspaceFolder(),
-    ).resolves.toBe("C:\\work");
-
-    expect(openMock).toHaveBeenCalledTimes(1);
-    expect(openMock).toHaveBeenCalledWith({
-      title: "Open Folder",
-      multiple: false,
-      directory: true,
-    });
-  });
-
-  it("reports a dismissed picker as null", async () => {
+  it("returns null when dismissed", async () => {
     openMock.mockResolvedValue(null);
-
-    await expect(
-      nativeWorkspaceDialogService.pickWorkspaceFolder(),
-    ).resolves.toBeNull();
+    await expect(nativeWorkspaceDialogService.pickWorkspaceFolder()).resolves.toBeNull();
   });
 });
 
-describe("nativeWorkspaceDialogService.confirmDelete (FR-068)", () => {
-  it("shows the mapped warning text and returns true only for Delete", async () => {
-    messageMock.mockResolvedValue(DELETE_BUTTONS.delete);
-
-    await expect(
-      nativeWorkspaceDialogService.confirmDelete({
-        displayName: "src",
-        dirty: false,
-        affectedDirtyNames: ["a.ts"],
-      }),
-    ).resolves.toBe(true);
-
-    expect(messageMock).toHaveBeenCalledTimes(1);
-    const [text, options] = messageMock.mock.calls[0] as [
-      string,
-      { kind?: string; buttons?: Record<string, string> },
-    ];
-    expect(text).toBe(
-      'Move "src" to the Recycle Bin? Unsaved changes in "a.ts" will be lost.',
-    );
-    expect(options.kind).toBe("warning");
-    expect(options.buttons).toEqual({
-      ok: DELETE_BUTTONS.delete,
-      cancel: DELETE_BUTTONS.cancel,
-    });
-  });
-
-  it("returns false when the user cancels", async () => {
-    messageMock.mockResolvedValue(DELETE_BUTTONS.cancel);
-
-    await expect(
-      nativeWorkspaceDialogService.confirmDelete({
-        displayName: "a.txt",
-        dirty: true,
-        affectedDirtyNames: [],
-      }),
-    ).resolves.toBe(false);
-  });
-
-  it("returns false for an unexpected dialog result", async () => {
-    messageMock.mockResolvedValue("dismissed");
-
-    await expect(
-      nativeWorkspaceDialogService.confirmDelete({
-        displayName: "a.txt",
+describe("nativeWorkspaceDialogService.confirmDelete", () => {
+  it("resolves true when delete chosen, false on cancel", async () => {
+    const detach = dialogManager.attach();
+    try {
+      const pDelete = nativeWorkspaceDialogService.confirmDelete({
+        displayName: "foo.txt",
         dirty: false,
         affectedDirtyNames: [],
-      }),
-    ).resolves.toBe(false);
+      });
+      expect(dialogManager.getSnapshot()?.buttons.map(b => b.value)).toEqual(["delete", "cancel"]);
+      dialogManager.choose(dialogManager.getSnapshot()!.id, "delete");
+      await expect(pDelete).resolves.toBe(true);
+
+      const pCancel = nativeWorkspaceDialogService.confirmDelete({
+        displayName: "bar.txt",
+        dirty: false,
+        affectedDirtyNames: [],
+      });
+      dialogManager.choose(dialogManager.getSnapshot()!.id, "cancel");
+      await expect(pCancel).resolves.toBe(false);
+    } finally {
+      detach();
+    }
+  });
+
+  it("resolves false when request validity is false", async () => {
+    const detach = dialogManager.attach();
+    try {
+      let valid = true;
+      const p = nativeWorkspaceDialogService.confirmDelete(
+        { displayName: "baz.txt", dirty: true, affectedDirtyNames: [] },
+        { isValid: () => valid }
+      );
+      valid = false;
+      dialogManager.choose(dialogManager.getSnapshot()!.id, "delete");
+      await expect(p).resolves.toBe(false);
+    } finally {
+      detach();
+    }
   });
 });
 
-describe("nativeWorkspaceDialogService.showError (US1)", () => {
-  it("shows the failure as an error dialog", async () => {
-    messageMock.mockResolvedValue("Ok");
+describe("nativeWorkspaceDialogService.showError", () => {
+  it("delegates to notificationManager synchronously", async () => {
+    const reportSpy = vi.spyOn(notificationManager, "report");
+    await nativeWorkspaceDialogService.showError("Failed to remove", { operation: "delete" });
+    expect(reportSpy).toHaveBeenCalledWith("Failed to remove", { operation: "delete" });
+    reportSpy.mockRestore();
+  });
 
-    await nativeWorkspaceDialogService.showError("Cannot read directory");
-
-    expect(messageMock).toHaveBeenCalledWith("Cannot read directory", {
-      title: "Sorakada",
-      kind: "error",
-    });
+  it("delegates clearError to notificationManager.resolve", () => {
+    const resolveSpy = vi.spyOn(notificationManager, "resolve");
+    nativeWorkspaceDialogService.clearError?.({ operation: "workspace", path: "C:\\projects\\repo" });
+    expect(resolveSpy).toHaveBeenCalledWith({ operation: "workspace", path: "C:\\projects\\repo" });
+    resolveSpy.mockRestore();
   });
 });

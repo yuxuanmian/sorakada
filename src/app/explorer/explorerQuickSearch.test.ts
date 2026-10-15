@@ -7,6 +7,8 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { i18n } from "../../i18n";
+import { DIRECTORY_CYCLE_MESSAGE } from "./explorerModel";
 
 import type { ExplorerState } from "./explorerModel";
 import {
@@ -146,6 +148,33 @@ describe("matchVisibleRowKeys", () => {
     const row = rows()[1];
     expect(matchesQuery(row, "src")).toBe(true);
     expect(matchesQuery(row, "zzz")).toBe(false);
+  });
+
+  it("matches cycle sentinel using localized message without altering underlying model", async () => {
+    const withCycle: ExplorerState = {
+      ...state(),
+      root: {
+        name: "work",
+        path: "C:\work",
+        kind: "directory",
+        isSymlink: false,
+        objectIdentity: null,
+        expanded: true,
+        loadState: "error",
+        errorMessage: DIRECTORY_CYCLE_MESSAGE,
+      },
+    };
+    const projection = flattenVisibleExplorerRows(withCycle);
+    const cycleRow = projection.find((r) => r.kind === "notice" && r.noticeType === "cycle");
+    expect(cycleRow).toBeDefined();
+    expect(matchVisibleRowKeys(projection, "链接")).toEqual([cycleRow!.key]);
+
+    await i18n.changeLanguage("en-US");
+    try {
+      expect(matchVisibleRowKeys(projection, "link points")).toEqual([cycleRow!.key]);
+    } finally {
+      await i18n.changeLanguage("zh-CN");
+    }
   });
 });
 

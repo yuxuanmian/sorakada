@@ -591,7 +591,49 @@ describe("Tab Overview projection (T129)", () => {
       externalState: "normal",
     });
     expect(untitled.path).toBeNull();
-    expect(untitled.displayName).toBe("Untitled1");
+    expect(untitled.displayName).toBe("未命名1");
+  });
+
+  it("leaves a real file named Untitled1 untranslated", () => {
+    const realFile = toTabOverviewItem({
+      id: "doc-real",
+      displayName: "Untitled1",
+      path: "C:\\work\\Untitled1",
+      dirty: false,
+      active: false,
+      externalState: "normal",
+    });
+    expect(realFile.path).toBe("C:\\work\\Untitled1");
+    expect(realFile.displayName).toBe("Untitled1");
+  });
+
+  it("filters localized untitled documents and real files consistently in Overview", () => {
+    const mixedTabs = [
+      {
+        id: "doc-u" as DocumentId,
+        displayName: "Untitled1",
+        path: null,
+        dirty: false,
+        active: false,
+        externalState: "normal" as const,
+      },
+      {
+        id: "doc-real" as DocumentId,
+        displayName: "Untitled1",
+        path: "C:\\work\\Untitled1",
+        dirty: false,
+        active: false,
+        externalState: "normal" as const,
+      },
+    ];
+
+    const matchUntitled = filterTabOverviewItems(mixedTabs, "未命名");
+    expect(matchUntitled.map((item) => item.id)).toEqual(["doc-u"]);
+    expect(matchUntitled[0].displayName).toBe("未命名1");
+
+    const matchReal = filterTabOverviewItems(mixedTabs, "Untitled1");
+    expect(matchReal.map((item) => item.id)).toEqual(["doc-real"]);
+    expect(matchReal[0].displayName).toBe("Untitled1");
   });
 });
 

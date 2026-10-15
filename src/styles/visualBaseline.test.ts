@@ -247,8 +247,10 @@ const BASELINE_DEPENDENCIES: readonly string[] = [
   "@tauri-apps/api",
   "@tauri-apps/plugin-dialog",
   "codemirror",
+  "i18next",
   "react",
   "react-dom",
+  "react-i18next",
 ];
 
 interface PackageJson {

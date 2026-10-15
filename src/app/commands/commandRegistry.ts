@@ -57,15 +57,21 @@ export interface CommandRegistry {
   isEnabled(id: CommandId): boolean;
   /** Whether `id` currently has a registration. */
   has(id: CommandId): boolean;
+  /** Sets an execution guard evaluated before checking individual command availability. */
+  setExecutionGuard(guard: (() => boolean) | null): void;
 }
 
 /** Creates an empty registry for one application session. */
 export function createCommandRegistry(): CommandRegistry {
   const registrations = new Map<CommandId, CommandRegistration>();
+  let executionGuard: (() => boolean) | null = null;
 
   const isEnabled = (id: CommandId): boolean => {
     const registration = registrations.get(id);
     if (registration === undefined) {
+      return false;
+    }
+    if (executionGuard !== null && !executionGuard()) {
       return false;
     }
     // A missing predicate means the command has no disabled state.
@@ -106,6 +112,10 @@ export function createCommandRegistry(): CommandRegistry {
 
     has(id: CommandId): boolean {
       return registrations.has(id);
+    },
+
+    setExecutionGuard(guard: (() => boolean) | null): void {
+      executionGuard = guard;
     },
   };
 }

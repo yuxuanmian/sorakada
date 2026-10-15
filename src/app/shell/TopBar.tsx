@@ -19,6 +19,7 @@
  */
 
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { CommandId } from "../commands/commandIds";
 import { AppIcon } from "./AppIcon";
@@ -50,6 +51,7 @@ export function TopBar({
   nativeChromeAvailable,
   maximized,
 }: TopBarProps) {
+  const { t } = useTranslation();
   const handlers = {
     startDrag: onStartDrag,
     toggleMaximize: () => {
@@ -81,8 +83,8 @@ export function TopBar({
           <button
             type="button"
             className="top-bar__control"
-            aria-label="Minimize"
-            title="Minimize"
+            aria-label={t("ui.topBar.minimize")}
+            title={t("ui.topBar.minimize")}
             data-sora-interactive=""
             onClick={() => {
               onCommand("window.minimize");
@@ -93,8 +95,8 @@ export function TopBar({
           <button
             type="button"
             className="top-bar__control"
-            aria-label={maximized ? "Restore" : "Maximize"}
-            title={maximized ? "Restore" : "Maximize"}
+            aria-label={maximized ? t("ui.topBar.restore") : t("ui.topBar.maximize")}
+            title={maximized ? t("ui.topBar.restore") : t("ui.topBar.maximize")}
             data-sora-interactive=""
             onClick={() => {
               onCommand("window.toggleMaximize");
@@ -105,8 +107,8 @@ export function TopBar({
           <button
             type="button"
             className="top-bar__control top-bar__control--close"
-            aria-label="Close window"
-            title="Close"
+            aria-label={t("ui.topBar.closeWindow")}
+            title={t("ui.topBar.close")}
             data-sora-interactive=""
             onClick={() => {
               // Never a destroy: this is the ordinary close request, so the

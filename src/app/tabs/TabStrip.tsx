@@ -20,6 +20,7 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AppIcon } from "../shell/AppIcon";
 import type { DensityMetrics } from "../shell/density";
@@ -29,6 +30,7 @@ import {
   type FontSource,
 } from "../shell/textMeasurement";
 import type { DocumentId, TabSnapshot } from "../document/documentSession";
+import { localizedDocumentName } from "../../i18n/documentName";
 import { TabOverview } from "./TabOverview";
 import {
   revealTabOffset,
@@ -83,6 +85,7 @@ export function TabStrip({
   metrics,
   forceOverview = false,
 }: TabStripProps) {
+  const { t } = useTranslation();
   const stripRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const actionsRef = useRef<HTMLDivElement>(null);
@@ -221,69 +224,72 @@ export function TabStrip({
         className="tab-strip__viewport"
         ref={viewportRef}
         role="tablist"
-        aria-label="Open documents"
+        aria-label={t("ui.tabs.openDocuments")}
       >
-        {tabs.map((tab, index) => (
-          <div
-            key={tab.id}
-            className={tab.active ? "tab tab--active" : "tab"}
-            style={{ width: `${layout.widths[index] ?? metrics.tabMinWidth}px` }}
-            role="tab"
-            aria-selected={tab.active}
-            tabIndex={tab.active ? 0 : -1}
-            // FR-014: the full path stays available even when two Tabs share a
-            // base filename.
-            title={tab.path ?? tab.displayName}
-            onClick={() => {
-              onSelect(tab.id);
-            }}
-          >
-            <span className="tab__label">{tab.displayName}</span>
-            {/*
-              005 (FR-041): the external disk state is shown non-modally, because
-              a modal dialog on every watcher event would be unusable. The marker
-              is a projection of manager-owned state, and it stays visible at the
-              minimum Tab width (T135).
-            */}
-            {tab.externalState === "modified" ? (
-              <span
-                className="tab__external tab__external--modified"
-                role="img"
-                aria-label="Changed on disk"
-                title="Changed on disk by another program"
-              >
-                ↻
-              </span>
-            ) : null}
-            {tab.externalState === "missing" ? (
-              <span
-                className="tab__external tab__external--missing"
-                role="img"
-                aria-label="Missing on disk"
-                title="Deleted on disk; Save recreates the file"
-              >
-                ⚠
-              </span>
-            ) : null}
-            {tab.dirty ? (
-              <span className="tab__dirty" title="Unsaved changes">
-                ●
-              </span>
-            ) : null}
-            <button
-              type="button"
-              className="tab__close"
-              aria-label={`Close ${tab.displayName}`}
-              onClick={(event) => {
-                // Closing an inactive Tab must not also activate it (T136).
-                event.stopPropagation();
-                onClose(tab.id);
+        {tabs.map((tab, index) => {
+          const displayLabel = localizedDocumentName(tab);
+          return (
+            <div
+              key={tab.id}
+              className={tab.active ? "tab tab--active" : "tab"}
+              style={{ width: `${layout.widths[index] ?? metrics.tabMinWidth}px` }}
+              role="tab"
+              aria-selected={tab.active}
+              tabIndex={tab.active ? 0 : -1}
+              // FR-014: the full path stays available even when two Tabs share a
+              // base filename.
+              title={tab.path ?? displayLabel}
+              onClick={() => {
+                onSelect(tab.id);
               }}
             >
-              <AppIcon name="close" />
-            </button>
-          </div>
-        ))}
+              <span className="tab__label">{displayLabel}</span>
+              {/*
+                005 (FR-041): the external disk state is shown non-modally, because
+                a modal dialog on every watcher event would be unusable. The marker
+                is a projection of manager-owned state, and it stays visible at the
+                minimum Tab width (T135).
+              */}
+              {tab.externalState === "modified" ? (
+                <span
+                  className="tab__external tab__external--modified"
+                  role="img"
+                  aria-label={t("ui.tabs.modifiedOnDisk")}
+                  title={t("ui.tabs.modifiedOnDiskTooltip")}
+                >
+                  ↻
+                </span>
+              ) : null}
+              {tab.externalState === "missing" ? (
+                <span
+                  className="tab__external tab__external--missing"
+                  role="img"
+                  aria-label={t("ui.tabs.missingOnDisk")}
+                  title={t("ui.tabs.missingOnDiskTooltip")}
+                >
+                  ⚠
+                </span>
+              ) : null}
+              {tab.dirty ? (
+                <span className="tab__dirty" title={t("ui.tabs.unsavedChanges")}>
+                  ●
+                </span>
+              ) : null}
+              <button
+                type="button"
+                className="tab__close"
+                aria-label={t("ui.tabs.closeTab", { name: displayLabel })}
+                onClick={(event) => {
+                  // Closing an inactive Tab must not also activate it (T136).
+                  event.stopPropagation();
+                  onClose(tab.id);
+                }}
+              >
+                <AppIcon name="close" />
+              </button>
+            </div>
+          );
+        })}
       </div>
 
       {/*
@@ -296,8 +302,8 @@ export function TabStrip({
         <button
           type="button"
           className="tab-strip__action tab-strip__new"
-          aria-label="New document"
-          title="New (Ctrl+N)"
+          aria-label={t("ui.tabs.newDocument")}
+          title={t("ui.tabs.newTooltip", { shortcut: "Ctrl+N" })}
           onClick={onNew}
         >
           <AppIcon name="plus" />

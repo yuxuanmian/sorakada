@@ -14,6 +14,7 @@ import {
   type CloseRequestedLike,
   type WindowLifecycleSource,
 } from "./windowLifecycle";
+import { ExitCoordinator } from "./exitCoordinator";
 
 /* -------------------------------------------------------------------------- */
 /* Test doubles                                                               */
@@ -159,7 +160,8 @@ class FakeSource implements WindowLifecycleSource {
 
 describe("formatWindowTitle", () => {
   it("marks only dirty documents and always names the application", () => {
-    expect(formatWindowTitle(createSession())).toBe("Untitled1 - Sorakada");
+    expect(formatWindowTitle(createSession())).toBe("未命名1 - Sorakada");
+    expect(formatWindowTitle(createSession({ path: "C:\\w\\Untitled1", displayName: "Untitled1" }))).toBe("Untitled1 - Sorakada");
     expect(
       formatWindowTitle(
         createSession({ path: "C:\\w\\foo.txt", displayName: "foo.txt" }),
@@ -175,7 +177,7 @@ describe("formatWindowTitle", () => {
       ),
     ).toBe("*foo.txt - Sorakada");
     expect(formatWindowTitle(createSession({ dirty: true }))).toBe(
-      "*Untitled1 - Sorakada",
+      "*未命名1 - Sorakada",
     );
   });
 
@@ -184,7 +186,7 @@ describe("formatWindowTitle", () => {
     source.dirtyDocuments = [createSession({ id: "doc-9", dirty: true })];
 
     expect(formatWindowTitle(source.getActiveSession())).toBe(
-      "Untitled2 - Sorakada",
+      "未命名2 - Sorakada",
     );
   });
 
@@ -207,12 +209,12 @@ describe("installWindowLifecycle with zero documents (US4)", () => {
     const appWindow = new FakeWindow();
 
     await installWindowLifecycle(source, appWindow);
-    expect(appWindow.titles).toEqual(["Untitled1 - Sorakada"]);
+    expect(appWindow.titles).toEqual(["未命名1 - Sorakada"]);
 
     // Closing the final Tab drops the active session without creating another.
     source.update(null);
     expect(appWindow.titles).toEqual([
-      "Untitled1 - Sorakada",
+      "未命名1 - Sorakada",
       "Sorakada",
     ]);
   });
@@ -225,7 +227,7 @@ describe("installWindowLifecycle with zero documents (US4)", () => {
     expect(appWindow.titles).toEqual(["Sorakada"]);
 
     source.update(createSession({ displayName: "Untitled1" }));
-    expect(appWindow.titles).toEqual(["Sorakada", "Untitled1 - Sorakada"]);
+    expect(appWindow.titles).toEqual(["Sorakada", "未命名1 - Sorakada"]);
   });
 
   it("closes a zero-document window without running the unsaved guard", async () => {
@@ -510,5 +512,23 @@ describe("custom window chrome close path", () => {
     expect(appWindow.lastCloseEvent?.preventDefaultCount).toBe(0);
     expect(source.closeAllCalls).toBe(0);
     expect(appWindow.destroyCount).toBe(0);
+  });
+
+  it("routes close through exitCoordinator when provided", async () => {
+    const dirty = createSession({ dirty: true });
+    const source = new FakeSource(dirty);
+    source.dirtyDocuments = [dirty];
+    const appWindow = new FakeWindow();
+    const requestExit = vi.fn().mockResolvedValue(true);
+    const exitCoordinator = {
+      requestExit,
+      isExiting: () => false,
+    } as unknown as ExitCoordinator;
+
+    await installWindowLifecycle(source, appWindow, { exitCoordinator });
+    await wire(appWindow).chrome.requestClose();
+
+    expect(appWindow.lastCloseEvent?.preventDefaultCount).toBe(1);
+    expect(requestExit).toHaveBeenCalledTimes(1);
   });
 });

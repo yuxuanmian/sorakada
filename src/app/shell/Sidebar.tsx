@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useState, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 export interface SidebarProps {
   /** Rendered width in CSS logical pixels, already clamped by the caller. */
@@ -31,6 +32,7 @@ export interface SidebarProps {
  * may leave the thin divider without losing the drag.
  */
 export function Sidebar({ width, onResize, label, children }: SidebarProps) {
+  const { t } = useTranslation();
   const [drag, setDrag] = useState<{ startX: number; startWidth: number } | null>(
     null,
   );
@@ -69,7 +71,7 @@ export function Sidebar({ width, onResize, label, children }: SidebarProps) {
         }
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize sidebar"
+        aria-label={t("ui.sidebar.resize")}
         data-sora-interactive=""
         onPointerDown={(event) => {
           event.preventDefault();

@@ -20,6 +20,7 @@
  */
 
 import { useRef, type KeyboardEvent, type MouseEvent } from "react";
+import { useTranslation } from "react-i18next";
 
 import { IconGlyph, AppIcon } from "../shell/AppIcon";
 import { fileIcon } from "../icons/fileIconProvider";
@@ -59,6 +60,7 @@ export interface ExplorerRowProps {
 
 /** Renders one flattened row. */
 export function ExplorerRow(props: ExplorerRowProps) {
+  const { t } = useTranslation();
   const { row, state, metrics } = props;
 
   const guides = (
@@ -81,6 +83,12 @@ export function ExplorerRow(props: ExplorerRowProps) {
   );
 
   if (row.kind === "notice") {
+    const label =
+      row.noticeType === "loading"
+        ? t("ui.explorer.notice.loading")
+        : row.noticeType === "cycle"
+          ? t("ui.explorer.notice.cycle")
+          : row.message;
     return (
       <div
         className={`explorer-row explorer-row--notice explorer-row--notice-${row.noticeType}`}
@@ -91,11 +99,11 @@ export function ExplorerRow(props: ExplorerRowProps) {
         // FR-040/T082: a sentinel keeps the same fixed height as every other row;
         // the whole message stays readable through its tooltip instead of
         // expanding over its neighbours.
-        title={row.message}
+        title={label}
       >
         {guides}
         <span className="explorer-row__chevron explorer-row__chevron--empty" />
-        <span className="explorer-row__label">{row.message}</span>
+        <span className="explorer-row__label">{label}</span>
       </div>
     );
   }
@@ -121,7 +129,9 @@ export function ExplorerRow(props: ExplorerRowProps) {
         <InlineEditorInput
           edit={row.edit}
           label={
-            row.edit.type === "create-file" ? "New file name" : "New folder name"
+            row.edit.type === "create-file"
+              ? t("ui.explorer.row.newFileAria")
+              : t("ui.explorer.row.newFolderAria")
           }
           onInlineDraftChange={props.onInlineDraftChange}
           onInlineCommit={props.onInlineCommit}
@@ -198,7 +208,7 @@ export function ExplorerRow(props: ExplorerRowProps) {
               ? "explorer-row__chevron explorer-row__chevron--expanded"
               : "explorer-row__chevron"
           }
-          aria-label={node.expanded ? `Collapse ${node.name}` : `Expand ${node.name}`}
+          aria-label={node.expanded ? t("ui.explorer.row.collapseAria", { name: node.name }) : t("ui.explorer.row.expandAria", { name: node.name })}
           aria-expanded={node.expanded}
           onClick={(event: MouseEvent) => {
             // The chevron toggles expansion only; selection is unchanged.
@@ -225,7 +235,7 @@ export function ExplorerRow(props: ExplorerRowProps) {
       ) : (
         <InlineEditorInput
           edit={renaming}
-          label={`Rename ${renaming.originalName}`}
+          label={t("ui.explorer.row.renameAria", { name: renaming.originalName })}
           onInlineDraftChange={props.onInlineDraftChange}
           onInlineCommit={props.onInlineCommit}
           onInlineCancel={props.onInlineCancel}

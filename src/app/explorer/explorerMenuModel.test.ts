@@ -8,11 +8,13 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { i18n } from "../../i18n";
 
 import type { CommandId } from "../commands/commandIds";
 import { COMMAND_IDS } from "../commands/commandIds";
 import type { WorkContext } from "../workspace/workContext";
 import { deriveFileOperationContext } from "./explorerActions";
+import { buildExplorerMoreMenuModel } from "./explorerHeaderActions";
 import type { ExplorerNode } from "./explorerModel";
 import { allMenuItems } from "../../ui/menu/menuModel";
 import {
@@ -145,5 +147,55 @@ describe("Explorer context menu command identity", () => {
     expect(allMenuItems(model).every((item) => item.disabled === true)).toBe(
       true,
     );
+  });
+});
+
+describe("Explorer context menu localization", () => {
+  it("builds dynamically for different languages without freezing", async () => {
+    const zhModel = buildExplorerMenuModel(
+      deriveFileOperationContext(workContext, directoryNode()),
+      { isEnabled: everythingEnabled },
+    );
+    const zhLabels = allMenuItems(zhModel).map((item) => item.label);
+    expect(zhLabels).toEqual(["新建文件", "新建文件夹", "重命名", "删除", "刷新"]);
+
+    await i18n.changeLanguage("en-US");
+    try {
+      const enModel = buildExplorerMenuModel(
+        deriveFileOperationContext(workContext, directoryNode()),
+        { isEnabled: everythingEnabled },
+      );
+      const enLabels = allMenuItems(enModel).map((item) => item.label);
+      expect(enLabels).toEqual(["New File", "New Folder", "Rename", "Delete", "Refresh"]);
+    } finally {
+      await i18n.changeLanguage("zh-CN");
+    }
+  });
+
+  it("builds More menu model dynamically for different languages", async () => {
+    const zhModel = buildExplorerMoreMenuModel(
+      deriveFileOperationContext(workContext, null),
+      { isEnabled: everythingEnabled },
+    );
+    expect(allMenuItems(zhModel).map((item) => item.label)).toEqual([
+      "新建文件",
+      "新建文件夹",
+      "刷新",
+    ]);
+
+    await i18n.changeLanguage("en-US");
+    try {
+      const enModel = buildExplorerMoreMenuModel(
+        deriveFileOperationContext(workContext, null),
+        { isEnabled: everythingEnabled },
+      );
+      expect(allMenuItems(enModel).map((item) => item.label)).toEqual([
+        "New File",
+        "New Folder",
+        "Refresh",
+      ]);
+    } finally {
+      await i18n.changeLanguage("zh-CN");
+    }
   });
 });

@@ -1,0 +1,31 @@
+.sora-notifications {
+  position: fixed;
+  inset-inline-end: 12px;
+  inset-block-end: calc(var(--footer-height) + 12px);
+  inline-size: min(380px, calc(100% - 24px));
+  max-block-size: calc(100% - var(--footer-height) - var(--topbar-height) - 24px);
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  z-index: var(--layer-transient);
+  pointer-events: none;
+}
+.sora-toast {
+  pointer-events: auto;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-inline-start: 3px solid var(--color-accent);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-raised);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+  box-shadow: var(--shadow-popup);
+}
+.sora-toast[data-level="error"] { border-inline-start-color: var(--color-danger); }
+.sora-toast-heading { display: flex; align-items: start; justify-content: space-between; gap: 8px; }
+.sora-toast p { margin: 6px 0; font-size: var(--font-size-ui); }
+.sora-toast-recent { color: var(--color-text-muted); }
+.sora-toast button { background: var(--color-hover); color: var(--color-text); border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 3px 8px; cursor: pointer; }
+.sora-toast button:focus-visible, .sora-toast-detail:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
+.sora-toast-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.sora-toast-detail { max-block-size: 180px; overflow: auto; white-space: pre-wrap; user-select: text; font-size: var(--font-size-ui); margin-block-end: 0; }

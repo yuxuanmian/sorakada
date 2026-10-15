@@ -26,6 +26,9 @@ import type { EditorState, Text } from "@codemirror/state";
 import { createEditorState, createExternalReloadState } from "../../editor/editorConfig";
 import type { EditorHandle } from "../../editor/editorHandle";
 import type { FileDialogService } from "../../services/fileDialogs";
+import type { OperationErrorContext } from "../../services/errorContext";
+import type { DialogValidity } from "../../ui/dialog/dialogManager";
+import { localizedDocumentName } from "../../i18n/documentName";
 import {
   isFileCommandError,
   toFileCommandError,
@@ -376,6 +379,46 @@ function parentDirectoryOf(path: string): string | null {
  * read rather than the bytes a write produces, so a Mixed file Sorakada wrote back
  * as CRLF must not look different from itself.
  */
+export interface DocumentSessionSignature {
+  readonly id: DocumentId;
+  readonly path: string | null;
+  readonly bindingGeneration: number;
+  readonly latestSaveGeneration: number;
+  readonly savedBaseline: Text;
+  readonly doc: Text;
+  readonly externalState: ExternalState;
+}
+
+export function captureSessionSignature(
+  session: DocumentSession,
+): DocumentSessionSignature {
+  return {
+    id: session.id,
+    path: session.path,
+    bindingGeneration: session.bindingGeneration,
+    latestSaveGeneration: session.latestSaveGeneration,
+    savedBaseline: session.savedBaseline,
+    doc: session.editorState.doc,
+    externalState: session.externalState,
+  };
+}
+
+export function isSessionSignatureValid(
+  live: DocumentSession | undefined,
+  expected: DocumentSessionSignature,
+): boolean {
+  if (!live) return false;
+  return (
+    live.id === expected.id &&
+    live.path === expected.path &&
+    live.bindingGeneration === expected.bindingGeneration &&
+    live.latestSaveGeneration === expected.latestSaveGeneration &&
+    live.savedBaseline === expected.savedBaseline &&
+    live.externalState === expected.externalState &&
+    live.editorState.doc.eq(expected.doc)
+  );
+}
+
 function snapshotMatchesBaseline(
   content: OpenTextFileResult,
   session: DocumentSession,
@@ -530,6 +573,28 @@ export class DocumentManager {
   private readonly reportedValidationErrors = new Map<DocumentId, string>();
 
   /** comparisonKey -> owning document. A key is owned by at most one session. */
+  private createSessionValidity(session: DocumentSession): {
+    validity: DialogValidity;
+    signature: DocumentSessionSignature;
+  } {
+    const signature = captureSessionSignature(session);
+    const validity: DialogValidity = {
+      isValid: () => {
+        const live = this.sessions.get(session.id);
+        if (live !== session) {
+          return false;
+        }
+        return isSessionSignatureValid(live, signature);
+      },
+    };
+    return { validity, signature };
+  }
+
+  private nextIntentGeneration = 0;
+  private allocateIntentGeneration(): number {
+    return ++this.nextIntentGeneration;
+  }
+
   private readonly openPathIndex = new Map<string, DocumentId>();
   /**
    * comparisonKey -> the Save As operation reserving that destination.
@@ -865,6 +930,7 @@ export class DocumentManager {
   async markValidationError(
     binding: DocumentBinding,
     error: FileCommandError,
+    context?: OperationErrorContext,
   ): Promise<boolean> {
     if (!this.isBindingCurrent(binding)) {
       return false;
@@ -872,12 +938,20 @@ export class DocumentManager {
 
     const alreadyReported =
       this.reportedValidationErrors.get(binding.documentId) === error.message;
-    if (!alreadyReported) {
+    if (!alreadyReported || context?.critical) {
       this.reportedValidationErrors.set(binding.documentId, error.message);
-      await this.dialogs.showError(error.message);
+      await this.dialogs.showError(error.message, {
+        operation: context?.operation ?? "open",
+        documentId: binding.documentId,
+        path: binding.path,
+        code: context?.code ?? error.code,
+        critical: context?.critical ?? false,
+        ...context,
+      });
+      return true;
     }
 
-    return true;
+    return false;
   }
 
   /* ---------------------------------------------------------------------- */
@@ -1007,7 +1081,10 @@ export class DocumentManager {
     } catch (error) {
       return {
         status: "failed",
-        error: await this.reportError(error, "path_resolution"),
+        error: await this.reportError(error, "path_resolution", {
+          operation: "open",
+          path,
+        }),
       };
     }
 
@@ -1027,6 +1104,7 @@ export class DocumentManager {
         error: await this.reportMessage(
           "path_resolution",
           `${path} is a folder, not a file.`,
+          { operation: "open", path },
         ),
       };
     }
@@ -1101,7 +1179,10 @@ export class DocumentManager {
     } catch (error) {
       return {
         status: "failed",
-        error: await this.reportError(error, "io_read"),
+        error: await this.reportError(error, "io_read", {
+          operation: "open",
+          path,
+        }),
       };
     }
 
@@ -1136,6 +1217,7 @@ export class DocumentManager {
       identity,
     });
 
+    this.dialogs.clearError?.({ operation: "open", path });
     return { status: "opened", documentId: session.id };
   }
 
@@ -1153,19 +1235,21 @@ export class DocumentManager {
    * touched.
    */
   async saveDocument(id: DocumentId): Promise<CommandResult> {
-    return this.saveDocumentInternal(id, 0);
+    const intentGen = this.allocateIntentGeneration();
+    return this.saveDocumentInternal(id, 0, intentGen);
   }
 
   private async saveDocumentInternal(
     id: DocumentId,
     waits: number,
+    intentGen: number,
   ): Promise<CommandResult> {
     const session = this.sessions.get(id);
     if (session === undefined) {
       return { status: "success" };
     }
     if (session.path === null) {
-      return this.saveDocumentAs(id);
+      return this.saveDocumentAs(id, intentGen);
     }
 
     // A pending Rename/Delete may be about to move this document's own path, so
@@ -1183,12 +1267,20 @@ export class DocumentManager {
           error: await this.reportMessage(
             "path_resolution",
             `${session.path} is being changed by another operation.`,
+            {
+              operation: "save",
+              documentId: id,
+              path: session.path,
+              code: "path_resolution",
+              generation: intentGen,
+              critical: true,
+            },
           ),
         };
       }
 
       await covering.settled;
-      return this.saveDocumentInternal(id, waits + 1);
+      return this.saveDocumentInternal(id, waits + 1, intentGen);
     }
 
     const binding = this.getBinding(id);
@@ -1207,7 +1299,7 @@ export class DocumentManager {
 
     if (validation.outcome === "stale") {
       // The document was closed or rebound while validation ran, so the newer
-      // state — not this save — owns what happens next (FR-039).
+      // state -- not this save -- owns what happens next (FR-039).
       return { status: "success" };
     }
 
@@ -1218,25 +1310,34 @@ export class DocumentManager {
       // a failed recreation still leaves the user looking at a `missing` document
       // rather than at a stale `normal` state.
       this.markExternalState(binding, "missing");
-      return this.recreateMissingDocument(id, binding);
+      return this.recreateMissingDocument(id, binding, intentGen);
     }
 
     if (validation.outcome === "unverifiable") {
-      // FR-043: a failure to verify is surfaced non-destructively for a clean
-      // document too, instead of a silent success that hides a path Sorakada
-      // could not read. Everything — buffer, baseline, format, dirty flag,
-      // external state and disk — stays exactly as it was (T063), and repeating
-      // the same failure does not repeat the dialog.
-      await this.markValidationError(binding, validation.error);
-      if (!session.dirty) {
-        // Nothing needed writing, so the save itself did not fail.
-        return { status: "success" };
+      if (session.dirty) {
+        await this.dialogs.showError(validation.error.message, {
+          operation: "save",
+          documentId: id,
+          path: session.path,
+          code: validation.error.code,
+          generation: intentGen,
+          critical: true,
+        });
+        return { status: "failed", error: validation.error };
       }
-      return { status: "failed", error: validation.error };
+      await this.markValidationError(binding, validation.error, {
+        operation: "save",
+        documentId: id,
+        path: session.path,
+        code: validation.error.code,
+        generation: intentGen,
+        critical: false,
+      });
+      return { status: "success" };
     }
 
     if (validation.outcome === "changed") {
-      return this.resolveSaveDivergence(id, binding, validation);
+      return this.resolveSaveDivergence(id, binding, validation, intentGen);
     }
 
     if (!session.dirty) {
@@ -1246,7 +1347,7 @@ export class DocumentManager {
       return { status: "success" };
     }
 
-    return this.writeBoundDocument(id, "save");
+    return this.writeBoundDocument(id, "save", intentGen);
   }
 
   /**
@@ -1266,6 +1367,7 @@ export class DocumentManager {
     id: DocumentId,
     binding: DocumentBinding,
     validation: Extract<DiskValidationResult, { outcome: "changed" }>,
+    intentGen: number,
   ): Promise<CommandResult> {
     const session = this.sessions.get(id);
     if (session === undefined || !this.isBindingCurrent(binding)) {
@@ -1273,8 +1375,6 @@ export class DocumentManager {
     }
 
     if (!session.dirty) {
-      // A clean document has no Sorakada-only content, so adopting the disk
-      // version is the only meaningful outcome and cannot lose user work.
       this.applyValidatedDiskSnapshot(binding, {
         identity: validation.identity,
         content: validation.content,
@@ -1283,40 +1383,86 @@ export class DocumentManager {
     }
 
     if (snapshotMatchesBaseline(validation.content, session)) {
-      // The supported disk text and format are exactly what this document already
-      // holds as its baseline, so nothing external diverged: adopt the fresh
-      // revision (and only the revision — the bytes are equivalent, T061) and let
-      // the ordinary save proceed without asking anything.
       this.adoptVerifiedIdentity(binding, validation.identity);
-      return this.writeBoundDocument(id, "save");
+      return this.writeBoundDocument(id, "save", intentGen);
     }
 
-    // FR-021: the divergence is recorded before the user is asked, so a
-    // cancelled overwrite still leaves the conflict visible in the Tab.
     this.markExternalState(binding, "modified");
 
-    // FR-023/FR-026/FR-042: ordinary Save is blocked until the user explicitly
-    // chooses Overwrite; anything else is Cancel and changes nothing (FR-024).
+    const { validity, signature } = this.createSessionValidity(session);
     const choice = await this.dialogs.confirmExternalOverwrite(
-      session.displayName,
+      localizedDocumentName(session),
+      validity,
     );
     if (choice !== "overwrite") {
       return { status: "cancelled" };
     }
 
-    // The dialog was awaited, so the document may have been closed, rebound or
-    // emptied by Undo in the meantime; only a still-dirty current binding may
-    // continue into the write.
-    const live = this.sessions.get(id);
+    const liveAfterPrompt = this.sessions.get(id);
     if (
-      live === undefined ||
-      !live.dirty ||
-      !this.isBindingCurrent(binding)
+      liveAfterPrompt === undefined ||
+      !liveAfterPrompt.dirty ||
+      !this.isBindingCurrent(binding) ||
+      !isSessionSignatureValid(liveAfterPrompt, signature)
     ) {
-      return { status: "success" };
+      return { status: "cancelled" };
     }
 
-    return this.writeBoundDocument(id, "save");
+    const recheck = await this.diskValidator.validate({
+      binding: {
+        ...binding,
+        identity: validation.identity,
+      },
+      trigger: "forced-overwrite",
+      isCurrent: () => {
+        const live = this.sessions.get(id);
+        return (
+          this.isBindingCurrent(binding) &&
+          live !== undefined &&
+          isSessionSignatureValid(live, signature)
+        );
+      },
+    });
+
+    if (recheck.outcome === "stale") {
+      return { status: "cancelled" };
+    }
+    if (recheck.outcome === "missing") {
+      this.markExternalState(binding, "missing");
+      return { status: "cancelled" };
+    }
+    if (recheck.outcome === "unverifiable") {
+      await this.dialogs.showError(recheck.error.message, {
+        operation: "save",
+        documentId: id,
+        path: session.path ?? undefined,
+        code: recheck.error.code,
+        generation: intentGen,
+        critical: true,
+      });
+      return { status: "cancelled" };
+    }
+    if (recheck.outcome === "changed") {
+      const matchesConfirmed =
+        recheck.content.text === validation.content.text &&
+        recheck.content.format.bom === validation.content.format.bom &&
+        recheck.content.format.preferredLineEnding === validation.content.format.preferredLineEnding;
+      if (!matchesConfirmed) {
+        this.markExternalState(binding, "modified");
+        return { status: "cancelled" };
+      }
+    }
+
+    const liveBeforeWrite = this.sessions.get(id);
+    if (
+      liveBeforeWrite === undefined ||
+      !this.isBindingCurrent(binding) ||
+      !isSessionSignatureValid(liveBeforeWrite, signature)
+    ) {
+      return { status: "cancelled" };
+    }
+
+    return this.writeBoundDocument(id, "save", intentGen);
   }
 
   /**
@@ -1336,6 +1482,7 @@ export class DocumentManager {
   private async writeBoundDocument(
     id: DocumentId,
     kind: InternalFsOperationKind,
+    intentGen: number,
   ): Promise<CommandResult> {
     const session = this.sessions.get(id);
     if (session === undefined || session.path === null) {
@@ -1351,8 +1498,7 @@ export class DocumentManager {
     }
 
     const targetPath = session.path;
-    const generation = session.latestSaveGeneration + 1;
-    session.latestSaveGeneration = generation;
+    const generation = ++session.latestSaveGeneration;
     const snapshot = session.editorState.doc;
     const format = session.format;
     const claimKey = session.pathIdentity?.comparisonKey ?? targetPath;
@@ -1376,26 +1522,29 @@ export class DocumentManager {
 
     try {
       if (kind === "recreate") {
-        // FR-045 / T059: create-if-absent, so a target that appeared between the
-        // final validation and this write is reported instead of overwritten.
         await this.enqueueCreate(claimKey, request);
       } else {
         await this.enqueueWrite(claimKey, request);
       }
     } catch (error) {
-      // Nothing was written, so no captured hint may be declared internal; the
-      // guard hands every one of them back to be validated as real divergence.
       this.settleMutation(operation, { succeeded: false, confirmed: [] });
       const failure = toFileCommandError(error, "io_write");
 
       if (kind === "recreate" && failure.code === "already_exists") {
-        // The target reappeared exactly at the write boundary. Sorakada wrote
-        // nothing and the disk content is untouched, so the ordinary reappearance
-        // rules own what happens next (FR-045).
-        return this.resolveReappearedTarget(id, binding);
+        return this.resolveReappearedTarget(id, binding, intentGen);
       }
 
-      return { status: "failed", error: await this.reportError(error, "io_write") };
+      return {
+        status: "failed",
+        error: await this.reportError(error, "io_write", {
+          operation: "save",
+          documentId: id,
+          path: targetPath,
+          code: "io_write",
+          generation: intentGen,
+          critical: true,
+        }),
+      };
     }
 
     return this.finishWrite({
@@ -1405,9 +1554,9 @@ export class DocumentManager {
       request,
       operation,
       claimKey,
-      // Save, Overwrite and recreate all write to the path the document already
-      // owns, so a failed proof must never move it.
       fallbackIdentity: null,
+      operationKind: "save",
+      intentGen,
     });
   }
 
@@ -1514,6 +1663,8 @@ export class DocumentManager {
      * happen — while every other writer keeps the path it already owns.
      */
     fallbackIdentity: ResolvedPathIdentity | null;
+    operationKind?: "save" | "saveAs";
+    intentGen?: number;
   }): Promise<CommandResult> {
     const { id, generation, snapshot, request, operation, claimKey } = params;
 
@@ -1579,6 +1730,8 @@ export class DocumentManager {
       snapshot,
       adoption,
       externalState,
+      params.operationKind ?? "save",
+      params.intentGen,
     );
 
     if (adoption === null) {
@@ -1631,6 +1784,7 @@ export class DocumentManager {
   private async recreateMissingDocument(
     id: DocumentId,
     binding: DocumentBinding,
+    intentGen: number,
   ): Promise<CommandResult> {
     const session = this.sessions.get(id);
     if (session === undefined || !this.isBindingCurrent(binding)) {
@@ -1645,6 +1799,14 @@ export class DocumentManager {
         error: await this.reportMessage(
           "path_resolution",
           `${targetPath} has no parent folder.`,
+          {
+            operation: "save",
+            documentId: id,
+            path: targetPath,
+            code: "path_resolution",
+            generation: intentGen,
+            critical: true,
+          },
         ),
       };
     }
@@ -1658,6 +1820,14 @@ export class DocumentManager {
         error: await this.reportMessage(
           "path_resolution",
           `Cannot recreate ${targetPath}: ${parentPath} is not an existing folder.`,
+          {
+            operation: "save",
+            documentId: id,
+            path: targetPath,
+            code: "path_resolution",
+            generation: intentGen,
+            critical: true,
+          },
         ),
       };
     }
@@ -1680,12 +1850,12 @@ export class DocumentManager {
       return { status: "success" };
     }
     if (recheck.outcome === "missing") {
-      // Still absent, so the recreate is the operation to perform — and it creates
+      // Still absent, so the recreate is the operation to perform -- and it creates
       // the target without replacing it (T059), which closes the remaining race.
-      return this.writeBoundDocument(id, "recreate");
+      return this.writeBoundDocument(id, "recreate", intentGen);
     }
 
-    return this.applyReappearance(id, binding, recheck);
+    return this.applyReappearance(id, binding, recheck, intentGen);
   }
 
   /**
@@ -1698,6 +1868,7 @@ export class DocumentManager {
   private async resolveReappearedTarget(
     id: DocumentId,
     binding: DocumentBinding,
+    intentGen: number,
   ): Promise<CommandResult> {
     const validation = await this.diskValidator.validate({
       binding,
@@ -1705,7 +1876,7 @@ export class DocumentManager {
       isCurrent: () => this.isBindingCurrent(binding),
     });
 
-    return this.applyReappearance(id, binding, validation);
+    return this.applyReappearance(id, binding, validation, intentGen);
   }
 
   /**
@@ -1720,6 +1891,7 @@ export class DocumentManager {
     id: DocumentId,
     binding: DocumentBinding,
     validation: DiskValidationResult,
+    intentGen: number,
   ): Promise<CommandResult> {
     const session = this.sessions.get(id);
     if (session === undefined || !this.isBindingCurrent(binding)) {
@@ -1737,10 +1909,25 @@ export class DocumentManager {
           error: await this.reportMessage(
             "io_write",
             `${binding.path} disappeared before it could be recreated.`,
+            {
+              operation: "save",
+              documentId: id,
+              path: binding.path,
+              code: "io_write",
+              generation: intentGen,
+              critical: true,
+            },
           ),
         };
       case "unverifiable":
-        await this.markValidationError(binding, validation.error);
+        await this.dialogs.showError(validation.error.message, {
+          operation: "save",
+          documentId: id,
+          path: binding.path,
+          code: validation.error.code,
+          generation: intentGen,
+          critical: true,
+        });
         return { status: "failed", error: validation.error };
       case "unchanged":
         // The target reappeared holding exactly the state this document already
@@ -1749,9 +1936,9 @@ export class DocumentManager {
         if (!session.dirty) {
           return { status: "success" };
         }
-        return this.writeBoundDocument(id, "save");
+        return this.writeBoundDocument(id, "save", intentGen);
       case "changed":
-        return this.resolveSaveDivergence(id, binding, validation);
+        return this.resolveSaveDivergence(id, binding, validation, intentGen);
     }
   }
 
@@ -1777,24 +1964,53 @@ export class DocumentManager {
     if (session.dirty) {
       // FR-027: disk content may only replace unsaved work after an explicit
       // confirmation; anything else is Cancel and changes nothing.
+      const { validity, signature } = this.createSessionValidity(session);
       const confirmed = await this.dialogs.confirmDiscardForReload(
-        session.displayName,
+        localizedDocumentName(session),
+        validity,
       );
       if (!confirmed) {
         return { status: "cancelled" };
       }
+
+      const liveAfterPrompt = this.sessions.get(id);
+      if (
+        liveAfterPrompt === undefined ||
+        !this.isBindingCurrent(binding) ||
+        !isSessionSignatureValid(liveAfterPrompt, signature)
+      ) {
+        return { status: "cancelled" };
+      }
     }
 
+    const { signature } = this.createSessionValidity(session);
     const validation = await this.diskValidator.validate({
       binding,
       trigger: "reappearance",
-      isCurrent: () => this.isBindingCurrent(binding),
+      isCurrent: () => {
+        const live = this.sessions.get(id);
+        return (
+          this.isBindingCurrent(binding) &&
+          live !== undefined &&
+          isSessionSignatureValid(live, signature)
+        );
+      },
     });
+
+    const liveBeforeApply = this.sessions.get(id);
+    if (
+      liveBeforeApply === undefined ||
+      !this.isBindingCurrent(binding) ||
+      !isSessionSignatureValid(liveBeforeApply, signature)
+    ) {
+      return { status: "cancelled" };
+    }
 
     switch (validation.outcome) {
       case "stale":
         return { status: "success" };
       case "unchanged":
+        this.markExternalState(binding, "normal");
         return { status: "success" };
       case "missing": {
         this.markExternalState(binding, "missing");
@@ -1803,11 +2019,16 @@ export class DocumentManager {
           error: await this.reportMessage(
             "io_read",
             `${binding.path} no longer exists.`,
+            { operation: "reload", documentId: id, path: binding.path },
           ),
         };
       }
       case "unverifiable": {
-        await this.markValidationError(binding, validation.error);
+        await this.markValidationError(binding, validation.error, {
+          operation: "reload",
+          documentId: id,
+          path: binding.path,
+        });
         return { status: "failed", error: validation.error };
       }
       case "changed": {
@@ -1831,11 +2052,16 @@ export class DocumentManager {
    * written, so two documents can never end up owning one destination — not
    * even a destination that does not exist yet.
    */
-  async saveDocumentAs(id: DocumentId): Promise<CommandResult> {
+  async saveDocumentAs(
+    id: DocumentId,
+    existingIntentGen?: number,
+  ): Promise<CommandResult> {
     const session = this.sessions.get(id);
     if (session === undefined) {
       return { status: "success" };
     }
+
+    const intentGen = existingIntentGen ?? this.allocateIntentGeneration();
 
     const target = await this.dialogs.pickSavePath(session.path);
     if (target === null) {
@@ -1846,7 +2072,14 @@ export class DocumentManager {
     if (isFileCommandError(resolved)) {
       return {
         status: "failed",
-        error: await this.reportError(resolved, "path_resolution"),
+        error: await this.reportError(resolved, "path_resolution", {
+          operation: "saveAs",
+          documentId: id,
+          path: target,
+          code: resolved.code,
+          generation: intentGen,
+          critical: true,
+        }),
       };
     }
     const candidate = resolved;
@@ -1859,6 +2092,14 @@ export class DocumentManager {
         error: await this.reportMessage(
           "path_resolution",
           `${target} is already open in another tab.`,
+          {
+            operation: "saveAs",
+            documentId: id,
+            path: target,
+            code: "path_resolution",
+            generation: intentGen,
+            critical: true,
+          },
         ),
       };
     }
@@ -1870,6 +2111,14 @@ export class DocumentManager {
         error: await this.reportMessage(
           "path_resolution",
           `${target} is already being saved by another tab.`,
+          {
+            operation: "saveAs",
+            documentId: id,
+            path: target,
+            code: "path_resolution",
+            generation: intentGen,
+            critical: true,
+          },
         ),
       };
     }
@@ -1883,6 +2132,14 @@ export class DocumentManager {
         error: await this.reportMessage(
           "path_resolution",
           `${target} is already being opened in another tab.`,
+          {
+            operation: "saveAs",
+            documentId: id,
+            path: target,
+            code: "path_resolution",
+            generation: intentGen,
+            critical: true,
+          },
         ),
       };
     }
@@ -1894,12 +2151,19 @@ export class DocumentManager {
         error: await this.reportMessage(
           "path_resolution",
           `${target} is already being changed by another operation.`,
+          {
+            operation: "saveAs",
+            documentId: id,
+            path: target,
+            code: "path_resolution",
+            generation: intentGen,
+            critical: true,
+          },
         ),
       };
     }
 
-    const generation = session.latestSaveGeneration + 1;
-    session.latestSaveGeneration = generation;
+    const generation = ++session.latestSaveGeneration;
     // The reservation is generation-scoped: renewing the same destination
     // replaces the claim, and the older operation may no longer release it.
     this.pendingPathClaims.set(key, this.createPathClaim(id, generation));
@@ -1927,7 +2191,14 @@ export class DocumentManager {
       this.releaseClaim(key, id, generation);
       return {
         status: "failed",
-        error: await this.reportError(error, "io_write"),
+        error: await this.reportError(error, "io_write", {
+          operation: "saveAs",
+          documentId: id,
+          path: target,
+          code: "io_write",
+          generation: intentGen,
+          critical: true,
+        }),
       };
     }
 
@@ -1935,7 +2206,7 @@ export class DocumentManager {
     if (current === undefined || current.latestSaveGeneration !== generation) {
       // The bytes were written because the user asked for them, but this
       // completion is no longer the document's newest intent, so it must not
-      // move the path or the baseline — nor release a reservation that a newer
+      // move the path or the baseline -- nor release a reservation that a newer
       // operation now owns. Nothing may be declared internal either, because this
       // completion cannot confirm what the newer intent did.
       this.settleMutation(operation, { succeeded: false, confirmed: [] });
@@ -1954,6 +2225,8 @@ export class DocumentManager {
       // read-back cannot prove the bytes yet; the pre-write candidate is the
       // identity the user's choice produced.
       fallbackIdentity: candidate,
+      operationKind: "saveAs",
+      intentGen,
     });
     this.releaseClaim(key, id, generation);
     return result;
@@ -2019,13 +2292,27 @@ export class DocumentManager {
       }
 
       if (session.dirty) {
+        const { validity, signature } = this.createSessionValidity(session);
         const choice = await this.dialogs.confirmUnsavedChanges(
-          session.displayName,
+          localizedDocumentName(session),
+          validity,
         );
 
         if (choice === "cancel") {
           return { status: "cancelled" };
         }
+
+        const live = this.sessions.get(id);
+        if (live === undefined) {
+          return { status: "closed" };
+        }
+        if (!isSessionSignatureValid(live, signature)) {
+          // Edits arrived while waiting for decision; loop to re-prompt
+          if (live.dirty) {
+            continue;
+          }
+        }
+
         if (choice === "save") {
           const saved = await this.saveDocument(id);
           if (saved.status === "failed") {
@@ -2049,10 +2336,8 @@ export class DocumentManager {
   }
 
   /**
-   * The close-window guard.
+   * Prepares every dirty document for application exit.
    *
-   * It walks a stable snapshot of the Tab order, prompts only dirty documents,
-   * and returns `false` as soon as one document is cancelled or fails to save.
    * Like `closeDocument`, it re-checks each document after a save so an edit
    * that arrived mid-write still has to be decided. It never removes a Tab and
    * never creates a replacement `UntitledN`: the caller destroys the window
@@ -2060,6 +2345,7 @@ export class DocumentManager {
    */
   async prepareCloseAll(): Promise<boolean> {
     const ids = [...this.orderedIds];
+    const authorizedDontSave = new Map<DocumentId, DocumentSessionSignature>();
 
     for (const id of ids) {
       for (;;) {
@@ -2068,13 +2354,28 @@ export class DocumentManager {
           break;
         }
 
+        const { validity, signature } = this.createSessionValidity(session);
         const choice = await this.dialogs.confirmUnsavedChanges(
-          session.displayName,
+          localizedDocumentName(session),
+          validity,
         );
         if (choice === "cancel") {
           return false;
         }
+
+        const live = this.sessions.get(id);
+        if (live === undefined) {
+          break;
+        }
+        if (!isSessionSignatureValid(live, signature)) {
+          if (live.dirty) {
+            continue;
+          }
+          break;
+        }
+
         if (choice === "dontSave") {
+          authorizedDontSave.set(id, captureSessionSignature(live));
           break;
         }
 
@@ -2084,6 +2385,15 @@ export class DocumentManager {
         }
         // Loop back: a save that did not leave the document clean has not
         // finished deciding what happens to it.
+      }
+    }
+
+    for (const session of this.sessions.values()) {
+      if (session.dirty) {
+        const authorized = authorizedDontSave.get(session.id);
+        if (!authorized || !isSessionSignatureValid(session, authorized)) {
+          return false;
+        }
       }
     }
 
@@ -2902,6 +3212,8 @@ export class DocumentManager {
     snapshot: Text,
     adoption: ResolvedPathIdentity | null,
     externalState: ExternalState | null = "normal",
+    operationKind: "save" | "saveAs" = "save",
+    intentGen?: number,
   ): Promise<CommandResult> {
     const session = this.sessions.get(id);
     if (session === undefined || session.latestSaveGeneration !== generation) {
@@ -2911,12 +3223,20 @@ export class DocumentManager {
     if (adoption !== null && !this.adoptPath(session, adoption, generation)) {
       // FR-102: a path-changing save whose destination could not be adopted
       // must not move the path, advance the baseline or report the document
-      // clean — that would claim ownership the document does not have.
+      // clean -- that would claim ownership the document does not have.
       return {
         status: "failed",
         error: await this.reportMessage(
           "path_resolution",
           `${adoption.requestedPath} is already open in another tab.`,
+          {
+            operation: operationKind,
+            documentId: id,
+            path: adoption.requestedPath,
+            code: "path_resolution",
+            generation: intentGen,
+            critical: true,
+          },
         ),
       };
     }
@@ -2925,6 +3245,14 @@ export class DocumentManager {
     const dirty = !session.editorState.doc.eq(snapshot);
     const dirtyChanged = dirty !== session.dirty;
     session.dirty = dirty;
+    if (intentGen !== undefined) {
+      this.dialogs.clearError?.({
+        operation: operationKind,
+        documentId: id,
+        path: session.path ?? undefined,
+        generation: intentGen,
+      });
+    }
     // A successful write to the bound path is what makes the disk agree with the
     // baseline again, so the external state returns to normal only when the write
     // proved it (FR-017, FR-025, FR-032, T060).
@@ -3187,9 +3515,14 @@ export class DocumentManager {
   private async reportError(
     error: unknown,
     fallbackCode: FileCommandError["code"],
+    context?: OperationErrorContext,
   ): Promise<FileCommandError> {
     const fileError = toFileCommandError(error, fallbackCode);
-    await this.dialogs.showError(fileError.message);
+    await this.dialogs.showError(fileError.message, {
+      operation: "unknown",
+      ...context,
+      code: context?.code ?? fileError.code,
+    });
     return fileError;
   }
 
@@ -3197,9 +3530,14 @@ export class DocumentManager {
   private async reportMessage(
     code: FileCommandError["code"],
     message: string,
+    context?: OperationErrorContext,
   ): Promise<FileCommandError> {
     const fileError: FileCommandError = { code, message };
-    await this.dialogs.showError(message);
+    await this.dialogs.showError(message, {
+      operation: "unknown",
+      ...context,
+      code: context?.code ?? code,
+    });
     return fileError;
   }
 }

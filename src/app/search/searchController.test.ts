@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { i18n } from "../../i18n";
 
 import type { EditorHandle, SearchMatchesResult } from "../../editor/editorHandle";
 import { createEscapeManager } from "../commands/escapeManager";
+import { INVALID_REGEX_ERROR } from "./searchEngine";
 import { SearchController } from "./searchController";
 import {
   formatMatchCountLabel,
@@ -192,8 +194,11 @@ describe("formatMatchCountLabel", () => {
 
   it("displays in-place error message when error is non-null", () => {
     expect(
-      formatMatchCountLabel("foo", 0, 0, false, "无效的正则表达式"),
+      formatMatchCountLabel("foo", 0, 0, false, INVALID_REGEX_ERROR),
     ).toBe("无效的正则表达式");
+    expect(
+      formatMatchCountLabel("foo", 0, 0, false, "custom-error"),
+    ).toBe("custom-error");
   });
 });
 
@@ -463,7 +468,7 @@ describe("SearchController", () => {
 
     // Invalid regex
     controller.setQuery("[unclosed");
-    expect(controller.getState().error).toBe("无效的正则表达式");
+    expect(controller.getState().error).toBe("invalid-regex");
     expect(controller.getState().matchCount).toBe(0);
     expect(controller.getState().matchIndex).toBe(0);
     expect(editor.lastSearchQuery).toBe("");
@@ -622,5 +627,52 @@ describe("SearchController", () => {
     expect(escapeManager.count).toBe(1);
     controller.close();
     expect(escapeManager.count).toBe(0);
+  });
+
+  it("formats match count and error labels dynamically without freezing on locale", async () => {
+    expect(formatMatchCountLabel("foo", 0, 0, false)).toBe("0 个结果");
+    expect(formatMatchCountLabel("foo", 15, 0, false)).toBe("15 个结果");
+    expect(formatMatchCountLabel("foo", 1000, 0, true)).toBe("1000+ 个结果");
+    expect(formatMatchCountLabel("foo", 15, 3, false)).toBe("3 / 15");
+    expect(formatMatchCountLabel("foo", 0, 0, false, INVALID_REGEX_ERROR)).toBe("无效的正则表达式");
+    expect(formatMatchCountLabel("foo", 0, 0, false, "native diagnostic")).toBe("native diagnostic");
+
+    await i18n.changeLanguage("en-US");
+    try {
+      expect(formatMatchCountLabel("foo", 0, 0, false)).toBe("0 results");
+      expect(formatMatchCountLabel("foo", 15, 0, false)).toBe("15 results");
+      expect(formatMatchCountLabel("foo", 1000, 0, true)).toBe("1000+ results");
+      expect(formatMatchCountLabel("foo", 15, 3, false)).toBe("3 / 15");
+      expect(formatMatchCountLabel("foo", 0, 0, false, INVALID_REGEX_ERROR)).toBe("Invalid regular expression");
+      expect(formatMatchCountLabel("foo", 0, 0, false, "native diagnostic")).toBe("native diagnostic");
+    } finally {
+      await i18n.changeLanguage("zh-CN");
+    }
+  });
+
+  it("ensures regex error business state uses stable discriminator and functions identically across locales", async () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+    controller.open("find");
+    controller.toggleRegex();
+
+    controller.setQuery("[unclosed");
+    // Business state holds the stable identifier 'invalid-regex'
+    expect(controller.getState().error).toBe("invalid-regex");
+    expect(controller.getState().error !== null).toBe(true);
+
+    // Business guards hold: navigation is blocked
+    controller.findNext();
+    expect(editor.findNextCalled).toBe(0);
+
+    // Switch to en-US: business state remains stable 'invalid-regex'
+    await i18n.changeLanguage("en-US");
+    try {
+      expect(controller.getState().error).toBe("invalid-regex");
+      controller.findNext();
+      expect(editor.findNextCalled).toBe(0);
+    } finally {
+      await i18n.changeLanguage("zh-CN");
+    }
   });
 });

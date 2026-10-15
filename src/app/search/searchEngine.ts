@@ -39,6 +39,8 @@ export function decodeEscapes(text: string): string {
 /**
  * Validates a regex query string.
  */
+export const INVALID_REGEX_ERROR = "invalid-regex";
+
 export function validateRegex(
   query: string,
   caseSensitive: boolean,
@@ -51,7 +53,7 @@ export function validateRegex(
     const regex = new RegExp(query, flags);
     return { valid: true, error: null, regex };
   } catch {
-    return { valid: false, error: "无效的正则表达式" };
+    return { valid: false, error: INVALID_REGEX_ERROR };
   }
 }
 

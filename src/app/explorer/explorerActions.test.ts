@@ -17,6 +17,7 @@ import type {
   DeleteConfirmationRequest,
   WorkspaceDialogService,
 } from "../../services/workspaceDialogs";
+import type { DialogValidity } from "../../ui/dialog/dialogManager";
 import {
   NEW_DOCUMENT_FORMAT,
   type DocumentSession,
@@ -607,7 +608,10 @@ class FakeDialogs implements WorkspaceDialogService {
     this.calls.push(`error:${text}`);
   }
 
-  async confirmDelete(request: DeleteConfirmationRequest): Promise<boolean> {
+  async confirmDelete(
+    request: DeleteConfirmationRequest,
+    _validity?: DialogValidity,
+  ): Promise<boolean> {
     this.prompts.push(request);
     this.calls.push(`confirm:${request.displayName}`);
     const answer =
@@ -1613,6 +1617,100 @@ describe("ExplorerActions delete (US7)", () => {
     harness.dialogs.confirmDelete = async (request) => {
       harness.documents.sessions = [session(FILE_A, true)];
       return confirmDelete(request);
+    };
+
+    await harness.actions.delete();
+
+    expect(harness.files.calls).toEqual([]);
+    expect(harness.documents.removed).toEqual([]);
+  });
+
+  it("aborts trash when the same session object is edited in-place while waiting for the second confirmation", async () => {
+    const harness = withTree(createHarness());
+    const s = session(FILE_A, false, "doc-a");
+    harness.documents.sessions = [s];
+    harness.explorer.selectPath(FILE_A);
+    harness.dialogs.deleteAnswers = [true, true];
+
+    let calls = 0;
+    const confirmDelete = harness.dialogs.confirmDelete.bind(harness.dialogs);
+    harness.dialogs.confirmDelete = async (request, validity) => {
+      calls += 1;
+      if (calls === 1) {
+        // Escalate in-place: same session instance becomes dirty
+        s.dirty = true;
+      } else if (calls === 2) {
+        // While waiting for second confirmation, same session instance is edited in-place
+        s.editorState = s.editorState.update({
+          changes: { from: 0, to: 0, insert: "brand new edit in-place" },
+        }).state;
+      }
+      return confirmDelete(request, validity);
+    };
+
+    await harness.actions.delete();
+
+    expect(harness.files.calls).toEqual([]);
+    expect(harness.documents.removed).toEqual([]);
+  });
+
+  it("aborts trash when the same session object is edited in-place while waiting for the first confirmation", async () => {
+    const harness = withTree(createHarness());
+    const s = session(FILE_A, false, "doc-a");
+    harness.documents.sessions = [s];
+    harness.explorer.selectPath(FILE_A);
+    harness.dialogs.deleteAnswers = [true];
+
+    const confirmDelete = harness.dialogs.confirmDelete.bind(harness.dialogs);
+    harness.dialogs.confirmDelete = async (request, validity) => {
+      // User types into the same session object while deciding first prompt
+      s.editorState = s.editorState.update({
+        changes: { from: 0, to: 0, insert: "typed during first prompt" },
+      }).state;
+      return confirmDelete(request, validity);
+    };
+
+    await harness.actions.delete();
+
+    expect(harness.files.calls).toEqual([]);
+    expect(harness.documents.removed).toEqual([]);
+  });
+
+  it("aborts trash when edits arrive during delayed sourceEntryIsUnchanged directory read", async () => {
+    const harness = withTree(createHarness());
+    const s = session(FILE_A, false, "doc-a");
+    harness.documents.sessions = [s];
+    harness.explorer.selectPath(FILE_A);
+    harness.dialogs.deleteAnswers = [true];
+
+    const readWorkspaceDirectory = harness.files.readWorkspaceDirectory.bind(harness.files);
+    harness.files.readWorkspaceDirectory = async (parentPath) => {
+      const res = await readWorkspaceDirectory(parentPath);
+      // In-place edit arrives during delayed disk read of sourceEntryIsUnchanged
+      s.editorState = s.editorState.update({
+        changes: { from: 0, to: 0, insert: "edit during sourceEntryIsUnchanged" },
+      }).state;
+      return res;
+    };
+
+    await harness.actions.delete();
+
+    expect(harness.files.calls).not.toContain(`trash:${FILE_A}`);
+    expect(harness.documents.removed).toEqual([]);
+  });
+
+  it("aborts trash when queued target is closed or renamed before delete completes", async () => {
+    const harness = withTree(createHarness());
+    const s = session(FILE_A, false, "doc-a");
+    harness.documents.sessions = [s];
+    harness.explorer.selectPath(FILE_A);
+    harness.dialogs.deleteAnswers = [true];
+
+    const confirmDelete = harness.dialogs.confirmDelete.bind(harness.dialogs);
+    harness.dialogs.confirmDelete = async (request, validity) => {
+      // Target document was closed while confirmation was in flight
+      harness.documents.sessions = [];
+      return confirmDelete(request, validity);
     };
 
     await harness.actions.delete();

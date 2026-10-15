@@ -8,6 +8,7 @@
  */
 
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 export interface EditorGroupProps {
   /** The group's own Tab strip, or nothing when the group is unadorned. */
@@ -20,8 +21,9 @@ export interface EditorGroupProps {
 
 /** Renders one editor group. */
 export function EditorGroup({ tabStrip, pinnedBar, children }: EditorGroupProps) {
+  const { t } = useTranslation();
   return (
-    <section className="editor-group" aria-label="Editor group">
+    <section className="editor-group" aria-label={t("ui.editorGroup.region")}>
       {tabStrip}
       {pinnedBar}
       <div className="editor-group__host">{children}</div>

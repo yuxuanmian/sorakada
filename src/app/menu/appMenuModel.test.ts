@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { i18n } from "../../i18n";
 import type { CommandId } from "../commands/commandIds";
 import { COMMAND_IDS } from "../commands/commandIds";
 import { acceleratorFor } from "../commands/ideaKeymap";
@@ -24,10 +25,39 @@ describe("App Menu group composition", () => {
   it("groups the existing commands into File, Edit and View", () => {
     const model = buildAppMenuModel({ isEnabled: everythingEnabled });
     expect(model.map((section) => section.label)).toEqual([
+      "文件",
+      "编辑",
+      "视图",
+    ]);
+  });
+
+  it("builds dynamically for different languages without freezing on module import", async () => {
+    const zhModel = buildAppMenuModel({ isEnabled: everythingEnabled });
+    expect(zhModel.map((section) => section.label)).toEqual([
+      "文件",
+      "编辑",
+      "视图",
+    ]);
+
+    await i18n.changeLanguage("en-US");
+    try {
+      const enModel = buildAppMenuModel({ isEnabled: everythingEnabled });
+      expect(enModel.map((section) => section.label)).toEqual([
       "File",
       "Edit",
       "View",
     ]);
+      const view = enModel.find((section) => section.id === "view");
+      const density = view?.submenus?.find((submenu) => submenu.id === "density");
+      expect(density?.label).toBe("Density");
+      expect(density?.items.map((item) => item.label)).toEqual([
+        "Compact",
+        "Default",
+        "Comfortable",
+      ]);
+    } finally {
+      await i18n.changeLanguage("zh-CN");
+    }
   });
 
   it("keeps every File/Edit action reachable (T062)", () => {

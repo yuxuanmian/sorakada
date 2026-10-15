@@ -8,6 +8,7 @@
  */
 
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 export interface EditorWorkspaceProps {
   /** The editor group(s) hosted by the workspace. */
@@ -16,8 +17,9 @@ export interface EditorWorkspaceProps {
 
 /** Renders the Editor Workspace region. */
 export function EditorWorkspace({ children }: EditorWorkspaceProps) {
+  const { t } = useTranslation();
   return (
-    <main className="editor-workspace" aria-label="Editor workspace">
+    <main className="editor-workspace" aria-label={t("ui.editorWorkspace.region")}>
       {children}
     </main>
   );

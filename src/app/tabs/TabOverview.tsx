@@ -11,6 +11,7 @@
  */
 
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { AppIcon } from "../shell/AppIcon";
 import type { DocumentId, TabSnapshot } from "../document/documentSession";
@@ -30,6 +31,7 @@ export interface TabOverviewProps {
 
 /** Renders the overflow control and its filterable document list. */
 export function TabOverview({ tabs, onSelect }: TabOverviewProps) {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
 
@@ -44,10 +46,10 @@ export function TabOverview({ tabs, onSelect }: TabOverviewProps) {
       onOpenChange={(next) => {
         setOpen(next);
       }}
-      triggerLabel="Open documents"
+      triggerLabel={t("ui.tabOverview.trigger")}
       triggerClassName="tab-strip__action"
       trigger={<AppIcon name="list" />}
-      ariaLabel="Open documents"
+      ariaLabel={t("ui.tabOverview.trigger")}
       align="end"
       className="tab-overview"
     >
@@ -56,8 +58,8 @@ export function TabOverview({ tabs, onSelect }: TabOverviewProps) {
         // The filter is the first thing the user wants to type into.
         autoFocus
         value={filter}
-        aria-label="Filter open documents"
-        placeholder="Filter documents"
+        aria-label={t("ui.tabOverview.filterAria")}
+        placeholder={t("ui.tabOverview.filterPlaceholder")}
         spellCheck={false}
         onChange={(event) => {
           setFilter(event.target.value);
@@ -92,8 +94,8 @@ export function TabOverview({ tabs, onSelect }: TabOverviewProps) {
                   <span
                     className="tab__external tab__external--modified"
                     role="img"
-                    aria-label="Changed on disk"
-                    title="Changed on disk by another program"
+                    aria-label={t("ui.tabs.modifiedOnDisk")}
+                    title={t("ui.tabs.modifiedOnDiskTooltip")}
                   >
                     ↻
                   </span>
@@ -102,14 +104,14 @@ export function TabOverview({ tabs, onSelect }: TabOverviewProps) {
                   <span
                     className="tab__external tab__external--missing"
                     role="img"
-                    aria-label="Missing on disk"
-                    title="Deleted on disk; Save recreates the file"
+                    aria-label={t("ui.tabs.missingOnDisk")}
+                    title={t("ui.tabs.missingOnDiskTooltip")}
                   >
                     ⚠
                   </span>
                 ) : null}
                 {item.dirty ? (
-                  <span className="tab__dirty" title="Unsaved changes">
+                  <span className="tab__dirty" title={t("ui.tabs.unsavedChanges")}>
                     ●
                   </span>
                 ) : null}
@@ -118,7 +120,7 @@ export function TabOverview({ tabs, onSelect }: TabOverviewProps) {
           ))}
         </ul>
       ) : (
-        <p className="tab-overview__empty">No matching documents</p>
+        <p className="tab-overview__empty">{t("ui.tabOverview.empty")}</p>
       )}
     </SoraPopover>
   );

@@ -17,6 +17,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { useTranslation } from "react-i18next";
 
 import type { CommandId } from "../commands/commandIds";
 import { AppIcon, IconGlyph } from "../shell/AppIcon";
@@ -133,6 +134,7 @@ export function Explorer({
   onCommand,
   isCommandEnabled,
 }: ExplorerProps) {
+  const { t } = useTranslation();
   /**
    * The path the menu currently targets.
    *
@@ -273,10 +275,11 @@ export function Explorer({
         ? []
         : buildExplorerMoreMenuModel(actions.contextFor(), {
             isEnabled: isCommandEnabled,
+            t,
           }),
     // The context is derived from represented state, so it is rebuilt whenever
     // that state changes.
-    [actions, isCommandEnabled, readOnly, state],
+    [actions, isCommandEnabled, readOnly, state, t],
   );
 
   // The fixture is not a Workspace, so it renders without one: its own root name
@@ -288,9 +291,9 @@ export function Explorer({
     return (
       <div className="explorer explorer--empty">
         <div className="explorer__empty-content">
-          <p className="explorer__hint">No folder is open.</p>
+          <p className="explorer__hint">{t("ui.explorer.empty.hint")}</p>
           <button type="button" className="shell-button" onClick={onOpenFolder}>
-            Open Folder
+            {t("ui.explorer.empty.openFolder")}
           </button>
         </div>
       </div>
@@ -368,7 +371,7 @@ export function Explorer({
   // not offered while a different Tree is on screen (T229).
   const headerActions = readOnly ? null : (
     <>
-      {explorerHeaderActions(headerState).map((action) => (
+      {explorerHeaderActions(headerState, t).map((action) => (
         <button
           key={action.commandId}
           type="button"
@@ -388,7 +391,7 @@ export function Explorer({
       {isMoreAvailable(headerState) ? (
         <SoraMenu
           model={moreModel}
-          triggerLabel="More Explorer actions"
+          triggerLabel={t("ui.explorer.header.more")}
           triggerClassName="explorer__action"
           trigger={<AppIcon name="more" />}
           align="end"
@@ -422,7 +425,7 @@ export function Explorer({
       // the key handler stays here so F2/Delete and the direct-type trigger work
       // from the Tree and from any control inside the Explorer.
       role="group"
-      aria-label="Explorer"
+      aria-label={t("ui.explorer.region")}
       onKeyDown={onKeyDown}
     >
       <ExplorerHeader
@@ -433,7 +436,7 @@ export function Explorer({
 
       {renderedState.rootUnavailable ? (
         <p className="explorer__error" role="alert">
-          This folder could not be read. Use Refresh to try again.
+          {t("ui.explorer.rootUnavailable")}
         </p>
       ) : null}
 
@@ -445,17 +448,28 @@ export function Explorer({
       {debugOptions?.showVirtualRange === true ? (
         <div className="explorer__debug" aria-live="off">
           {virtualRange === null ? (
-            <span>no rows</span>
+            <span>{t("ui.explorer.debug.noRows")}</span>
           ) : (
             <>
-              <span>visible {virtualRange.visibleRowCount}</span>
-              <span>rendered {virtualRange.renderedRowCount}</span>
               <span>
-                range {virtualRange.virtualStart}–{virtualRange.virtualEnd}
+                {t("ui.explorer.debug.visible", {
+                  count: virtualRange.visibleRowCount,
+                })}
+              </span>
+              <span>
+                {t("ui.explorer.debug.rendered", {
+                  count: virtualRange.renderedRowCount,
+                })}
+              </span>
+              <span>
+                {t("ui.explorer.debug.range", {
+                  start: virtualRange.virtualStart,
+                  end: virtualRange.virtualEnd,
+                })}
               </span>
             </>
           )}
-          {readOnly ? <span>fixture</span> : null}
+          {readOnly ? <span>{t("ui.explorer.debug.fixture")}</span> : null}
         </div>
       ) : null}
 

@@ -225,3 +225,38 @@ describe("CommandRegistry 003 command identities", () => {
     expect(remove).not.toHaveBeenCalled();
   });
 });
+
+describe('CommandRegistry execution guard', () => {
+  it('blocks isEnabled and execute when the execution guard returns false', async () => {
+    const registry = createCommandRegistry();
+    const handler = vi.fn();
+    register(registry, 'file.save', handler);
+
+    expect(registry.isEnabled('file.save')).toBe(true);
+    await registry.execute('file.save');
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    let allowed = false;
+    registry.setExecutionGuard(() => allowed);
+
+    expect(registry.isEnabled('file.save')).toBe(false);
+    await registry.execute('file.save');
+    expect(handler).toHaveBeenCalledTimes(1);
+
+    allowed = true;
+    expect(registry.isEnabled('file.save')).toBe(true);
+    await registry.execute('file.save');
+    expect(handler).toHaveBeenCalledTimes(2);
+
+    registry.setExecutionGuard(null);
+    expect(registry.isEnabled('file.save')).toBe(true);
+  });
+
+  it('still reports unregistered commands as unavailable and throws on execute even with a guard', async () => {
+    const registry = createCommandRegistry();
+    registry.setExecutionGuard(() => false);
+
+    expect(registry.isEnabled('file.new')).toBe(false);
+    await expect(registry.execute('file.new')).rejects.toThrow(/not registered/i);
+  });
+});

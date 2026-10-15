@@ -12,6 +12,8 @@
  */
 
 import type { CommandId } from "../commands/commandIds";
+import type { AppTranslator, TranslationKey } from "../../i18n";
+import { t } from "../../i18n";
 import type { SoraMenuItem, SoraMenuModel, SoraMenuSection } from "../../ui/menu/menuModel";
 import {
   isContextMenuCreateAvailable,
@@ -37,24 +39,26 @@ export interface ExplorerMenuModelOptions {
    * command layer would refuse (FR-022, FR-030).
    */
   isEnabled(commandId: CommandId): boolean;
+  t?: AppTranslator;
 }
 
-/** The label each action displays. */
-const LABELS: Readonly<Record<ExplorerMenuAction, string>> = {
-  "explorer.newFile": "New File",
-  "explorer.newFolder": "New Folder",
-  "explorer.rename": "Rename",
-  "explorer.delete": "Delete",
-  "explorer.refresh": "Refresh",
+/** The translation key each action displays. */
+const ACTION_LABEL_KEYS: Readonly<Record<ExplorerMenuAction, TranslationKey>> = {
+  "explorer.newFile": "ui.explorer.contextMenu.newFile",
+  "explorer.newFolder": "ui.explorer.contextMenu.newFolder",
+  "explorer.rename": "ui.explorer.contextMenu.rename",
+  "explorer.delete": "ui.explorer.contextMenu.delete",
+  "explorer.refresh": "ui.explorer.contextMenu.refresh",
 };
 
 function item(
   action: ExplorerMenuAction,
   isEnabled: (commandId: CommandId) => boolean,
+  translate: AppTranslator,
 ): SoraMenuItem {
   return {
     id: action,
-    label: LABELS[action],
+    label: translate(ACTION_LABEL_KEYS[action]),
     commandId: action,
     ...(isEnabled(action) ? {} : { disabled: true }),
   };
@@ -71,6 +75,7 @@ export function buildExplorerMenuModel(
   context: FileOperationContext,
   options: ExplorerMenuModelOptions,
 ): SoraMenuModel {
+  const { isEnabled, t: translate = t } = options;
   const sections: SoraMenuSection[] = [];
 
   // Creation is offered for the root and directory contexts only: a file's menu
@@ -80,18 +85,18 @@ export function buildExplorerMenuModel(
     sections.push({
       id: "create",
       items: [
-        item("explorer.newFile", options.isEnabled),
-        item("explorer.newFolder", options.isEnabled),
+        item("explorer.newFile", isEnabled, translate),
+        item("explorer.newFolder", isEnabled, translate),
       ],
     });
   }
 
   const entryItems: SoraMenuItem[] = [];
   if (isRenameAvailable(context)) {
-    entryItems.push(item("explorer.rename", options.isEnabled));
+    entryItems.push(item("explorer.rename", isEnabled, translate));
   }
   if (isDeleteAvailable(context)) {
-    entryItems.push(item("explorer.delete", options.isEnabled));
+    entryItems.push(item("explorer.delete", isEnabled, translate));
   }
   if (entryItems.length > 0) {
     sections.push({ id: "entry", items: entryItems });
@@ -102,7 +107,7 @@ export function buildExplorerMenuModel(
   if (isContextMenuRefreshAvailable(context)) {
     sections.push({
       id: "refresh",
-      items: [item("explorer.refresh", options.isEnabled)],
+      items: [item("explorer.refresh", isEnabled, translate)],
     });
   }
 

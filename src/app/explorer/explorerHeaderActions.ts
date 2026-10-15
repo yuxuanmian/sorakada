@@ -20,6 +20,8 @@ import type { UiIconId } from "../icons/iconTypes";
 import { isWithinDirectory } from "../workspace/workContext";
 import { isCreateAvailable, isRefreshAvailable, type FileOperationContext } from "./explorerActions";
 import type { SoraMenuModel } from "../../ui/menu/menuModel";
+import type { AppTranslator } from "../../i18n";
+import { t } from "../../i18n";
 
 /** The operation context and Workspace facts the Header actions depend on. */
 export interface ExplorerHeaderState {
@@ -69,17 +71,18 @@ export interface ExplorerHeaderAction {
  */
 export function explorerHeaderActions(
   state: ExplorerHeaderState,
+  translate: AppTranslator = t,
 ): ExplorerHeaderAction[] {
   return [
     {
       commandId: "explorer.locateCurrentFile",
-      label: "Locate current file",
+      label: translate("ui.explorer.header.locate"),
       icon: "locate",
       enabled: isLocateAvailable(state),
     },
     {
       commandId: "explorer.collapseAll",
-      label: "Collapse all",
+      label: translate("ui.explorer.header.collapseAll"),
       icon: "collapse-all",
       enabled: state.hasWorkspace && state.hasExpandedDirectories,
     },
@@ -100,10 +103,16 @@ export function isMoreAvailable(state: ExplorerHeaderState): boolean {
  * The `More` popup: creation when the shared target rule permits it, plus the
  * de-emphasised Refresh (FR-029, FR-030, T121, T122).
  */
+export interface BuildExplorerMoreMenuModelOptions {
+  isEnabled(commandId: CommandId): boolean;
+  t?: AppTranslator;
+}
+
 export function buildExplorerMoreMenuModel(
   context: FileOperationContext,
-  options: { isEnabled(commandId: CommandId): boolean },
+  options: BuildExplorerMoreMenuModelOptions,
 ): SoraMenuModel {
+  const { isEnabled, t: translate = t } = options;
   const sections: {
     id: string;
     items: { id: string; label: string; commandId: CommandId; disabled?: boolean }[];
@@ -115,15 +124,15 @@ export function buildExplorerMoreMenuModel(
       items: [
         {
           id: "explorer.newFile",
-          label: "New File",
+          label: translate("ui.explorer.contextMenu.newFile"),
           commandId: "explorer.newFile",
-          ...(options.isEnabled("explorer.newFile") ? {} : { disabled: true }),
+          ...(isEnabled("explorer.newFile") ? {} : { disabled: true }),
         },
         {
           id: "explorer.newFolder",
-          label: "New Folder",
+          label: translate("ui.explorer.contextMenu.newFolder"),
           commandId: "explorer.newFolder",
-          ...(options.isEnabled("explorer.newFolder") ? {} : { disabled: true }),
+          ...(isEnabled("explorer.newFolder") ? {} : { disabled: true }),
         },
       ],
     });
@@ -135,9 +144,9 @@ export function buildExplorerMoreMenuModel(
       items: [
         {
           id: "explorer.refresh",
-          label: "Refresh",
+          label: translate("ui.explorer.contextMenu.refresh"),
           commandId: "explorer.refresh",
-          ...(options.isEnabled("explorer.refresh") ? {} : { disabled: true }),
+          ...(isEnabled("explorer.refresh") ? {} : { disabled: true }),
         },
       ],
     });

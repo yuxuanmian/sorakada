@@ -9,6 +9,7 @@
  */
 
 import type { DocumentId, TabSnapshot } from "../document/documentSession";
+import { localizedDocumentName } from "../../i18n/documentName";
 
 /** One Overview entry: a projection of current Tab metadata. */
 export interface TabOverviewItem {
@@ -25,7 +26,7 @@ export interface TabOverviewItem {
 export function toTabOverviewItem(tab: TabSnapshot): TabOverviewItem {
   return {
     id: tab.id,
-    displayName: tab.displayName,
+    displayName: localizedDocumentName(tab),
     path: tab.path,
     dirty: tab.dirty,
     active: tab.active,
@@ -47,16 +48,16 @@ export function filterTabOverviewItems(
   const normalized = filter.trim().toLowerCase();
 
   return tabs
-    .filter((tab) => {
+    .map(toTabOverviewItem)
+    .filter((item) => {
       if (normalized === "") {
         return true;
       }
-      if (tab.displayName.toLowerCase().includes(normalized)) {
+      if (item.displayName.toLowerCase().includes(normalized)) {
         return true;
       }
-      return (tab.path ?? "").toLowerCase().includes(normalized);
-    })
-    .map(toTabOverviewItem);
+      return (item.path ?? "").toLowerCase().includes(normalized);
+    });
 }
 
 /**
