@@ -1,0 +1,494 @@
+/*
+ * Explorer Tree, inline editor and Tree geometry.
+ *
+ * Colours, spacing, shape and every structural metric come from the tokens in
+ * `global.css` (palette/typography) and `density.css` (row height, indent,
+ * chevron size), so the Explorer declares no palette and no row-height constant of
+ * its own (FR-017..FR-019, T094).
+ */
+
+.explorer {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  outline: none;
+}
+
+.explorer--empty {
+  display: grid;
+  grid-template-rows: minmax(0, 2fr) auto minmax(0, 3fr);
+  padding: var(--space-3);
+}
+
+.explorer__empty-content {
+  display: flex;
+  grid-row: 2;
+  flex-direction: column;
+  align-items: center;
+  justify-self: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  text-align: center;
+}
+
+.explorer__hint {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.explorer__header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-height);
+  padding: 0 var(--space-1) 0 var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  user-select: none;
+}
+
+.explorer__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.explorer__actions {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  gap: 2px;
+  /*
+   * A fixed hit area for the three Header actions: entering or leaving the
+   * transient search must not move Locate/Collapse/More horizontally (FR-027).
+   */
+  min-width: calc(var(--control-height) * 3 + 4px);
+}
+
+/* The transient search input, shown in the Header's left half (FR-027, T108). */
+.explorer__search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: calc(var(--control-height) - 4px);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-focus-ring);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  outline: none;
+}
+
+.explorer__search-count {
+  flex: 0 0 auto;
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.explorer__action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-height);
+  height: var(--control-height);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: default;
+}
+
+.explorer__action:hover:not(:disabled) {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+.explorer__action:disabled {
+  color: var(--color-text-subtle);
+}
+
+.explorer__error {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+}
+
+/* ------------------------------------------------------------------------- */
+/* The one Tree scroll viewport (T099)                                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The body is the *only* vertical/horizontal Tree scroller, and the Header is
+ * deliberately outside it. Horizontal overflow is enabled only through the
+ * modifier class, which the Tree adds when the computed materialized content is
+ * actually wider than the viewport — so a rounded measurement can never produce a
+ * permanent stray scrollbar.
+ */
+.explorer__body {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  outline: none;
+}
+
+.explorer__body--overflow-x {
+  overflow-x: auto;
+}
+
+/*
+ * The stable focus owner: the keyboard scope survives any row being recycled.
+ * 008 keeps the focus perceptible but quiet — the Tree is an interaction surface,
+ * not a webpage input, so the outline is toned down rather than removed, and
+ * focus ownership stays here (008 T090, FR-052).
+ */
+.explorer__body:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--color-focus-ring) 60%, transparent);
+  outline-offset: -1px;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Virtual content layer                                                      */
+/* ------------------------------------------------------------------------- */
+
+/* Height and width are computed; the layer only positions its rows. */
+.explorer-tree {
+  position: relative;
+  padding: var(--space-1) 0;
+  user-select: none;
+}
+
+/*
+ * One mounted row. Absolute + translated positioning is what the virtualizer
+ * drives, so the row elements carry no layout of their own.
+ */
+.explorer-tree__row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+/* One visible row: guides, chevron, glyph, label. */
+.explorer-row {
+  position: relative;
+  /*
+   * 008 SR-003: the row box paints nothing. Hover/selection feedback is drawn by
+   * the decorative layer below, whose horizontal bounds are identical for every
+   * depth, so a deeper row never gets a shorter interaction surface (008 FR-042,
+   * FR-044). `isolation` keeps that layer's stacking local to the row.
+   */
+  isolation: isolate;
+  display: flex;
+  align-items: center;
+  gap: var(--ui-gap);
+  height: var(--tree-row-height);
+  padding-right: var(--space-2);
+  background: transparent;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  cursor: default;
+  outline: none;
+}
+
+/*
+ * The stable hover/selection surface (008 FR-042..FR-046, SC-005).
+ *
+ * `left`/`right` are the same expression at every depth: it begins just inside
+ * the root-guide band and preserves the matching inset on the right, so ordinary
+ * rows look balanced and a deep unscrolled row still shows visible feedback even
+ * though its label starts far to the right. Nothing here may read `row.depth`.
+ */
+.explorer-row::before {
+  content: "";
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  left: calc(var(--tree-indent) / 2 + 1px);
+  right: calc(var(--tree-indent) / 2 + 1px);
+  border-radius: var(--radius-md);
+  background-color: transparent;
+  pointer-events: none;
+  transition:
+    background-color var(--motion-fast) ease,
+    border-color var(--motion-fast) ease;
+}
+
+/*
+ * Row content and guides paint above the feedback layer through local stacking
+ * only: positioned boxes with the same stacking level are painted in tree order,
+ * and `::before` is the first child. No ad-hoc z-index is introduced (008 T084).
+ */
+.explorer-row > * {
+  position: relative;
+}
+
+.explorer-row:hover {
+  color: var(--color-text);
+}
+
+.explorer-row:hover::before {
+  background-color: var(--surface-tree-hover);
+}
+
+/*
+ * Selection is visibly stronger than hover, and selection + hover stays the
+ * selection colour rather than becoming a third state (008 FR-043).
+ */
+.explorer-row--selected,
+.explorer-row--selected:hover {
+  color: var(--color-text);
+}
+
+.explorer-row--selected::before,
+.explorer-row--selected:hover::before {
+  background-color: var(--surface-tree-selected);
+}
+
+/*
+ * A load/error/cycle sentinel keeps the same fixed height as every other row
+ * (FR-040): its message truncates, and the full text is available through the
+ * row's tooltip. Letting a long OS message grow the row used to paint over the
+ * rows above and below it.
+ */
+.explorer-row--notice {
+  color: var(--color-text-subtle);
+  font-style: italic;
+}
+
+.explorer-row--notice .explorer-row__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explorer-row--notice-error .explorer-row__label,
+.explorer-row--notice-cycle .explorer-row__label {
+  color: var(--color-text-subtle);
+}
+
+/* Development-only row outline (T181). */
+.explorer-row[data-row-bounds] {
+  outline: 1px dashed var(--color-focus-ring);
+  outline-offset: -1px;
+}
+
+/*
+ * Development-only counters (T181). The element is not rendered at all unless a
+ * diagnostic is enabled, so it can never change Tree geometry when hidden.
+ */
+.explorer__debug {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--space-2);
+  padding: 2px var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+  color: var(--color-caret);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Indent guides (T093, guide polish)                                         */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Guides are slots inside one row, never nested ancestor containers: each slot is
+ * one indent step wide and draws one purely *vertical* line. There is no
+ * horizontal connector and no per-level variation, and that is exactly what makes
+ * a whole branch read as one continuous skeleton:
+ *
+ * - a row draws one slot per ancestor level, so a directory's guide occupies the
+ *   column of its own depth and therefore covers every row of its visible subtree;
+ * - the line is full height, so consecutive descendant rows tile into one
+ *   unbroken line. No "stop at the last sibling" rule is needed: the flat,
+ *   depth-first order guarantees the row after a subtree is shallower — a sibling
+ *   directory's own row — which has no slot in that column at all, so the line
+ *   simply stops existing there;
+ * - a collapsed directory has no descendant rows, so its column never appears;
+ * - several expanded levels produce several parallel vertical lines, one per
+ *   ancestor depth.
+ *
+ * The line is a positioned child of the row, so it paints *above* the hover and
+ * selection feedback instead of being cut by it, and every guide column sits left
+ * of the row's own chevron column, so a chevron can never interrupt it either.
+ */
+.explorer-row__indent {
+  display: flex;
+  flex: 0 0 auto;
+  align-self: stretch;
+}
+
+.explorer-row__guide {
+  position: relative;
+  flex: 0 0 var(--tree-indent);
+  width: var(--tree-indent);
+}
+
+/*
+ * 008 FR-041, FR-047: one pixel in the dedicated low-contrast tree-guide colour.
+ * It is measured to stay weaker than the selected/active fill and still brighter
+ * than the hover tint, so it reads as hierarchy and never as decoration.
+ */
+.explorer-row__guide::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--tree-indent) / 2);
+  width: 1px;
+  background-color: var(--color-tree-guide);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Row parts                                                                  */
+/* ------------------------------------------------------------------------- */
+
+.explorer-row__chevron {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--tree-chevron-size);
+  height: var(--tree-chevron-size);
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+}
+
+/*
+ * Expansion changes only this small glyph's compositor transform. The Tree rows
+ * and their virtualized geometry update immediately and are never animated.
+ */
+.explorer-row__chevron .app-icon {
+  transform: rotate(0deg);
+  transform-origin: center;
+  transition: transform var(--motion-fast) ease-out;
+}
+
+.explorer-row__chevron--expanded .app-icon {
+  transform: rotate(90deg);
+}
+
+.explorer-row__chevron--empty {
+  display: inline-block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .explorer-row__chevron .app-icon {
+    transition: none;
+  }
+}
+
+.explorer-row__icon {
+  color: var(--color-text-muted);
+}
+
+.explorer-row--selected .explorer-row__icon,
+.explorer-row:hover .explorer-row__icon {
+  color: inherit;
+}
+
+/*
+ * FR-045: long names truncate inside the Tree region. Horizontal scrolling is the
+ * Tree's own fallback, and a name never expands over the Editor on hover.
+ */
+.explorer-row__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explorer-row__badge {
+  flex: 0 0 auto;
+  color: var(--color-text-subtle);
+}
+
+/*
+ * The inline New/Rename editor (008 FR-051).
+ *
+ * It keeps the 007 row-relative height and the whole Enter/Escape/blur contract,
+ * and stays recognisable as an input: a dark base surface, a small radius that
+ * matches the Tree feedback language, and a visible 1px focus border. No
+ * transition is added, because an animation must never obscure a commit or a
+ * dismissal.
+ */
+.explorer-inline-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: calc(var(--tree-row-height) - 4px);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-focus-ring);
+  border-radius: var(--radius-md);
+  background-color: var(--surface-editor);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  outline: none;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Fixed-lane scrollbar (008 FR-054..FR-060, SC-007)                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The Tree viewport uses the same fixed 12px lane and the same ~6px/~8px thumb as
+ * the Editor and the Tab viewport. The horizontal modifier reuses the identical
+ * geometry, so both axes behave the same way (008 FR-060).
+ */
+.explorer__body::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.explorer__body::-webkit-scrollbar-track,
+.explorer__body::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.explorer__body::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+
+.explorer__body::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+  background-clip: content-box;
+  border-width: 2px;
+}
+
+.explorer__body::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-active);
+  background-clip: content-box;
+  border-width: 2px;
+}
+
+/*
+ * Standards fallback for a browser where the WebKit pseudo-elements are not
+ * available. It is gated because Chromium ignores `::-webkit-scrollbar` as soon
+ * as a standard scrollbar property is set on the element.
+ */
+@supports not selector(::-webkit-scrollbar) {
+  .explorer__body {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
+}

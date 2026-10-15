@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -52,5 +53,14 @@ export default defineConfig({
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+  },
+
+  // Vitest picks up the pure TypeScript lifecycle/command tests plus the 007
+  // static audits. `css: true` is what lets the CSS-contract audit read the real
+  // stylesheet text (`?raw`) instead of Vitest's stubbed empty CSS module.
+  test: {
+    environment: "node",
+    css: true,
+    include: ["src/**/*.test.ts"],
   },
 });

@@ -1,0 +1,421 @@
+/*
+ * Shell geometry: TopBar, MainArea, Sidebar, Editor Workspace/Group and Footer.
+ *
+ * Every colour, radius, spacing and structural metric comes from the tokens in
+ * `global.css` (palette/typography) and `density.css` (structural metrics), so the
+ * shell declares no palette of its own (FR-017..FR-019).
+ *
+ * The regions are one flex column; `min-width: 0`/`min-height: 0` is enforced at
+ * every flex/scroll boundary, which is what keeps a wide Tree or a long Tab strip
+ * from pushing Editor or Footer out of the window (FR-010, FR-078, T052).
+ */
+
+/* ------------------------------------------------------------------------- */
+/* TopBar (T042, T053)                                                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The TopBar is window chrome, not an island, and it is deliberately the lightest
+ * possible band: its surface is the translucent `--chrome-surface-top`, so the
+ * canvas shows through it and the bar reads as an overlay on the work area rather
+ * than as a separate dark strip. What gives it presence is the ambient light.
+ *
+ * It carries no separator line: the islands' own rim borders are the work area's
+ * boundary, and a full-width line across the chrome would only compete with them.
+ *
+ * Both ambient layers are anchored to the viewport top-left so they are the same
+ * field the canvas below continues, and the halo layer is sized to the bar's own
+ * height so it is already zero on the bottom edge — which is what keeps the light
+ * from appearing cut off there.
+ *
+ * The neutral `--chrome-sheen` layer on top gives the surface its sense of light
+ * passing through it. It is deliberately not purple, and it too fades to nothing
+ * within the bar.
+ */
+.top-bar {
+  display: flex;
+  flex: 0 0 var(--topbar-height);
+  align-items: stretch;
+  min-width: 0;
+  background-color: var(--chrome-surface-top);
+  background-image:
+    linear-gradient(to bottom, var(--chrome-sheen), transparent),
+    var(--chrome-ambient);
+  background-repeat: no-repeat;
+  background-size:
+    100% 100%,
+    100% var(--ambient-height),
+    100% var(--topbar-height);
+  user-select: none;
+}
+
+/*
+ * The gesture surface. It spans the whole strip so the empty area behaves like a
+ * title bar, and the gesture handler ignores presses that landed on an
+ * interactive descendant (FR-006, FR-007).
+ */
+.top-bar__drag {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+}
+
+.top-bar__menu {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 100%;
+}
+
+/* The draggable, non-interactive remainder of the strip. */
+.top-bar__drag-fill {
+  flex: 1 1 auto;
+  align-self: stretch;
+  min-width: var(--space-3);
+}
+
+.top-bar__window-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+}
+
+.top-bar__control {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--topbar-control-width);
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: default;
+}
+
+.top-bar__control:hover {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+.top-bar__control--close:hover {
+  background-color: var(--color-danger);
+  color: var(--color-text);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Compact App Menu trigger (T061)                                            */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The trigger is part of the TopBar strip, so it keeps the strip's height and
+ * introduces no box of its own beyond its hit area. `data-popup-open` is a
+ * documented state attribute of the headless primitive, used here only through a
+ * Sorakada class (T015).
+ */
+.compact-app-menu__trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 100%;
+  padding: 0 var(--space-2);
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  cursor: default;
+}
+
+.compact-app-menu__trigger:hover,
+.compact-app-menu__trigger[data-popup-open] {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+.compact-app-menu__name {
+  letter-spacing: 0.04em;
+}
+
+.compact-app-menu__chevron {
+  color: inherit;
+}
+
+/* ------------------------------------------------------------------------- */
+/* MainArea: the island canvas, Sidebar and Editor Workspace                  */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The canvas. It is painted here rather than on `body` so exactly the inset
+ * around the work area and the gap between the islands reveal it: the two work
+ * regions are islands on a slightly darker field, not columns cut apart by a
+ * full-height divider (008 Visual Polish).
+ *
+ * The top inset is the smaller `--island-inset-top`, so the islands tuck in under
+ * the unseparated chrome while still keeping a real gap below it.
+ *
+ * The ambient band is the same viewport-anchored field the TopBar draws, shifted
+ * up by the TopBar's height so the two line up exactly: on the seam the TopBar's
+ * extra halo layer is already zero and the sheen has faded out, so both sides show
+ * the identical radial and there is nothing to see as a cut. The radial reaches
+ * zero at `--ambient-height`, so nothing lower is tinted. The islands are opaque on
+ * top of it, which is what keeps the Editor a near-solid plane and the Explorer a
+ * neutral surface.
+ *
+ * The inset also means `clientWidth` — which `AppShell` feeds to
+ * `renderSidebarWidth` — includes it, which is why `MAIN_AREA_CHROME_WIDTH`
+ * accounts for the island chrome.
+ */
+.app__main-area {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: stretch;
+  gap: var(--island-gap);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--island-inset-top) var(--island-inset) var(--island-inset);
+  overflow: hidden;
+  background-color: var(--surface-canvas);
+  background-image: var(--ambient-radial);
+  background-repeat: no-repeat;
+  background-size: 100% var(--ambient-height);
+  background-position: 0 calc(-1 * var(--topbar-height));
+}
+
+/*
+ * The Sidebar island.
+ *
+ * The hard right divider is gone: the gap plus one weak rim border is what
+ * separates it from the Editor now. It deliberately does *not* clip its overflow,
+ * because the resize strip is positioned across the gap outside this box and
+ * `overflow: hidden` here would make the handle unhittable; `.sidebar__content`
+ * clips its own content to the rounded shape instead.
+ */
+.sidebar {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border-island);
+  border-radius: var(--radius-island);
+  background-color: var(--surface-sidebar);
+}
+
+.sidebar__content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: inherit;
+}
+
+/*
+ * The drag strip spans the island gap, so the target is the whole space between
+ * the two islands instead of half of a 4px splitter. Absolute positioning is
+ * relative to the padding box, so the gap begins after the 1px rim border — the
+ * strip covers that border plus the gap, and never overlaps the Editor island.
+ * The visible indicator stays `--sidebar-resizer-width` wide and is centred in
+ * the strip, so the hover affordance looks the same as it always did.
+ */
+.sidebar__resizer {
+  position: absolute;
+  top: 0;
+  right: calc(-1px - var(--island-gap));
+  z-index: var(--layer-transient);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(var(--island-gap) + 1px);
+  height: 100%;
+  cursor: col-resize;
+}
+
+.sidebar__resizer::before {
+  content: "";
+  width: var(--sidebar-resizer-width);
+  height: 100%;
+  background-color: transparent;
+}
+
+.sidebar__resizer:hover::before,
+.sidebar__resizer--active::before {
+  background-color: var(--color-focus-ring);
+}
+
+/*
+ * The Editor Workspace island: TabStrip and EditorHost are one surface, never
+ * two cards. It keeps the frozen minimum width from `layoutMetrics.ts` (the same
+ * 320 logical pixels), so a Sidebar clamp that went wrong could never paint over
+ * the editor (FR-083, SC-005).
+ */
+.editor-workspace {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: var(--min-editor-width);
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-island);
+  border-radius: var(--radius-island);
+  background-color: var(--surface-editor);
+}
+
+/* One editor group: its Tab strip above its host (FR-002). */
+.editor-group {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.editor-group__host {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Footer (T049, FR-073, FR-078)                                              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A thin full-width region *below* MainArea. It is a flex sibling, not an
+ * overlay, so it can never cover CodeMirror or the Sidebar (FR-073).
+ */
+.footer-bar {
+  display: flex;
+  flex: 0 0 var(--footer-height);
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 0 var(--space-2);
+  border-top: 1px solid var(--chrome-border);
+  background-color: var(--chrome-surface);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  user-select: none;
+}
+
+.footer-bar__left {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.footer-bar__right {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+
+/*
+ * Breadcrumb priority (FR-078, T174): the earlier path components shrink and
+ * truncate first, the file name and the right-hand status items do not. That way a
+ * narrow window loses low-priority context instead of forcing the application
+ * wider or covering MainArea.
+ */
+.footer-bar__context {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.footer-bar__crumb {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.footer-bar__crumb--name {
+  flex: 0 0 auto;
+}
+
+.footer-bar__separator {
+  padding: 0 2px;
+  color: var(--color-text-subtle);
+}
+
+.footer-bar__status {
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Shared surfaces                                                            */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Drag-over affordance. It is only rendered while a native drag is active and
+ * never receives pointer events, so it cannot block editor input.
+ */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 2px dashed var(--color-caret);
+}
+
+/* The zero-document Editor Area state (FR-003). */
+.empty-state {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  text-align: center;
+}
+
+.empty-state__title {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 14px;
+}
+
+.empty-state__hint {
+  max-width: 420px;
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.empty-state__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+/* Shared shell button, used by the Empty State and the Explorer. */
+.shell-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--control-height);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  cursor: default;
+}
+
+.shell-button:hover:not(:disabled) {
+  background-color: var(--color-hover);
+}
+
+.shell-button:disabled {
+  color: var(--color-text-subtle);
+  cursor: default;
+}

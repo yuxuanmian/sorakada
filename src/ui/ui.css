@@ -1,0 +1,210 @@
+/*
+ * The Sorakada UI primitive layer (007 §1, FR-013..FR-019).
+ *
+ * Only Sorakada classes appear as selectors here. Base UI's *documented* state
+ * attributes (`data-open`, `data-closed`, `data-starting-style`,
+ * `data-ending-style`, `data-highlighted`, `data-disabled`, `data-anchor-hidden`)
+ * are used as styling hooks, because that is the supported customisation surface
+ * of a headless primitive — no generated class name and no internal DOM
+ * structure is ever targeted.
+ *
+ * Every colour, radius, spacing and metric comes from the shared tokens in
+ * `global.css` and `density.css`, so re-skinning the application never requires
+ * touching a wrapper.
+ */
+
+/* ------------------------------------------------------------------------- */
+/* Overlay / portal boundary (T011, T012)                                     */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The one portal target. It spans the viewport so a popup near any edge stays
+ * inside the window, and it never accepts pointer events itself: each popup
+ * re-enables them on its own subtree, which keeps the overlay from swallowing
+ * clicks meant for the shell underneath.
+ */
+.sora-overlay-root {
+  position: fixed;
+  inset: 0;
+  z-index: var(--layer-popup);
+  pointer-events: none;
+}
+
+.sora-overlay-root > * {
+  pointer-events: auto;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Menu / Context Menu popups (T015)                                          */
+/* ------------------------------------------------------------------------- */
+
+.sora-menu__positioner {
+  z-index: var(--layer-popup);
+  /*
+   * The documented clamp: the primitive publishes how much room is left between
+   * the anchor and the window edge, so a popup near an edge shrinks and scrolls
+   * instead of being cut off. No viewport-unit sizing is involved (T159).
+   */
+  max-height: var(--available-height);
+  outline: none;
+}
+
+.sora-menu__popup {
+  min-width: 180px;
+  max-width: 340px;
+  padding: var(--space-1) 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-raised);
+  color: var(--color-text);
+  box-shadow: var(--shadow-popup);
+  outline: none;
+}
+
+/* Basic chrome transitions only; usability never depends on them (FR-012). */
+.sora-menu__popup {
+  transition:
+    opacity 90ms ease-out,
+    transform 90ms ease-out;
+}
+
+.sora-menu__popup[data-starting-style],
+.sora-menu__popup[data-ending-style] {
+  opacity: 0;
+}
+
+.sora-menu__popup[data-anchor-hidden] {
+  visibility: hidden;
+}
+
+.sora-menu__viewport {
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.sora-menu__group {
+  display: flex;
+  flex-direction: column;
+}
+
+.sora-menu__group-label {
+  padding: 2px var(--space-3);
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sora-menu__separator {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background-color: var(--color-border);
+}
+
+.sora-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--menu-item-height);
+  padding: 0 var(--space-3);
+  color: var(--color-text);
+  font-size: var(--font-size-ui);
+  white-space: nowrap;
+  cursor: default;
+  outline: none;
+}
+
+.sora-menu__item[data-highlighted] {
+  background-color: var(--color-active);
+}
+
+.sora-menu__item[data-disabled] {
+  color: var(--color-text-subtle);
+}
+
+.sora-menu__item[data-disabled][data-highlighted] {
+  background-color: transparent;
+}
+
+.sora-menu__item-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--color-text-muted);
+}
+
+.sora-menu__item[data-disabled] .sora-menu__item-icon {
+  color: inherit;
+}
+
+.sora-menu__item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sora-menu__item-accelerator {
+  flex: 0 0 auto;
+  color: var(--color-text-subtle);
+  font-size: 11px;
+}
+
+.sora-menu__item-arrow {
+  flex: 0 0 auto;
+  color: var(--color-text-subtle);
+}
+
+/* The context menu shares the popup surface; only its minimum width differs. */
+.sora-context-menu__popup {
+  min-width: 160px;
+}
+
+/*
+ * The trigger region keeps the layout of whatever it wraps: for the Explorer it
+ * wraps the Tree viewport, which has to stay a direct flex child of the Explorer
+ * region, so the wrapper contributes no box of its own.
+ */
+.sora-context-menu__trigger {
+  display: contents;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Popover (T139)                                                             */
+/* ------------------------------------------------------------------------- */
+
+.sora-popover__positioner {
+  z-index: var(--layer-popup);
+  max-height: var(--available-height);
+  outline: none;
+}
+
+.sora-popover__popup {
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  max-height: 100%;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-raised);
+  color: var(--color-text);
+  box-shadow: var(--shadow-popup);
+  outline: none;
+  pointer-events: auto;
+}
+
+.sora-popover__popup[data-starting-style],
+.sora-popover__popup[data-ending-style] {
+  opacity: 0;
+}
+
+.sora-popover__trigger {
+  min-width: 0;
+}

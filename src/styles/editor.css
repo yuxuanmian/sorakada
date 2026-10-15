@@ -1,7 +1,8 @@
 /*
- * Layout of the CodeMirror host element.
+ * Layout of the CodeMirror host element and the Editor's scrollbar.
  * Colours and typography of the editor itself are configured in
- * `src/editor/editorConfig.ts`.
+ * `src/editor/editorConfig.ts`; every colour below comes from the central tokens
+ * in `global.css`, so this file declares no palette of its own (008 FR-006).
  */
 
 .editor-host {
@@ -9,4 +10,57 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Fixed-lane scrollbar (008 FR-054..FR-060, SC-007)                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The lane is always 12px wide, in every state. That is what guarantees the
+ * scrollport never changes size when the pointer enters the scrollbar, and it is
+ * why the visible thumb is drawn *narrower* than the lane with a transparent
+ * border: the transparent border is part of the thumb's box, so the hit target
+ * stays generous while the coloured core is ~6px idle and ~8px on hover/drag.
+ */
+.editor-host .cm-scroller::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.editor-host .cm-scroller::-webkit-scrollbar-track,
+.editor-host .cm-scroller::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.editor-host .cm-scroller::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+
+.editor-host .cm-scroller::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+  background-clip: content-box;
+  border-width: 2px;
+}
+
+.editor-host .cm-scroller::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-active);
+  background-clip: content-box;
+  border-width: 2px;
+}
+
+/*
+ * Standards fallback for a browser where the WebKit pseudo-elements are not
+ * available. It is gated on purpose: Chromium ignores `::-webkit-scrollbar` as
+ * soon as a standard scrollbar property is set on the element, so applying this
+ * unconditionally would silently disable the fixed lane above.
+ */
+@supports not selector(::-webkit-scrollbar) {
+  .editor-host .cm-scroller {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
 }

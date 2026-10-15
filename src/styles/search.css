@@ -1,0 +1,185 @@
+/*
+ * 009 / 010: Pinned search and replace bar styles.
+ *
+ * Implements the IntelliJ IDEA pinned bar layout atop the editor host.
+ * All colours strictly consume semantic tokens from `global.css`.
+ */
+
+.search-replace-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 12px;
+  margin: 6px 12px;
+  background-color: var(--color-bg-raised);
+  border: 1px solid var(--border-island);
+  border-radius: var(--radius-island);
+  width: fit-content;
+  max-width: calc(100% - 24px);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-ui);
+  color: var(--color-text);
+  box-sizing: border-box;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.search-replace-bar__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.search-replace-bar__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--color-text-subtle);
+  flex-shrink: 0;
+}
+
+.search-replace-bar__input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 280px;
+  max-width: 480px;
+  min-width: 180px;
+  background-color: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding-right: 4px;
+  box-sizing: border-box;
+  transition: border-color 100ms ease;
+}
+
+.search-replace-bar__input-wrapper:focus-within {
+  border-color: var(--color-focus-ring);
+  outline: 1px solid var(--color-focus-ring);
+}
+
+.search-replace-bar__input-wrapper--error {
+  border-color: var(--color-danger);
+}
+
+.search-replace-bar__input-wrapper--error:focus-within {
+  border-color: var(--color-danger);
+  outline: 1px solid var(--color-danger);
+}
+
+.search-replace-bar__input {
+  width: 100%;
+  height: 24px;
+  padding: 2px 8px;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-family: var(--font-editor);
+  font-size: var(--font-size-ui);
+  color: var(--color-text);
+  box-sizing: border-box;
+}
+
+.search-replace-bar__input::placeholder {
+  color: var(--color-text-subtle);
+}
+
+.search-replace-bar__toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  padding: 0 4px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--color-text-subtle);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.search-replace-bar__toggle-btn:hover {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+.search-replace-bar__toggle-btn--active {
+  background-color: var(--color-active);
+  color: var(--color-accent);
+  border-color: var(--color-border);
+}
+
+.search-replace-bar__count {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  min-width: 60px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+.search-replace-bar__count--error {
+  color: var(--color-danger);
+  font-weight: 500;
+}
+
+.search-replace-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+
+.search-replace-bar__icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.search-replace-bar__icon-btn:hover:not(:disabled) {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+.search-replace-bar__icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.search-replace-bar__text-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 8px;
+  background-color: var(--color-hover);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.search-replace-bar__text-btn:hover:not(:disabled) {
+  background-color: var(--color-active);
+  border-color: var(--color-focus-ring);
+}
+
+.search-replace-bar__text-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}

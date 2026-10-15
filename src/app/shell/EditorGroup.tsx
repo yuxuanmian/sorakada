@@ -1,0 +1,32 @@
+/**
+ * The Editor Group composition boundary (007 T048, FR-002, FR-061..FR-063).
+ *
+ * A group owns its own Tab strip and its own editor host. In 007 there is exactly
+ * one group, no group id, no group manager and no second CodeMirror view: this is
+ * a *structural* seam that stops the Tab strip from being an AppShell singleton,
+ * which is what later split-editor work would otherwise have to undo first.
+ */
+
+import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+
+export interface EditorGroupProps {
+  /** The group's own Tab strip, or nothing when the group is unadorned. */
+  tabStrip?: ReactNode;
+  /** Optional pinned bar directly above the editor host (e.g. search/replace). */
+  pinnedBar?: ReactNode;
+  /** Editor host or Empty State. */
+  children: ReactNode;
+}
+
+/** Renders one editor group. */
+export function EditorGroup({ tabStrip, pinnedBar, children }: EditorGroupProps) {
+  const { t } = useTranslation();
+  return (
+    <section className="editor-group" aria-label={t("ui.editorGroup.region")}>
+      {tabStrip}
+      {pinnedBar}
+      <div className="editor-group__host">{children}</div>
+    </section>
+  );
+}

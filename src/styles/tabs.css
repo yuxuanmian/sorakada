@@ -1,0 +1,397 @@
+/*
+ * Tab strip layout (007 T134, T143, FR-064..FR-068).
+ *
+ * Colours come from the theme tokens in `global.css`; every structural metric
+ * (Tab height, minimum width, maximum width, spacing) comes from the density
+ * tokens in `density.css`, so the strip introduces neither a palette nor a Tab
+ * dimension of its own.
+ *
+ * 008 SR-002 gives every document Tab its own small-radius framed surface. The
+ * frame is a *decorative layer inside the existing logical Tab box*, never a new
+ * box: 007's width solver assigns exact widths and sums them into offsets, so
+ * horizontal margins, gaps between Tab boxes or any other unmeasured geometry
+ * would invalidate `tabOffsets()`/`revealTabOffset()` immediately (008 FR-033).
+ *
+ * There is still exactly one appearance: no theme selector, no accent setting and
+ * no per-Tab colour (008 FR-001, FR-066).
+ */
+
+/*
+ * The strip is the *top band of the Editor island*, not a separate card: it and
+ * the EditorHost are one continuous surface inside one rounded, weakly bordered
+ * box. The 008 hard `border-bottom` divider is therefore gone — the band's own
+ * slightly raised surface is what distinguishes it from the reading plane, which
+ * is the island layout's whole point. Splitting these two into separate islands
+ * would have broken the 007 one-EditorGroup reading (008 Visual Polish).
+ */
+.tab-strip {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  min-width: 0;
+  background-color: var(--surface-tab-strip);
+  user-select: none;
+}
+
+/*
+ * Only the document Tabs scroll, and only horizontally: the strip never wraps to
+ * a second row (FR-064). The geometry is deliberately unchanged from 007.
+ */
+.tab-strip__viewport {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: stretch;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/*
+ * The fixed action region. It is a sibling of the scroll viewport rather than a
+ * child, which is what keeps New (`+`) and the Overview entry reachable at any
+ * scroll offset and with zero Tabs (FR-067, FR-068, SR-001).
+ */
+.tab-strip__actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  border-left: 1px solid var(--color-border);
+}
+
+/*
+ * The logical, measured Tab box.
+ *
+ * `TabStrip.tsx` assigns the exact width; `.tab` keeps the 007 flex/height/
+ * padding geometry and paints nothing itself. The visible frame is the decorative
+ * `::before` layer below, which is inset *inside* this box (008 FR-027, FR-030,
+ * FR-033).
+ */
+.tab {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  height: var(--tab-height);
+  min-width: var(--tab-min-width);
+  max-width: var(--tab-max-width);
+  padding: 0 4px 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-ui);
+  white-space: nowrap;
+  cursor: default;
+}
+
+/*
+ * The decorative frame (008 FR-027..FR-032, SR-002).
+ *
+ * `inset: 2px 1px 1px` gives the frame 1px of horizontal breathing room inside
+ * the assigned width, so adjacent Tabs read as separate work labels without the
+ * strip spending a single pixel more than the solver measured.
+ *
+ * Only `border-color` is transitioned. The fill is carried by the
+ * `background-image` gradient below, and Chromium does not interpolate between
+ * two gradients — it switches discretely — so a `background-color` transition
+ * here would animate only the sliver of surface visible through the gradient's
+ * translucent top while the frame's actual fill snapped. Plan §15 allows a state
+ * change without animation, and T076 scopes transitions to `var(--motion-fast)`
+ * "where reliable", so the honest choice is to animate the border alone.
+ */
+.tab::before {
+  content: "";
+  position: absolute;
+  inset: 2px 1px 1px;
+  border: 1px solid var(--border-tab);
+  border-radius: var(--radius-md);
+  background-color: var(--surface-tab);
+  background-image: linear-gradient(
+    to bottom,
+    var(--highlight-tab),
+    var(--surface-tab)
+  );
+  pointer-events: none;
+  transition: border-color var(--motion-fast) ease;
+}
+
+/*
+ * The label, state markers and close control paint above the decorative frame.
+ * They are positioned rather than z-indexed: among positioned boxes with the same
+ * stacking level, tree order decides, and `::before` is the first child — so no
+ * ad-hoc stacking value is introduced anywhere (008 FR-034).
+ */
+.tab > * {
+  position: relative;
+}
+
+.tab:hover {
+  color: var(--color-text);
+}
+
+.tab:hover::before {
+  border-color: var(--border-tab-hover);
+  background-color: var(--surface-tab-hover);
+  background-image: linear-gradient(
+    to bottom,
+    var(--highlight-tab),
+    var(--surface-tab-hover)
+  );
+}
+
+/*
+ * The active Tab is clearly framed and slightly raised, but never a floating
+ * card: the emphasis is surface + border + one top highlight, not a shadow or a
+ * height change (008 FR-031, FR-032).
+ */
+.tab--active {
+  color: var(--color-text);
+}
+
+.tab--active::before {
+  border-color: var(--border-tab-active);
+  background-color: var(--surface-tab-active);
+  background-image: linear-gradient(
+    to bottom,
+    var(--highlight-tab),
+    var(--surface-tab-active)
+  );
+}
+
+/*
+ * The label takes the Tab's remaining width, so when a Tab is wider than its text
+ * — a name shorter than the minimum, or a uniform squeeze — the close button stays
+ * at the Tab's right edge instead of leaving a dead gap after it. Long names
+ * truncate here (FR-065, FR-045).
+ */
+.tab__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab__dirty {
+  flex: 0 0 auto;
+  color: var(--color-caret);
+  font-size: 10px;
+  line-height: 1;
+}
+
+/*
+ * External disk state (005, FR-041).
+ *
+ * A small glyph plus a tooltip, using the existing theme tokens. The marker keeps
+ * its own colour so the two orthogonal states (dirty vs external) stay
+ * distinguishable, and it survives the narrowest Tab because it never shrinks
+ * (T135).
+ */
+.tab__external {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.tab__external--modified {
+  color: var(--color-text-muted);
+}
+
+.tab__external--missing {
+  color: var(--color-text);
+}
+
+.tab__close {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: default;
+  transition: opacity var(--motion-fast) ease;
+}
+
+.tab__close:hover {
+  background-color: var(--color-active);
+  color: var(--color-text);
+}
+
+/* Keep the hit box and label width stable while quieting inactive Tabs. */
+@media (hover: hover) and (pointer: fine) {
+  .tab:not(.tab--active):not(:hover):not(:focus-within) .tab__close {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab__close {
+    transition: none;
+  }
+}
+
+/* The fixed actions share one hit area, so they never move as Tabs scroll. */
+.tab-strip__action {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-height);
+  height: 100%;
+  padding: 0;
+  border: none;
+  /*
+   * Plan §8: New/Overview are controls, not fake document Tabs, and they consume
+   * the same small-radius hover language as `.tab__close` and
+   * `.explorer__action`. The radius is paint-only — the fixed width and the
+   * full-strip hit geometry above are unchanged.
+   */
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: default;
+  transition:
+    background-color var(--motion-fast) ease,
+    color var(--motion-fast) ease;
+}
+
+.tab-strip__action:hover,
+.tab-strip__action[data-popup-open] {
+  background-color: var(--color-hover);
+  color: var(--color-text);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Fixed-lane scrollbar (008 FR-054..FR-060, SC-007)                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The overflowing document-Tab viewport uses the same fixed 12px lane and the
+ * same ~6px/~8px thumb as the Editor and the Explorer. Only the scrolling Tab
+ * list is styled: the fixed action region is a sibling, so it keeps its measured
+ * width in every state (008 FR-037, FR-060).
+ */
+.tab-strip__viewport::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.tab-strip__viewport::-webkit-scrollbar-track,
+.tab-strip__viewport::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.tab-strip__viewport::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+
+.tab-strip__viewport::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+  background-clip: content-box;
+  border-width: 2px;
+}
+
+.tab-strip__viewport::-webkit-scrollbar-thumb:active {
+  background-color: var(--scrollbar-thumb-active);
+  background-clip: content-box;
+  border-width: 2px;
+}
+
+/*
+ * Standards fallback for a browser where the WebKit pseudo-elements are not
+ * available. It is gated because Chromium ignores `::-webkit-scrollbar` as soon
+ * as a standard scrollbar property is set on the element.
+ */
+@supports not selector(::-webkit-scrollbar) {
+  .tab-strip__viewport {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Tab Overview (T139..T142)                                                  */
+/* ------------------------------------------------------------------------- */
+
+.tab-overview {
+  min-width: 260px;
+}
+
+.tab-overview__filter {
+  flex: 0 0 auto;
+  height: var(--control-height);
+  margin-bottom: var(--space-1);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-focus-ring);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  outline: none;
+}
+
+.tab-overview__list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: thin;
+}
+
+.tab-overview__item {
+  display: flex;
+}
+
+.tab-overview__entry {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--ui-gap);
+  min-width: 0;
+  min-height: var(--menu-item-height);
+  padding: 0 var(--space-2);
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--font-size-ui);
+  text-align: left;
+  cursor: default;
+}
+
+.tab-overview__entry:hover {
+  background-color: var(--color-active);
+}
+
+.tab-overview__entry--active {
+  color: var(--color-caret);
+}
+
+.tab-overview__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-overview__empty {
+  margin: 0;
+  padding: var(--space-2);
+  color: var(--color-text-subtle);
+  font-size: 11px;
+}
