@@ -224,13 +224,76 @@ export function shouldAnimatePointerClick(params: {
 }
 
 /**
- * Decides whether a document change is eligible for smooth visual caret transition
- * (plain text typing, typing replacing selection, Enter newlines, and confirmed IME commit).
+ * Decides whether a mouse drag selection update is eligible for smooth visual caret transition
+ * on its active endpoint.
  */
+export function shouldAnimatePointerDrag(params: {
+  isMotionActive: boolean;
+  isComposing: boolean;
+  docChanged: boolean;
+  pointerDown: boolean;
+  isDragging: boolean;
+  isNonMousePointer: boolean;
+  oldRangesCount: number;
+  newRangesCount: number;
+  charDist: number;
+  lineDist: number;
+}): boolean {
+  if (
+    !params.isMotionActive ||
+    params.isComposing ||
+    params.docChanged ||
+    !params.pointerDown ||
+    !params.isDragging ||
+    params.isNonMousePointer
+  ) {
+    return false;
+  }
+  if (
+    params.oldRangesCount !== params.newRangesCount ||
+    params.newRangesCount > MOTION_CONFIG.maxCursorCount
+  ) {
+    return false;
+  }
+  if (params.charDist <= 0 || params.charDist > MOTION_CONFIG.maxCaretCharDist) {
+    return false;
+  }
+  if (params.lineDist > MOTION_CONFIG.maxCaretLineDist) {
+    return false;
+  }
+  return true;
+}
+
 /**
- * Checks whether an input event represents a normal typing insertion
- * (plain text, newline, replacement) eligible for continuous caret transition.
+ * Decides whether a smart selection expand/shrink update is eligible for smooth visual caret transition.
  */
+export function shouldAnimateSelectionExpandShrink(params: {
+  isMotionActive: boolean;
+  isComposing: boolean;
+  docChanged: boolean;
+  oldRangesCount: number;
+  newRangesCount: number;
+  charDist: number;
+  lineDist: number;
+}): boolean {
+  if (!params.isMotionActive || params.isComposing || params.docChanged) {
+    return false;
+  }
+  if (
+    params.oldRangesCount !== params.newRangesCount ||
+    params.newRangesCount > MOTION_CONFIG.maxCursorCount
+  ) {
+    return false;
+  }
+  if (params.charDist <= 0 || params.charDist > MOTION_CONFIG.maxCaretCharDist) {
+    return false;
+  }
+  if (params.lineDist > MOTION_CONFIG.maxCaretLineDist) {
+    return false;
+  }
+  return true;
+}
+
 export function isNormalTypingInputType(inputType: string | undefined): boolean {
   if (!inputType) {
     return false;
@@ -573,6 +636,8 @@ export function hasTransformScale(
 export class EditorMotionPluginValue {
   private lastKeyNavTime = 0;
   private pointerDown = false;
+  private pointerDownPos: { clientX: number; clientY: number } | null = null;
+  private isDragging = false;
   private isNonMousePointer = false;
   private isComposing = false;
   private lastCompositionCommit: {
@@ -618,12 +683,25 @@ export class EditorMotionPluginValue {
   };
 
   readonly onPointerDown = (e?: PointerEvent | MouseEvent) => {
+    if (e && typeof (e as any).button === "number" && (e as any).button !== 0) {
+      this.pointerDown = false;
+      this.isDragging = false;
+      this.pointerDownPos = null;
+      this.pendingClickCandidate = null;
+      return;
+    }
     this.pointerDown = true;
     if (e && "pointerType" in e && e.pointerType && e.pointerType !== "mouse") {
       this.isNonMousePointer = true;
     } else {
       this.isNonMousePointer = false;
     }
+    if (e && typeof (e as any).clientX === "number" && typeof (e as any).clientY === "number") {
+      this.pointerDownPos = { clientX: (e as any).clientX, clientY: (e as any).clientY };
+    } else {
+      this.pointerDownPos = null;
+    }
+    this.isDragging = false;
     this.lastKeyNavTime = 0;
     this.cancelScrollAnimation();
     this.cancelCaretAnimation();
@@ -633,6 +711,17 @@ export class EditorMotionPluginValue {
   readonly onMouseDown = (e: MouseEvent) => {
     // Clear any previous candidate before evaluating new gesture
     this.pendingClickCandidate = null;
+    if (e.button !== 0) {
+      this.pointerDown = false;
+      this.isDragging = false;
+      this.pointerDownPos = null;
+      this.cancelCaretAnimation();
+      return;
+    }
+
+    if (typeof e.clientX === "number" && typeof e.clientY === "number") {
+      this.pointerDownPos = { clientX: e.clientX, clientY: e.clientY };
+    }
 
     // Plain left-click only: button === 0, detail === 1, no Ctrl/Alt/Shift/Meta
     if (
@@ -722,19 +811,32 @@ export class EditorMotionPluginValue {
   };
 
   readonly onPointerMove = (e: PointerEvent | MouseEvent) => {
-    if (this.pendingClickCandidate) {
-      const dx = e.clientX - this.pendingClickCandidate.clientX;
-      const dy = e.clientY - this.pendingClickCandidate.clientY;
+    const clientX = (e as any)?.clientX;
+    const clientY = (e as any)?.clientY;
+    const startX = this.pointerDownPos?.clientX ?? this.pendingClickCandidate?.clientX;
+    const startY = this.pointerDownPos?.clientY ?? this.pendingClickCandidate?.clientY;
+    if (
+      typeof clientX === "number" &&
+      typeof clientY === "number" &&
+      typeof startX === "number" &&
+      typeof startY === "number"
+    ) {
+      const dx = clientX - startX;
+      const dy = clientY - startY;
       if (Math.hypot(dx, dy) > 4) {
-        // Drag threshold reached: user started dragging, cancel click candidate & transition
+        this.isDragging = true;
         this.pendingClickCandidate = null;
-        this.cancelCaretAnimation();
       }
+    } else if (this.pointerDown && !this.isNonMousePointer) {
+      this.isDragging = true;
+      this.pendingClickCandidate = null;
     }
   };
 
   readonly onPointerUp = () => {
     this.pointerDown = false;
+    this.isDragging = false;
+    this.pointerDownPos = null;
     this.isNonMousePointer = false;
     this.pendingClickCandidate = null;
   };
@@ -838,6 +940,9 @@ export class EditorMotionPluginValue {
     this.isComposing = false;
     this.lastCompositionCommit = null;
     this.pendingClickCandidate = null;
+    this.isDragging = false;
+    this.pointerDown = false;
+    this.pointerDownPos = null;
     this.cancelCaretAnimation();
 
     // Check if focus moved to or is currently within the search bar
@@ -875,6 +980,7 @@ export class EditorMotionPluginValue {
     }
 
     if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      window.addEventListener("pointermove", this.onPointerMove as any, { passive: true });
       window.addEventListener("pointerup", this.onPointerUp, { capture: true });
       window.addEventListener("pointercancel", this.onPointerUp, { capture: true });
       window.addEventListener("mouseup", this.onPointerUp, { capture: true });
@@ -983,6 +1089,8 @@ export class EditorMotionPluginValue {
     this.cancelCaretAnimation();
     this.pendingClickCandidate = null;
     this.cancelPendingSearchScroll();
+    this.isDragging = false;
+    this.pointerDownPos = null;
   };
 
   private cancelPendingSearchScroll(): void {
@@ -1250,16 +1358,35 @@ export class EditorMotionPluginValue {
     }
 
     const isPointerSelect = update.transactions.some((tr) =>
-      tr.isUserEvent("select.pointer"),
+      (typeof tr.isUserEvent === "function" && tr.isUserEvent("select.pointer")) ||
+      (typeof tr.annotation === "function" && tr.annotation(Transaction.userEvent) === "select.pointer"),
     );
+
+    const isExpandShrink = update.transactions.some((tr) => {
+      if (typeof tr.isUserEvent === "function") {
+        if (tr.isUserEvent("select.expand") || tr.isUserEvent("select.shrink")) {
+          return true;
+        }
+      }
+      const uEv =
+        typeof tr.annotation === "function" ? tr.annotation(Transaction.userEvent) : undefined;
+      return uEv === "select.expand" || uEv === "select.shrink";
+    });
 
     const hasOtherNonKeyboardUserEvent = update.transactions.some(
       (tr) =>
-        tr.isUserEvent("select.search") ||
-        tr.isUserEvent("input") ||
-        tr.isUserEvent("delete") ||
-        tr.isUserEvent("undo") ||
-        tr.isUserEvent("redo"),
+        (typeof tr.isUserEvent === "function" &&
+          (tr.isUserEvent("select.search") ||
+            tr.isUserEvent("input") ||
+            tr.isUserEvent("delete") ||
+            tr.isUserEvent("undo") ||
+            tr.isUserEvent("redo"))) ||
+        (typeof tr.annotation === "function" &&
+          (tr.annotation(Transaction.userEvent) === "select.search" ||
+            tr.annotation(Transaction.userEvent) === "input" ||
+            tr.annotation(Transaction.userEvent) === "delete" ||
+            tr.annotation(Transaction.userEvent) === "undo" ||
+            tr.annotation(Transaction.userEvent) === "redo")),
     );
 
     if (hasOtherNonKeyboardUserEvent) {
@@ -1302,13 +1429,52 @@ export class EditorMotionPluginValue {
           candidateTargetPos: candidate?.targetPos,
         });
 
-        if (!animateClick) {
-          this.cancelCaretAnimation();
+        if (animateClick) {
+          // Apply smooth visual caret transition for eligible single click
+          this.armCaretTransition();
           return;
         }
 
-        // Apply smooth visual caret transition for eligible single click
-        this.armCaretTransition();
+        const animateDrag = shouldAnimatePointerDrag({
+          isMotionActive: isMotionActive(),
+          isComposing: update.view.composing,
+          docChanged: update.docChanged,
+          pointerDown: this.pointerDown,
+          isDragging: this.isDragging,
+          isNonMousePointer: this.isNonMousePointer,
+          oldRangesCount: oldRanges.length,
+          newRangesCount: newRanges.length,
+          charDist,
+          lineDist,
+        });
+
+        if (animateDrag) {
+          this.armCaretTransition();
+          return;
+        }
+
+        this.cancelCaretAnimation();
+        return;
+      }
+
+      if (isExpandShrink) {
+        this.pendingClickCandidate = null;
+        const animateExpandShrink = shouldAnimateSelectionExpandShrink({
+          isMotionActive: isMotionActive(),
+          isComposing: update.view.composing,
+          docChanged: update.docChanged,
+          oldRangesCount: oldRanges.length,
+          newRangesCount: newRanges.length,
+          charDist,
+          lineDist,
+        });
+
+        if (animateExpandShrink) {
+          this.armCaretTransition();
+          return;
+        }
+
+        this.cancelCaretAnimation();
         return;
       }
 
@@ -1360,6 +1526,7 @@ export class EditorMotionPluginValue {
     }
 
     if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+      window.removeEventListener("pointermove", this.onPointerMove as any);
       window.removeEventListener("pointerup", this.onPointerUp, { capture: true });
       window.removeEventListener("pointercancel", this.onPointerUp, { capture: true });
       window.removeEventListener("mouseup", this.onPointerUp, { capture: true });

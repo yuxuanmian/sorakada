@@ -587,6 +587,18 @@ export function App() {
         },
         isEnabled: hasActiveDocument,
       }),
+      registry.register("editor.expandSelection", {
+        execute: () => {
+          editorHandle.expandSelection();
+        },
+        isEnabled: hasActiveDocument,
+      }),
+      registry.register("editor.shrinkSelection", {
+        execute: () => {
+          editorHandle.shrinkSelection();
+        },
+        isEnabled: hasActiveDocument,
+      }),
       registry.register("workspace.openFolder", {
         execute: async () => {
           const result = await workContext.openFromDialog();
@@ -794,6 +806,17 @@ export function App() {
         (commandId === "editor.undo" || commandId === "editor.redo")
       ) {
         return;
+      }
+
+      // 013: Expand/Shrink selection via keyboard requires editor focus/context
+      // so other inputs, Explorer, Dialog, etc. are not hijacked.
+      if (
+        commandId === "editor.expandSelection" ||
+        commandId === "editor.shrinkSelection"
+      ) {
+        if (!editorHandle.hasFocus() || isInput) {
+          return;
+        }
       }
 
       event.preventDefault();

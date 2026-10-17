@@ -75,6 +75,8 @@ describe("App Menu group composition", () => {
       "app.exit",
       "editor.undo",
       "editor.redo",
+      "editor.expandSelection",
+      "editor.shrinkSelection",
     ] satisfies CommandId[]) {
       expect(ids).toContain(commandId);
     }
@@ -117,7 +119,9 @@ describe("App Menu accelerators come from the keymap profile", () => {
 
     expect(byCommand.get("file.new")).toBe(acceleratorFor("file.new"));
     expect(byCommand.get("file.save")).toBe("Ctrl+S");
-    expect(byCommand.get("file.close")).toBe("Ctrl+W");
+    expect(byCommand.get("file.close")).toBe("Ctrl+F4");
+    expect(byCommand.get("editor.expandSelection")).toBe("Ctrl+W");
+    expect(byCommand.get("editor.shrinkSelection")).toBe("Ctrl+Shift+W");
   });
 
   it("advertises nothing for a command the profile does not bind", () => {

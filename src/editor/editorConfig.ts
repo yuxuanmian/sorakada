@@ -19,6 +19,8 @@ import { getCachedMatches } from "../app/search/searchEngine";
 import { multiCursorClipboard } from "./multiCursorClipboard";
 import { editorMotion } from "./editorMotion";
 import { multiCursorMouse } from "./multiCursorMouse";
+import { smartSelection } from "./smartSelection";
+import { roundedSelection } from "./roundedSelection";
 
 /**
  * Editor appearance.
@@ -338,6 +340,8 @@ export function createEditorState(
     doc,
     extensions: [
       basicSetup,
+      smartSelection(),
+      roundedSelection(),
       search({ top: true }),
       searchDecorationPlugin,
       appearanceBoundary(),

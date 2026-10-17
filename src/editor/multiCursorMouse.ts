@@ -1,6 +1,16 @@
 import { EditorSelection, Prec, type Extension } from "@codemirror/state";
 import { EditorView, keymap, type ViewUpdate } from "@codemirror/view";
 import { addCursorAbove, addCursorBelow } from "@codemirror/commands";
+import { emptyLineMouseSelectionStyle } from "./emptyLineSelection";
+import {
+  cancelColumnSelection,
+  columnSelectionLifecyclePlugin,
+  columnSelectionStyle,
+  isAltShiftGesture,
+  isColumnSelectionGesture,
+} from "./columnSelection";
+
+export { cancelColumnSelection, isColumnSelectionGesture, isAltShiftGesture };
 
 /**
  * Checks whether a given position falls within any range of the selection.
@@ -80,7 +90,11 @@ export function computeAltShiftSelection(
 export function multiCursorMouseStyle(): Extension {
   return Prec.highest(
     EditorView.mouseSelectionStyle.of((view, event) => {
-      if (!(event.button === 0 && event.altKey && event.shiftKey)) {
+      if (isColumnSelectionGesture(event)) {
+        return columnSelectionStyle(view, event);
+      }
+
+      if (!isAltShiftGesture(event)) {
         return null;
       }
 
@@ -129,5 +143,10 @@ export const multiCursorKeymap = keymap.of([
  * Combined extension for multi-cursor mouse gestures and navigation keymaps.
  */
 export function multiCursorMouse(): Extension {
-  return [multiCursorMouseStyle(), multiCursorKeymap];
+  return [
+    multiCursorMouseStyle(),
+    emptyLineMouseSelectionStyle(),
+    multiCursorKeymap,
+    columnSelectionLifecyclePlugin,
+  ];
 }

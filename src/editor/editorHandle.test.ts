@@ -5,6 +5,7 @@ import type { EditorView } from "@codemirror/view";
 
 import { createEditorState } from "./editorConfig";
 import { createEditorHandle, type EditorHandle } from "./editorHandle";
+import { smartSelectionHistoryField } from "./smartSelection";
 
 interface TestBridge {
   handle: EditorHandle;
@@ -22,6 +23,7 @@ interface TestBridge {
       state?: EditorState;
     }) => void;
     focus: () => void;
+    setState: (newState: EditorState) => void;
   };
 }
 
@@ -49,6 +51,9 @@ function createTestBridge(initialDoc = "", readOnly = false): TestBridge {
     focus: () => {},
     get hasFocus() {
       return true;
+    },
+    setState: (newState: EditorState) => {
+      state = newState;
     },
   };
 
@@ -319,5 +324,52 @@ describe("EditorHandle search & bridge contracts", () => {
     // Step 3: Next Escape on already empty cursor returns false (not consumed)
     const step3 = handle.simplifySelection();
     expect(step3).toBe(false);
+  });
+
+  it("expands and shrinks smart selection through EditorHandle (Spec 013 §2)", () => {
+    const { handle, getState, dispatchSelection } = createTestBridge("hello world");
+    // Place cursor inside "hello"
+    dispatchSelection(2, 2);
+    expect(getState().selection.main.from).toBe(2);
+    expect(getState().selection.main.to).toBe(2);
+
+    handle.expandSelection();
+    // Expands to word "hello" (0..5)
+    expect(getState().selection.main.from).toBe(0);
+    expect(getState().selection.main.to).toBe(5);
+
+    handle.shrinkSelection();
+    // Shrinks back to original cursor at 2
+    expect(getState().selection.main.from).toBe(2);
+    expect(getState().selection.main.to).toBe(2);
+  });
+
+  it("clears smart selection expansion history on setState and reloadDocumentState (Spec 013 §2)", () => {
+    const { handle, getState, dispatchSelection } = createTestBridge("hello world");
+    dispatchSelection(2, 2);
+    handle.expandSelection();
+    expect(getState().field(smartSelectionHistoryField).length).toBeGreaterThan(0);
+
+    // State A has expansion history
+    const stateA = getState();
+
+    // Switch to document B
+    const stateB = createEditorState("second document");
+    handle.setState("doc-b", stateB);
+    expect(getState().field(smartSelectionHistoryField)).toEqual([]);
+
+    // Switch back to document A: setState applies clearSmartSelectionHistory
+    handle.setState("doc-a", stateA);
+    expect(getState().field(smartSelectionHistoryField)).toEqual([]);
+
+    // Expand in document A again
+    dispatchSelection(1, 1);
+    handle.expandSelection();
+    expect(getState().field(smartSelectionHistoryField).length).toBeGreaterThan(0);
+
+    // Reloading document A also invalidates expansion history
+    const reloaded = getState();
+    handle.reloadDocumentState("doc-a", reloaded);
+    expect(getState().field(smartSelectionHistoryField)).toEqual([]);
   });
 });

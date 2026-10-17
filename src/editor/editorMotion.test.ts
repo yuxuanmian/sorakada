@@ -25,7 +25,9 @@ import {
   setEditorMotionEnabled,
   setReducedMotionForTesting,
   shouldAnimateCaret,
+  shouldAnimatePointerDrag,
   shouldAnimatePointerClick,
+  shouldAnimateSelectionExpandShrink,
   isNormalTypingInputType,
   shouldAnimateTyping,
   shouldAnimateViewportScroll,
@@ -677,6 +679,131 @@ describe("shouldAnimatePointerClick helper", () => {
   });
 });
 
+describe("shouldAnimatePointerDrag helper", () => {
+  const baseDragParams = {
+    isMotionActive: true,
+    isComposing: false,
+    docChanged: false,
+    pointerDown: true,
+    isDragging: true,
+    isNonMousePointer: false,
+    oldRangesCount: 1,
+    newRangesCount: 1,
+    charDist: 15,
+    lineDist: 0,
+  };
+
+  it("returns true for eligible mouse drag within char and line limits", () => {
+    expect(shouldAnimatePointerDrag(baseDragParams)).toBe(true);
+  });
+
+  it("returns true for multi-cursor drag when cursor count is stable and <= 10", () => {
+    expect(
+      shouldAnimatePointerDrag({
+        ...baseDragParams,
+        oldRangesCount: 3,
+        newRangesCount: 3,
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false when pointer is not down or user is not dragging", () => {
+    expect(shouldAnimatePointerDrag({ ...baseDragParams, pointerDown: false })).toBe(false);
+    expect(shouldAnimatePointerDrag({ ...baseDragParams, isDragging: false })).toBe(false);
+  });
+
+  it("returns false for non-mouse pointer (touch/pen)", () => {
+    expect(shouldAnimatePointerDrag({ ...baseDragParams, isNonMousePointer: true })).toBe(false);
+  });
+
+  it("returns false when range count changes (adding/removing/merging ranges)", () => {
+    expect(
+      shouldAnimatePointerDrag({
+        ...baseDragParams,
+        oldRangesCount: 1,
+        newRangesCount: 2,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAnimatePointerDrag({
+        ...baseDragParams,
+        oldRangesCount: 2,
+        newRangesCount: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when cursor count exceeds maxCursorCount (10)", () => {
+    expect(
+      shouldAnimatePointerDrag({
+        ...baseDragParams,
+        oldRangesCount: 11,
+        newRangesCount: 11,
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when distance exceeds char or line thresholds", () => {
+    expect(shouldAnimatePointerDrag({ ...baseDragParams, charDist: 0 })).toBe(false);
+    expect(shouldAnimatePointerDrag({ ...baseDragParams, charDist: 501 })).toBe(false);
+    expect(shouldAnimatePointerDrag({ ...baseDragParams, lineDist: 6 })).toBe(false);
+  });
+
+  it("returns false when motion is disabled, composing, or docChanged", () => {
+    expect(shouldAnimatePointerDrag({ ...baseDragParams, isMotionActive: false })).toBe(false);
+    expect(shouldAnimatePointerDrag({ ...baseDragParams, isComposing: true })).toBe(false);
+    expect(shouldAnimatePointerDrag({ ...baseDragParams, docChanged: true })).toBe(false);
+  });
+});
+
+describe("shouldAnimateSelectionExpandShrink helper", () => {
+  const baseExpandParams = {
+    isMotionActive: true,
+    isComposing: false,
+    docChanged: false,
+    oldRangesCount: 1,
+    newRangesCount: 1,
+    charDist: 10,
+    lineDist: 0,
+  };
+
+  it("returns true for valid expand/shrink within budget", () => {
+    expect(shouldAnimateSelectionExpandShrink(baseExpandParams)).toBe(true);
+  });
+
+  it("returns true for multi-cursor expand/shrink with stable range count", () => {
+    expect(
+      shouldAnimateSelectionExpandShrink({
+        ...baseExpandParams,
+        oldRangesCount: 2,
+        newRangesCount: 2,
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false when range count changes (e.g. ranges merge)", () => {
+    expect(
+      shouldAnimateSelectionExpandShrink({
+        ...baseExpandParams,
+        oldRangesCount: 2,
+        newRangesCount: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when distance exceeds thresholds", () => {
+    expect(shouldAnimateSelectionExpandShrink({ ...baseExpandParams, charDist: 0 })).toBe(false);
+    expect(shouldAnimateSelectionExpandShrink({ ...baseExpandParams, charDist: 501 })).toBe(false);
+    expect(shouldAnimateSelectionExpandShrink({ ...baseExpandParams, lineDist: 6 })).toBe(false);
+  });
+
+  it("returns false when motion is disabled, composing, or docChanged", () => {
+    expect(shouldAnimateSelectionExpandShrink({ ...baseExpandParams, isMotionActive: false })).toBe(false);
+    expect(shouldAnimateSelectionExpandShrink({ ...baseExpandParams, isComposing: true })).toBe(false);
+    expect(shouldAnimateSelectionExpandShrink({ ...baseExpandParams, docChanged: true })).toBe(false);
+  });
+});
+
 describe("EditorMotionPluginValue and handleScrollIntoView lifecycle & coordination", () => {
 
   let savedRaf: any;
@@ -1149,10 +1276,10 @@ describe("EditorMotionPluginValue and handleScrollIntoView lifecycle & coordinat
     plugin.destroy();
   });
 
-  it("rejects caret transition on mouse drag, double click, modifiers, multi-cursor, and gutter clicks", () => {
+  it("animates mouse drag while rejecting double click, modifiers, multi-cursor clicks, and gutter clicks", () => {
     const { view, plugin, dom, contentNode } = createMockHarness();
 
-    // 1. Mouse drag (move > 4px) cancels transition
+    // 1. Mouse drag (move > 4px) animates active endpoint
     plugin.onPointerDown({ pointerType: "mouse" } as any);
     plugin.onMouseDown({
       button: 0,
@@ -1175,7 +1302,7 @@ describe("EditorMotionPluginValue and handleScrollIntoView lifecycle & coordinat
       state: dragRangeState.state,
       view,
     } as any);
-    expect(dom.classList.contains("cm-smooth-caret")).toBe(false);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(true);
 
     // 2. Double-click (detail: 2)
     plugin.onPointerDown({ pointerType: "mouse" } as any);
@@ -1326,6 +1453,277 @@ describe("EditorMotionPluginValue and handleScrollIntoView lifecycle & coordinat
 
     expect(domListeners["mousedown"]?.length).toBe(0);
     expect(domListeners["pointermove"]?.length).toBe(0);
+  });
+
+  it("animates smart selection expand and shrink transactions and cleans up via timeout", () => {
+    const { view, plugin, dom } = createMockHarness();
+
+    // select.expand arms transition
+    const expandState = view.state.update({
+      selection: EditorSelection.single(0, 10),
+    });
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: (ev: string) => ev === "select.expand" }],
+      startState: view.state,
+      state: expandState.state,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(true);
+    expect(dom.classList.contains("cm-smooth-edit")).toBe(false);
+
+    // Timeout after 190ms clears transition class
+    vi.advanceTimersByTime(190);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(false);
+
+    // select.shrink arms transition
+    const shrinkState = expandState.state.update({
+      selection: EditorSelection.single(0, 5),
+    });
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: (ev: string) => ev === "select.shrink" }],
+      startState: expandState.state,
+      state: shrinkState.state,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(true);
+
+    plugin.destroy();
+  });
+
+  it("animates mouse drag selection with continuous retargeting and rejects oversized drag", () => {
+    const { view, plugin, dom, contentNode } = createMockHarness();
+
+    plugin.onPointerDown({ pointerType: "mouse" } as any);
+    plugin.onMouseDown({
+      button: 0,
+      detail: 1,
+      clientX: 100,
+      clientY: 100,
+      target: contentNode,
+    } as any);
+    plugin.onPointerMove({ clientX: 110, clientY: 100 } as any);
+
+    // Step 1: initial drag to pos 10
+    const drag1 = view.state.update({ selection: EditorSelection.single(0, 10) });
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: (ev: string) => ev === "select.pointer" }],
+      startState: view.state,
+      state: drag1.state,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(true);
+
+    // Step 2: continue dragging to pos 20 (continuous retargeting without snapping)
+    plugin.onPointerMove({ clientX: 120, clientY: 100 } as any);
+    const drag2 = view.state.update({ selection: EditorSelection.single(0, 20) });
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: (ev: string) => ev === "select.pointer" }],
+      startState: drag1.state,
+      state: drag2.state,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(true);
+
+    // Step 3: oversized drag jump (> 5 lines) snaps instantly
+    const bigDocState = EditorState.create({
+      doc: "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20",
+      selection: EditorSelection.single(0, 0),
+    });
+    const jumpState = bigDocState.update({
+      selection: EditorSelection.single(0, 40),
+    });
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: (ev: string) => ev === "select.pointer" }],
+      startState: bigDocState,
+      state: jumpState.state,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(false);
+
+    plugin.onPointerUp();
+    plugin.destroy();
+  });
+
+  it("animates multi-cursor drag when range count is stable, but snaps on range count changes", () => {
+    const multiStartState = EditorState.create({
+      doc: "line 1\nline 2\nline 3\nline 4\nline 5",
+      selection: EditorSelection.create([
+        EditorSelection.range(0, 3),
+        EditorSelection.range(7, 10),
+      ]),
+      extensions: [EditorState.allowMultipleSelections.of(true)],
+    });
+    const multiMovedState = EditorState.create({
+      doc: "line 1\nline 2\nline 3\nline 4\nline 5",
+      selection: EditorSelection.create([
+        EditorSelection.range(0, 4),
+        EditorSelection.range(7, 11),
+      ]),
+      extensions: [EditorState.allowMultipleSelections.of(true)],
+    });
+
+    const { view, plugin, dom, contentNode } = createMockHarness();
+    plugin.onPointerDown({ pointerType: "mouse" } as any);
+    plugin.onMouseDown({
+      button: 0,
+      detail: 1,
+      altKey: true,
+      clientX: 100,
+      clientY: 100,
+      target: contentNode,
+    } as any);
+    plugin.onPointerMove({ clientX: 110, clientY: 100 } as any);
+
+    // Stable 2 ranges -> animates
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: (ev: string) => ev === "select.pointer" }],
+      startState: multiStartState,
+      state: multiMovedState,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(true);
+
+    // Adding a 3rd range (2 -> 3) -> snaps instantly
+    const multiAddedState = EditorState.create({
+      doc: "line 1\nline 2\nline 3\nline 4\nline 5",
+      selection: EditorSelection.create([
+        EditorSelection.range(0, 4),
+        EditorSelection.range(7, 11),
+        EditorSelection.range(14, 18),
+      ]),
+      extensions: [EditorState.allowMultipleSelections.of(true)],
+    });
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: (ev: string) => ev === "select.pointer" }],
+      startState: multiMovedState,
+      state: multiAddedState,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(false);
+
+    plugin.destroy();
+  });
+
+  it("animates keyboard movement when selection already exists and with Shift+Arrow", () => {
+    const { view, plugin, dom } = createMockHarness();
+    const selState = EditorState.create({
+      doc: "line 1\nline 2\nline 3",
+      selection: EditorSelection.range(5, 0),
+    });
+    const collapsedState = EditorState.create({
+      doc: "line 1\nline 2\nline 3",
+      selection: EditorSelection.cursor(5),
+    });
+
+    // Keyboard ArrowRight collapsing an existing selection
+    plugin.onKeyDown({ key: "ArrowRight" } as any);
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: () => false }],
+      startState: selState,
+      state: collapsedState,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(true);
+
+    // Shift+Arrow extending selection
+    const extendedState = EditorState.create({
+      doc: "line 1\nline 2\nline 3",
+      selection: EditorSelection.range(5, 6),
+    });
+    plugin.onKeyDown({ key: "ArrowRight", shiftKey: true } as any);
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: () => false }],
+      startState: collapsedState,
+      state: extendedState,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(true);
+
+    plugin.destroy();
+  });
+
+  it("rejects selection animation on programmatic repositioning, disabled motion, and IME composing", () => {
+    const { view, plugin, dom, contentNode } = createMockHarness();
+    const targetState = view.state.update({
+      selection: EditorSelection.cursor(5),
+    });
+
+    // 1. Programmatic repositioning without keynav or userEvent -> rejected
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: () => false }],
+      startState: view.state,
+      state: targetState.state,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(false);
+
+    // 2. Disabled motion -> rejected
+    setEditorMotionEnabled(false);
+    plugin.onPointerDown({ pointerType: "mouse" } as any);
+    plugin.onMouseDown({
+      button: 0,
+      detail: 1,
+      clientX: 100,
+      clientY: 100,
+      target: contentNode,
+    } as any);
+    plugin.onPointerMove({ clientX: 110, clientY: 100 } as any);
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: (ev: string) => ev === "select.pointer" }],
+      startState: view.state,
+      state: targetState.state,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(false);
+    setEditorMotionEnabled(true);
+
+    // 3. Composing -> rejected
+    (view as any).composing = true;
+    plugin.update({
+      docChanged: false,
+      geometryChanged: false,
+      selectionSet: true,
+      transactions: [{ isUserEvent: (ev: string) => ev === "select.expand" }],
+      startState: view.state,
+      state: targetState.state,
+      view,
+    } as any);
+    expect(dom.classList.contains("cm-smooth-caret")).toBe(false);
+
+    plugin.destroy();
   });
 });
 

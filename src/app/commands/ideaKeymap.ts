@@ -11,7 +11,8 @@ export type KeymapProfile = Readonly<Partial<Record<CommandId, string>>>;
 /**
  * The IDEA-style profile for this milestone.
  *
- * `Ctrl+W` closes the current Tab rather than the window, and `app.exit`
+ * `Ctrl+F4` closes the current Tab, `Ctrl+W` expands selection,
+ * `Ctrl+Shift+W` shrinks selection, and `app.exit`
  * intentionally has no accelerator: Exit is reachable from the File menu and
  * the window close control only.
  */
@@ -20,11 +21,13 @@ export const IDEA_M1_KEYMAP: KeymapProfile = Object.freeze({
   "file.open": "Ctrl+O",
   "file.save": "Ctrl+S",
   "file.saveAs": "Ctrl+Shift+S",
-  "file.close": "Ctrl+W",
+  "file.close": "Ctrl+F4",
   "editor.undo": "Ctrl+Z",
   "editor.redo": "Ctrl+Shift+Z",
   "editor.find": "Ctrl+F",
   "editor.replace": "Ctrl+R",
+  "editor.expandSelection": "Ctrl+W",
+  "editor.shrinkSelection": "Ctrl+Shift+W",
 });
 
 /** The accelerator this profile assigns to `id`, if any. */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EditorSelection, EditorState } from "@codemirror/state";
-import { Direction } from "@codemirror/view";
+import { Direction, EditorView } from "@codemirror/view";
 import {
   cursorCharLeft,
   cursorCharRight,
@@ -9,6 +9,7 @@ import {
 import {
   computeAltShiftSelection,
   isPosInSelection,
+  multiCursorMouseStyle,
   removeRangeAround,
 } from "./multiCursorMouse";
 
@@ -223,5 +224,205 @@ describe("CodeMirror native multi-cursor arrow navigation & boundary merge", () 
     // 3 cursors merged into 2 because col 6 and col 9 both clamped to the end of short line 2
     expect(mockView.state.selection.ranges.length).toBe(2);
     expect(mockView.state.selection.ranges.map((r) => r.head)).toEqual([14, 16]);
+  });
+});
+
+describe("multiCursorMouseStyle extension dispatch & lifecycle", () => {
+  it("routes Ctrl+Shift+Alt+Left to column selection and returns null for plain Alt or normal clicks", () => {
+    const state = EditorState.create({
+      doc: "line1\nline2\nline3",
+      extensions: [
+        multiCursorMouseStyle(),
+        EditorState.allowMultipleSelections.of(true),
+      ],
+    });
+
+    const styles = state.facet(EditorView.mouseSelectionStyle);
+    expect(styles.length).toBeGreaterThan(0);
+    const styleHandler = styles[0];
+
+    const mockView = {
+      state,
+      posAtCoords: () => 0,
+      posAndSideAtCoords: () => ({ pos: 0, assoc: 1 }),
+      defaultLineHeight: 20,
+      defaultCharacterWidth: 10,
+    };
+
+    // 1. Ctrl+Shift+Alt+Left Drag event: matches column selection
+    const colEvent = {
+      button: 0,
+      altKey: true,
+      shiftKey: true,
+      ctrlKey: true,
+      metaKey: false,
+      clientX: 20,
+      clientY: 10,
+    } as MouseEvent;
+
+    const colResult = styleHandler(mockView as never, colEvent);
+    expect(colResult).not.toBeNull();
+    expect(typeof colResult!.get).toBe("function");
+    expect(typeof colResult!.update).toBe("function");
+
+    // Calling get returns an EditorSelection
+    const moveEvent = {
+      button: 0,
+      clientX: 50,
+      clientY: 30,
+    } as MouseEvent;
+    const sel = colResult!.get(moveEvent, false, false);
+    expect(sel).toBeInstanceOf(EditorSelection);
+
+    // 2. Alt+Shift+Left Drag event: matches legacy Alt+Shift
+    const altShiftEvent = {
+      button: 0,
+      altKey: true,
+      shiftKey: true,
+      ctrlKey: false,
+      metaKey: false,
+      clientX: 20,
+      clientY: 10,
+    } as MouseEvent;
+
+    const altShiftResult = styleHandler(mockView as never, altShiftEvent);
+    expect(altShiftResult).not.toBeNull();
+
+    // 3. Plain Alt+Left event: returns null (preserves native rectangularSelection)
+    const plainAltEvent = {
+      button: 0,
+      altKey: true,
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      clientX: 20,
+      clientY: 10,
+    } as MouseEvent;
+
+    expect(styleHandler(mockView as never, plainAltEvent)).toBeNull();
+
+    // 4. Normal Left click: returns null (preserves standard text selection)
+    const normalClick = {
+      button: 0,
+      altKey: false,
+      shiftKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      clientX: 20,
+      clientY: 10,
+    } as MouseEvent;
+
+    expect(styleHandler(mockView as never, normalClick)).toBeNull();
+  });
+
+  it("updates start selection when docChanged occurs during column drag", () => {
+    const doc = "0123456789\nabcdefghij";
+    let state = EditorState.create({
+      doc,
+      selection: EditorSelection.single(2),
+      extensions: [
+        multiCursorMouseStyle(),
+        EditorState.allowMultipleSelections.of(true),
+      ],
+    });
+
+    const styles = state.facet(EditorView.mouseSelectionStyle);
+    const styleHandler = styles[0];
+
+    const mockView = {
+      get state() {
+        return state;
+      },
+      posAtCoords: () => 5,
+      posAndSideAtCoords: () => ({ pos: 5, assoc: 1 }),
+      defaultLineHeight: 20,
+      defaultCharacterWidth: 10,
+    };
+
+    const colEvent = {
+      button: 0,
+      altKey: true,
+      shiftKey: true,
+      ctrlKey: true,
+      clientX: 20,
+      clientY: 10,
+    } as MouseEvent;
+
+    const handler = styleHandler(mockView as never, colEvent)!;
+    expect(handler).not.toBeNull();
+
+    // Insert text at start of doc (shifting all positions by 5)
+    const tr = state.update({
+      changes: { from: 0, insert: "HELLO" },
+    });
+    state = tr.state;
+
+    handler.update({
+      docChanged: true,
+      changes: tr.changes,
+    } as never);
+
+    const curMove = {
+      button: 0,
+      clientX: 70,
+      clientY: 10,
+    } as MouseEvent;
+
+    const sel = handler.get(curMove, false, false);
+    // Original cursor at 2 should have mapped to 2 + 5 = 7
+    expect(sel.ranges.some((r) => r.from === 7)).toBe(true);
+  });
+
+  it("cancels column drag and freezes selection when modifier keys are released", () => {
+    const doc = "line1\nline2\nline3";
+    const state = EditorState.create({
+      doc,
+      selection: EditorSelection.single(2),
+      extensions: [
+        multiCursorMouseStyle(),
+        EditorState.allowMultipleSelections.of(true),
+      ],
+    });
+
+    const styles = state.facet(EditorView.mouseSelectionStyle);
+    const styleHandler = styles[0];
+
+    const mockView = {
+      state,
+      posAtCoords: () => 5,
+      posAndSideAtCoords: () => ({ pos: 5, assoc: 1 }),
+      lineBlockAt: () => ({ from: 0, to: 5, top: 0, bottom: 20, height: 20 }),
+      lineBlockAtHeight: () => ({ from: 0, to: 5, top: 0, bottom: 20, height: 20 }),
+      coordsAtPos: () => ({ top: 0, bottom: 20, left: 10, right: 20 }),
+      documentTop: 0,
+      defaultLineHeight: 20,
+    };
+
+    const colEvent = {
+      button: 0,
+      altKey: true,
+      shiftKey: true,
+      ctrlKey: true,
+      metaKey: false,
+      clientX: 20,
+      clientY: 10,
+    } as MouseEvent;
+
+    const handler = styleHandler(mockView as never, colEvent)!;
+    expect(handler).not.toBeNull();
+
+    // Next mousemove with Ctrl released: should deactivate and return state.selection
+    const releasedMove = {
+      button: 0,
+      altKey: true,
+      shiftKey: true,
+      ctrlKey: false, // Released Ctrl
+      metaKey: false,
+      clientX: 50,
+      clientY: 30,
+    } as MouseEvent;
+
+    const sel = handler.get(releasedMove, false, false);
+    expect(sel).toBe(state.selection);
   });
 });

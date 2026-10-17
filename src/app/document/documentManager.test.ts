@@ -141,6 +141,9 @@ class FakeEditor implements EditorHandle {
     return false;
   }
 
+  expandSelection(): void {}
+  shrinkSelection(): void {}
+
   setStateUpdateListener(listener: StateUpdateListener | null): void {
     this.listener = listener;
   }

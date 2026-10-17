@@ -2,6 +2,12 @@ import { EditorSelection, type EditorState, type Extension } from "@codemirror/s
 import { EditorView } from "@codemirror/view";
 import { isolateHistory, redo, undo } from "@codemirror/commands";
 import { searchMotionAnnotation } from "./editorMotion";
+import { cancelColumnSelection } from "./columnSelection";
+import {
+  clearSmartSelectionHistory,
+  expandSmartSelection,
+  shrinkSmartSelection,
+} from "./smartSelection";
 import {
   SearchQuery,
   setSearchQuery,
@@ -110,6 +116,11 @@ export interface EditorHandle {
   /** Simplifies selection: multi-selection -> main range -> single cursor -> false. */
   simplifySelection(): boolean;
 
+  /** Expands the selection to the next semantic structural unit. */
+  expandSelection(): void;
+  /** Shrinks the selection to the previous snapshot before the last expand. */
+  shrinkSelection(): void;
+
   /** Registers the single receiver of state updates. */
   setStateUpdateListener(listener: StateUpdateListener | null): void;
 
@@ -199,11 +210,13 @@ class EditorHandleImpl implements EditorHandle {
   });
 
   attach(view: EditorView, documentId: DocumentId): void {
+    cancelColumnSelection();
     this.view = view;
     this.boundDocumentId = documentId;
   }
 
   detach(view: EditorView): void {
+    cancelColumnSelection();
     if (this.view === view) {
       this.view = null;
       this.boundDocumentId = null;
@@ -219,23 +232,31 @@ class EditorHandleImpl implements EditorHandle {
   }
 
   setState(documentId: DocumentId, state: EditorState): void {
+    cancelColumnSelection();
     const view = this.requireView();
     // Identity first: the update this call produces must already belong to the
     // target document.
     this.boundDocumentId = documentId;
-    view.setState(state);
+    const cleanedState = state.update({
+      effects: clearSmartSelectionHistory.of(),
+    }).state;
+    view.setState(cleanedState);
   }
 
   reloadDocumentState(documentId: DocumentId, state: EditorState): void {
+    cancelColumnSelection();
     const view = this.requireView();
     // Same ordering rule as `setState`: the (change-free) update the swap
     // produces must already be attributed to the reloaded document.
     this.boundDocumentId = documentId;
-    view.setState(state);
+    const cleanedState = state.update({
+      effects: clearSmartSelectionHistory.of(),
+    }).state;
+    view.setState(cleanedState);
     // FR-019: keep the clamped primary head visible. `setState` does not scroll,
     // and the previous scroll offset may describe a line that no longer exists.
     view.dispatch({
-      effects: EditorView.scrollIntoView(state.selection.main.head, {
+      effects: EditorView.scrollIntoView(cleanedState.selection.main.head, {
         y: "center",
       }),
     });
@@ -269,6 +290,18 @@ class EditorHandleImpl implements EditorHandle {
 
   redo(): void {
     redo(this.requireView());
+  }
+
+  expandSelection(): void {
+    if (this.view) {
+      expandSmartSelection(this.view);
+    }
+  }
+
+  shrinkSelection(): void {
+    if (this.view) {
+      shrinkSmartSelection(this.view);
+    }
   }
 
   simplifySelection(): boolean {

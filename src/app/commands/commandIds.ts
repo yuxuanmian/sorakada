@@ -22,6 +22,9 @@ export const COMMAND_IDS = [
   // 009: In-file search and replace.
   "editor.find",
   "editor.replace",
+  // 013: Smart selection expansion and shrinkage.
+  "editor.expandSelection",
+  "editor.shrinkSelection",
   // 003: Workspace lifecycle.
   "workspace.openFolder",
   "workspace.closeFolder",

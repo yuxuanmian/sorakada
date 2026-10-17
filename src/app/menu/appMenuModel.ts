@@ -111,6 +111,8 @@ export const APP_MENU_SECTIONS: readonly AppMenuSectionSpec[] = [
   section("edit", "ui.menu.sections.edit", [
     entry("editor.undo", "ui.menu.items.edit.undo"),
     entry("editor.redo", "ui.menu.items.edit.redo"),
+    entry("editor.expandSelection", "ui.menu.items.edit.expandSelection"),
+    entry("editor.shrinkSelection", "ui.menu.items.edit.shrinkSelection"),
   ]),
   section(
     "view",
