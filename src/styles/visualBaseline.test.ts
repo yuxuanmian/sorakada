@@ -411,6 +411,7 @@ describe("business models gain no visual state (T128..T129)", () => {
       "density",
       "sidebarVisible",
       "sidebarWidth",
+      "editorMotion",
     ]);
   });
 });

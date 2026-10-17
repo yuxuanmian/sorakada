@@ -41,6 +41,8 @@ export const COMMAND_IDS = [
   "view.toggleExplorer",
   // 007: density and Sidebar layout preferences (FR-088).
   "view.resetSidebarWidth",
+  // 012: smooth caret and viewport motion toggle.
+  "view.toggleEditorMotion",
   "view.densityCompact",
   "view.densityDefault",
   "view.densityComfortable",

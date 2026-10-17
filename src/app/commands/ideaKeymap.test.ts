@@ -133,6 +133,7 @@ describe("CommandId catalogue", () => {
       "explorer.collapseAll",
       "view.toggleExplorer",
       "view.resetSidebarWidth",
+      "view.toggleEditorMotion",
       "view.densityCompact",
       "view.densityDefault",
       "view.densityComfortable",

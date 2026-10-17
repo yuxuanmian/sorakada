@@ -25,6 +25,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { Editor } from "../editor/Editor";
 import { createEditorHandle } from "../editor/editorHandle";
+import { setEditorMotionEnabled } from "../editor/editorMotion";
 import { nativeFileDialogService } from "../services/fileDialogs";
 import { tauriFileService } from "../services/fileService";
 import { tauriFilesystemWatcher } from "../services/filesystemWatcher";
@@ -33,7 +34,7 @@ import { tauriWorkspaceFileService } from "../services/workspaceFileService";
 import type { OperationErrorContext } from "../services/errorContext";
 import { createCommandRegistry } from "./commands/commandRegistry";
 import type { CommandId } from "./commands/commandIds";
-import { createEscapeManager } from "./commands/escapeManager";
+import { createEscapeManager, ESCAPE_PRIORITY } from "./commands/escapeManager";
 import { commandForKeyboardEvent } from "./commands/ideaKeymap";
 import { DiskValidator } from "./document/diskValidation";
 import { DocumentManager } from "./document/documentManager";
@@ -408,6 +409,10 @@ export function App() {
     applyDensityAttribute(preferences.density, document.documentElement);
   }, [preferences.density]);
 
+  useEffect(() => {
+    setEditorMotionEnabled(preferences.editorMotion);
+  }, [preferences.editorMotion]);
+
   /*
    * The maximize/restore glyph is view state only. The native answer is re-read
    * after a gesture and after any window resize, which also covers a maximize
@@ -666,6 +671,13 @@ export function App() {
           );
         },
       }),
+      registry.register("view.toggleEditorMotion", {
+        execute: () => {
+          preferencesStore.setEditorMotion(
+            !preferencesStore.getSnapshot().editorMotion,
+          );
+        },
+      }),
       registry.register("view.resetSidebarWidth", {
         execute: () => {
           // Reset restores the *density default* through the preference owner,
@@ -796,8 +808,21 @@ export function App() {
       escapeManager.handleKeyboardEvent(event);
     };
 
+    const unregisterEditorEscape = escapeManager.register(
+      ESCAPE_PRIORITY.EDITOR,
+      () => {
+        if (manager.getActiveDocumentId() === null) {
+          return false;
+        }
+        if (!editorHandle.hasFocus()) {
+          return false;
+        }
+        return editorHandle.simplifySelection();
+      },
+    );
+
     window.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("keydown", onEscapeKeyDown, false);
+    window.addEventListener("keydown", onEscapeKeyDown, true);
 
     let disposed = false;
     let disposeWindow: (() => void) | null = null;
@@ -884,7 +909,8 @@ export function App() {
     return () => {
       disposed = true;
       window.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("keydown", onEscapeKeyDown, false);
+      window.removeEventListener("keydown", onEscapeKeyDown, true);
+      unregisterEditorEscape();
       editorHandle.setStateUpdateListener(null);
       unsubscribeDocuments();
       unsubscribeExplorer();
@@ -967,7 +993,7 @@ export function App() {
   });
 
   return (
-    <OverlayRoot>
+    <OverlayRoot escapeManager={escapeManager}>
       <div inert={isModalActive || undefined} style={{ display: "contents" }}>
       <AppShell
         topBar={
@@ -976,6 +1002,7 @@ export function App() {
               <CompactAppMenu
                 isEnabled={(id) => commandsRegistered && registry.isEnabled(id)}
                 developer={developer}
+                editorMotion={preferences.editorMotion}
                 onCommand={dispatch}
               />
             }

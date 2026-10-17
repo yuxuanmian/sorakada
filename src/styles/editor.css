@@ -64,3 +64,23 @@
     scrollbar-color: var(--scrollbar-thumb) transparent;
   }
 }
+
+/* ------------------------------------------------------------------------- */
+/* Smooth Caret Motion (012 Caret Enhancement)                              */
+/* ------------------------------------------------------------------------- */
+
+:root {
+  --editor-caret-duration: 150ms;
+  --editor-caret-timing: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.editor-host .cm-smooth-caret .cm-cursor {
+  transition:
+    left var(--editor-caret-duration, 150ms) var(--editor-caret-timing, cubic-bezier(0.22, 0.61, 0.36, 1)),
+    top var(--editor-caret-duration, 150ms) var(--editor-caret-timing, cubic-bezier(0.22, 0.61, 0.36, 1));
+  transition-delay: 0s;
+}
+
+.editor-host .cm-smooth-caret.cm-smooth-edit {
+  --editor-caret-duration: 120ms;
+}

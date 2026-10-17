@@ -133,6 +133,14 @@ class FakeEditor implements EditorHandle {
     this.redoCount += 1;
   }
 
+  hasFocus(): boolean {
+    return true;
+  }
+
+  simplifySelection(): boolean {
+    return false;
+  }
+
   setStateUpdateListener(listener: StateUpdateListener | null): void {
     this.listener = listener;
   }

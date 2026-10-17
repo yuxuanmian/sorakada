@@ -1,6 +1,7 @@
-import type { EditorState, Extension } from "@codemirror/state";
+import { EditorSelection, type EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { isolateHistory, redo, undo } from "@codemirror/commands";
+import { searchMotionAnnotation } from "./editorMotion";
 import {
   SearchQuery,
   setSearchQuery,
@@ -100,10 +101,14 @@ export interface EditorHandle {
 
   /** Moves keyboard focus into the editor. */
   focus(): void;
+  /** Whether the editor currently has keyboard focus. */
+  hasFocus(): boolean;
   /** Runs CodeMirror's own undo command against the active view. */
   undo(): void;
   /** Runs CodeMirror's own redo command against the active view. */
   redo(): void;
+  /** Simplifies selection: multi-selection -> main range -> single cursor -> false. */
+  simplifySelection(): boolean;
 
   /** Registers the single receiver of state updates. */
   setStateUpdateListener(listener: StateUpdateListener | null): void;
@@ -254,12 +259,40 @@ class EditorHandleImpl implements EditorHandle {
     this.requireView().focus();
   }
 
+  hasFocus(): boolean {
+    return this.view !== null && this.view.hasFocus;
+  }
+
   undo(): void {
     undo(this.requireView());
   }
 
   redo(): void {
     redo(this.requireView());
+  }
+
+  simplifySelection(): boolean {
+    if (this.view === null) {
+      return false;
+    }
+    const sel = this.view.state.selection;
+    if (sel.ranges.length > 1) {
+      this.view.dispatch({
+        selection: EditorSelection.create([sel.main]),
+        scrollIntoView: true,
+        userEvent: "select",
+      });
+      return true;
+    }
+    if (!sel.main.empty) {
+      this.view.dispatch({
+        selection: EditorSelection.cursor(sel.main.head),
+        scrollIntoView: true,
+        userEvent: "select",
+      });
+      return true;
+    }
+    return false;
   }
 
   setStateUpdateListener(listener: StateUpdateListener | null): void {
@@ -364,6 +397,7 @@ class EditorHandleImpl implements EditorHandle {
       view.dispatch({
         selection: { anchor: target.match.from, head: target.match.to },
         effects: EditorView.scrollIntoView(target.match.from, { y: "center" }),
+        annotations: searchMotionAnnotation.of(true),
         userEvent: "select.search",
       });
     }
@@ -400,6 +434,7 @@ class EditorHandleImpl implements EditorHandle {
       view.dispatch({
         selection: { anchor: found.match.from, head: found.match.to },
         effects: EditorView.scrollIntoView(found.match.from, { y: "center" }),
+        annotations: searchMotionAnnotation.of(true),
         userEvent: "select.search",
       });
     }
@@ -428,6 +463,7 @@ class EditorHandleImpl implements EditorHandle {
       view.dispatch({
         selection: { anchor: found.match.from, head: found.match.to },
         effects: EditorView.scrollIntoView(found.match.from, { y: "center" }),
+        annotations: searchMotionAnnotation.of(true),
         userEvent: "select.search",
       });
     }
@@ -503,7 +539,7 @@ class EditorHandleImpl implements EditorHandle {
       },
       selection: { anchor: nextAnchor, head: nextHead },
       effects: EditorView.scrollIntoView(nextAnchor, { y: "center" }),
-      annotations: isolateHistory.of("full"),
+      annotations: [isolateHistory.of("full"), searchMotionAnnotation.of(true)],
       userEvent: "input.replace",
     });
   }

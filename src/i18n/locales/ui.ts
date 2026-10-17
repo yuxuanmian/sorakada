@@ -24,6 +24,7 @@ export const zhUi = {
       view: {
         explorer: "资源管理器",
         resetSidebarWidth: "重置侧边栏宽度",
+        toggleEditorMotion: "平滑光标与滚动",
       },
     },
     submenus: {
@@ -212,6 +213,7 @@ export const enUi = {
       view: {
         explorer: "Explorer",
         resetSidebarWidth: "Reset Sidebar Width",
+        toggleEditorMotion: "Smooth Caret and Scrolling",
       },
     },
     submenus: {

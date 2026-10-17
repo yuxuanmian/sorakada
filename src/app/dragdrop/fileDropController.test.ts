@@ -320,6 +320,14 @@ class MinimalEditor implements EditorHandle {
 
   redo(): void {}
 
+  hasFocus(): boolean {
+    return true;
+  }
+
+  simplifySelection(): boolean {
+    return false;
+  }
+
   setStateUpdateListener(listener: StateUpdateListener | null): void {
     this.listener = listener;
   }

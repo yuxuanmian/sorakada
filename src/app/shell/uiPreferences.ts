@@ -42,6 +42,8 @@ export interface UiPreferences {
   sidebarVisible: boolean;
   /** The user's preferred Sidebar width in CSS logical pixels. */
   sidebarWidth: number;
+  /** Whether smooth caret and viewport animations are enabled (012 Caret Enhancement). */
+  editorMotion: boolean;
 }
 
 /** What a first launch uses, and what every fallback returns. */
@@ -50,6 +52,7 @@ export const DEFAULT_UI_PREFERENCES: UiPreferences = Object.freeze({
   density: "default",
   sidebarVisible: true,
   sidebarWidth: 260,
+  editorMotion: true,
 });
 
 /** Whether `value` is one of the three supported presets. */
@@ -175,6 +178,10 @@ export function parseUiPreferences(raw: string | null): UiPreferences {
       typeof record.sidebarWidth === "number"
         ? clampStoredSidebarWidth(record.sidebarWidth)
         : DEFAULT_UI_PREFERENCES.sidebarWidth,
+    editorMotion:
+      typeof record.editorMotion === "boolean"
+        ? record.editorMotion
+        : DEFAULT_UI_PREFERENCES.editorMotion,
   };
 }
 
@@ -185,6 +192,7 @@ export function serializeUiPreferences(preferences: UiPreferences): string {
     density: preferences.density,
     sidebarVisible: preferences.sidebarVisible,
     sidebarWidth: clampStoredSidebarWidth(preferences.sidebarWidth),
+    editorMotion: preferences.editorMotion,
   });
 }
 
@@ -205,6 +213,8 @@ export interface UiPreferencesStore {
    * clamping caused by a narrow window or a different display must not.
    */
   setSidebarWidth(width: number): void;
+  /** Enables or disables smooth editor animations. */
+  setEditorMotion(enabled: boolean): void;
 }
 
 export interface UiPreferencesStoreOptions {
@@ -273,6 +283,13 @@ export function createUiPreferencesStore(
         return;
       }
       publish({ ...preferences, sidebarWidth: next });
+    },
+
+    setEditorMotion(enabled: boolean): void {
+      if (preferences.editorMotion === enabled) {
+        return;
+      }
+      publish({ ...preferences, editorMotion: enabled });
     },
   };
 }

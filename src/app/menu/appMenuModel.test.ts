@@ -86,6 +86,7 @@ describe("App Menu group composition", () => {
     expect(view?.items.map((item) => item.commandId)).toEqual([
       "view.toggleExplorer",
       "view.resetSidebarWidth",
+      "view.toggleEditorMotion",
     ]);
 
     const density = view?.submenus?.find((submenu) => submenu.id === "density");
@@ -224,5 +225,35 @@ describe("catalogue shape", () => {
     expect(allMenuItems(second).every((item) => item.disabled === true)).toBe(
       true,
     );
+  });
+});
+
+describe("editor motion menu toggle icon", () => {
+  it("shows checkmark when editorMotion is true or default", () => {
+    const defaultModel = buildAppMenuModel({ isEnabled: everythingEnabled });
+    const defaultItem = allMenuItems(defaultModel).find(
+      (item) => item.commandId === "view.toggleEditorMotion",
+    );
+    expect(defaultItem?.icon).toBe("✓");
+
+    const enabledModel = buildAppMenuModel({
+      isEnabled: everythingEnabled,
+      editorMotion: true,
+    });
+    const enabledItem = allMenuItems(enabledModel).find(
+      (item) => item.commandId === "view.toggleEditorMotion",
+    );
+    expect(enabledItem?.icon).toBe("✓");
+  });
+
+  it("omits checkmark when editorMotion is false", () => {
+    const disabledModel = buildAppMenuModel({
+      isEnabled: everythingEnabled,
+      editorMotion: false,
+    });
+    const disabledItem = allMenuItems(disabledModel).find(
+      (item) => item.commandId === "view.toggleEditorMotion",
+    );
+    expect(disabledItem?.icon).toBeUndefined();
   });
 });

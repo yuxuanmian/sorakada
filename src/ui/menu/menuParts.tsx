@@ -11,10 +11,14 @@
  * Sorakada classes below.
  */
 
-import { Fragment } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Menu } from "@base-ui/react/menu";
 
-import { useOverlayContainer } from "../overlay/OverlayRoot";
+import {
+  useOverlayContainer,
+  useOverlayEscapeManager,
+} from "../overlay/OverlayRoot";
+import { ESCAPE_PRIORITY } from "../../app/commands/escapeManager";
 import type { SoraMenuItem, SoraMenuModel, SoraSubmenu } from "./menuModel";
 
 export interface SoraMenuSectionsProps {
@@ -96,9 +100,22 @@ function SoraSubmenuRow({
   onAction(item: SoraMenuItem): void;
 }) {
   const container = useOverlayContainer();
+  const escapeManager = useOverlayEscapeManager();
+  const actionsRef = useRef<Menu.Root.Actions | null>(null);
+  const [isOpen, setIsOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen || !escapeManager) {
+      return;
+    }
+    return escapeManager.register(ESCAPE_PRIORITY.POPUP, () => {
+      actionsRef.current?.close();
+      return true;
+    });
+  }, [isOpen, escapeManager]);
 
   return (
-    <Menu.SubmenuRoot>
+    <Menu.SubmenuRoot actionsRef={actionsRef} onOpenChange={setIsOpen}>
       <Menu.SubmenuTrigger
         className="sora-menu__item sora-menu__item--submenu"
         label={submenu.label}

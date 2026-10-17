@@ -24,7 +24,7 @@ function sourceText(relativePath: string): string {
   if (file === undefined) {
     throw new Error(`Expected ${relativePath} in the audited source tree`);
   }
-  return file.text;
+  return file.text.replace(/\r\n/g, "\n");
 }
 
 /** The text between two markers, so an assertion can be scoped to one function. */

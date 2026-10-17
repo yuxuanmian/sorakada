@@ -16,6 +16,9 @@ import {
   WidgetType,
 } from "@codemirror/view";
 import { getCachedMatches } from "../app/search/searchEngine";
+import { multiCursorClipboard } from "./multiCursorClipboard";
+import { editorMotion } from "./editorMotion";
+import { multiCursorMouse } from "./multiCursorMouse";
 
 /**
  * Editor appearance.
@@ -338,6 +341,9 @@ export function createEditorState(
       search({ top: true }),
       searchDecorationPlugin,
       appearanceBoundary(),
+      multiCursorMouse(),
+      multiCursorClipboard(),
+      editorMotion(),
       runtimeExtensions,
     ],
   });

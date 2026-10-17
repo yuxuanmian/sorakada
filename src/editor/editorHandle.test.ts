@@ -47,6 +47,9 @@ function createTestBridge(initialDoc = "", readOnly = false): TestBridge {
       state = tr.state ?? state.update(tr as Parameters<EditorState["update"]>[0]).state;
     },
     focus: () => {},
+    get hasFocus() {
+      return true;
+    },
   };
 
   const handle = createEditorHandle();
@@ -284,5 +287,37 @@ describe("EditorHandle search & bridge contracts", () => {
 
     handle.replaceAll("protected", "modified", false, false);
     expect(getState().doc.toString()).toBe("protected document");
+  });
+  it("simplifies selection hierarchically on Escape", () => {
+    const { handle, getState, view } = createTestBridge("first second third");
+
+    // 1. Set multiple selections, with main selection having text (6..12: "second")
+    view.dispatch({
+      selection: EditorSelection.create([
+        EditorSelection.range(0, 5), // "first"
+        EditorSelection.range(6, 12), // "second" (main)
+        EditorSelection.range(13, 18), // "third"
+      ], 1),
+    });
+    expect(getState().selection.ranges.length).toBe(3);
+
+    // Step 1: Escape collapses multiple selections to the main selection range (preserving text!)
+    const step1 = handle.simplifySelection();
+    expect(step1).toBe(true);
+    expect(getState().selection.ranges.length).toBe(1);
+    expect(getState().selection.main.from).toBe(6);
+    expect(getState().selection.main.to).toBe(12);
+    expect(getState().selection.main.empty).toBe(false);
+
+    // Step 2: Next Escape collapses the non-empty main selection to a cursor
+    const step2 = handle.simplifySelection();
+    expect(step2).toBe(true);
+    expect(getState().selection.ranges.length).toBe(1);
+    expect(getState().selection.main.empty).toBe(true);
+    expect(getState().selection.main.head).toBe(12);
+
+    // Step 3: Next Escape on already empty cursor returns false (not consumed)
+    const step3 = handle.simplifySelection();
+    expect(step3).toBe(false);
   });
 });
