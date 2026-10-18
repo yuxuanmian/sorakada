@@ -4,6 +4,10 @@ import type { EditorView } from "@codemirror/view";
 import { undoDepth } from "@codemirror/commands";
 
 import type { EditorHandle, StateUpdateListener } from "../../editor/editorHandle";
+import {
+  editorLanguageFacet,
+  reconfigureEditorLanguage,
+} from "../../editor/editorLanguage";
 import type {
   DocumentPathInspection,
   FileCommandError,
@@ -61,6 +65,7 @@ class FakeEditor implements EditorHandle {
   readonly restoredViewStates: DocumentViewState[] = [];
   /** States installed by an external disk reload (005). */
   readonly reloadedStates: EditorState[] = [];
+  readonly reconfigureLanguageCalls: Array<string | null> = [];
   focusCount = 0;
   undoCount = 0;
   redoCount = 0;
@@ -127,6 +132,16 @@ class FakeEditor implements EditorHandle {
 
   undo(): void {
     this.undoCount += 1;
+  }
+
+  reconfigureLanguage(filename: string | null): void {
+    this.reconfigureLanguageCalls.push(filename);
+    if (this.state !== null && this.boundDocumentId !== null) {
+      this.state = this.state.update({
+        effects: reconfigureEditorLanguage(filename),
+      }).state;
+      this.listener?.(this.boundDocumentId, this.state, false);
+    }
   }
 
   redo(): void {
@@ -3035,7 +3050,10 @@ describe("DocumentManager commitRenamedPath (003)", () => {
     const after = harness.manager.getSession(id)!;
     // Same object, same identity: only path-related metadata moved.
     expect(after).toBe(before);
-    expect(after.editorState).toBe(stateBefore);
+    expect(after.editorState.doc.toString()).toBe(stateBefore.doc.toString());
+    expect(after.editorState.facet(editorLanguageFacet).filename).toBe(
+      "C:\\work\\renamed.txt",
+    );
     expect(after.savedBaseline.toString()).toBe("alpha");
     expect(after.dirty).toBe(true);
     expect(after.path).toBe("C:\\work\\renamed.txt");
@@ -3096,6 +3114,16 @@ describe("DocumentManager commitRenamedPath (003)", () => {
     expect(harness.manager.getSession(openedB.documentId)!.path).toBe(
       "C:\\work\\lib\\nested\\b.ts",
     );
+    expect(
+      harness.manager.getSession(openedA.documentId)!.editorState.facet(
+        editorLanguageFacet,
+      ).filename,
+    ).toBe("C:\\work\\lib\\a.ts");
+    expect(
+      harness.manager.getSession(openedB.documentId)!.editorState.facet(
+        editorLanguageFacet,
+      ).filename,
+    ).toBe("C:\\work\\lib\\nested\\b.ts");
     // A component-aware check keeps a sibling with a shared prefix out of it.
     expect(harness.manager.getSession(openedSibling.documentId)!.path).toBe(
       "C:\\work\\src-old\\c.ts",
@@ -4909,7 +4937,8 @@ describe("DocumentManager external relocation (006 US2)", () => {
     // FR-057: identity, text, editor state, history and dirty state all survive;
     // only path-facing metadata moves.
     expect(after.id).toBe(id);
-    expect(after.editorState).toBe(editorState);
+    expect(after.editorState.doc.toString()).toBe(editorState.doc.toString());
+    expect(after.editorState.facet(editorLanguageFacet).filename).toBe(SMALL_B);
     expect(after.displayName).toBe("b.txt");
     expect(after.path).toBe(SMALL_B);
     expect(after.pathIdentity?.comparisonKey).toBe(
@@ -4934,8 +4963,7 @@ describe("DocumentManager external relocation (006 US2)", () => {
     const opened = await harness.manager.openPath(SMALL_A);
     const id = opened.status === "opened" ? opened.documentId : "";
 
-    const edited = EditorState.create({ doc: toText("alpha edited") });
-    harness.manager.handleEditorStateUpdate(id, edited, true);
+    harness.editor.type("alpha edited");
     expect(harness.manager.getSession(id)!.dirty).toBe(true);
 
     const entryIdentity = moveFileExternally(
@@ -4957,8 +4985,8 @@ describe("DocumentManager external relocation (006 US2)", () => {
     // FR-059: a dirty document is eligible to follow a confirmed move, and its
     // unsaved buffer is not reloaded.
     expect(after.dirty).toBe(true);
-    expect(after.editorState).toBe(edited);
     expect(after.editorState.doc.toString()).toBe("alpha edited");
+    expect(after.editorState.facet(editorLanguageFacet).filename).toBe(SMALL_B);
   });
 
   it("proves the destination from its own binding, never from the entry token", async () => {
@@ -6061,5 +6089,128 @@ describe("DocumentManager save intent generations and notification isolation (01
     // Critical notification does NOT expire with elapsed time
     notifications.elapse(100000, new Set());
     expect(notifications.visible().length).toBe(1);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* DocumentManager language lifecycle integration (014)                       */
+/* -------------------------------------------------------------------------- */
+
+describe("DocumentManager language lifecycle integration (014)", () => {
+  it("initializes language metadata on openPath and untitled documents", async () => {
+    const harness = createHarness();
+    const untitledId = activeId(harness.manager);
+    const untitledSession = harness.manager.getSession(untitledId)!;
+    expect(
+      untitledSession.editorState.facet(editorLanguageFacet).filename,
+    ).toBeNull();
+    expect(untitledSession.editorState.facet(editorLanguageFacet).name).toBeNull();
+
+    harness.files.addFile("C:\\work\\app.ts", "const x = 1;");
+    const opened = await harness.manager.openPath("C:\\work\\app.ts");
+    expect(opened.status).toBe("opened");
+    const openedId = opened.status === "opened" ? opened.documentId : "";
+    const openedSession = harness.manager.getSession(openedId)!;
+    expect(openedSession.editorState.facet(editorLanguageFacet).filename).toBe(
+      "C:\\work\\app.ts",
+    );
+    expect(openedSession.editorState.facet(editorLanguageFacet).name).toBe(
+      "TypeScript",
+    );
+  });
+
+  it("reconfigures active document language on successful Save As without replacing view state", async () => {
+    const harness = createHarness();
+    const id = activeId(harness.manager);
+    harness.editor.type("const a = 10;");
+    harness.dialogs.savePath = "C:\\work\\saved.ts";
+
+    const result = await harness.manager.saveDocumentAs(id);
+    expect(result.status).toBe("success");
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.path).toBe("C:\\work\\saved.ts");
+    expect(session.dirty).toBe(false);
+    expect(session.savedBaseline.toString()).toBe("const a = 10;");
+    expect(session.editorState.facet(editorLanguageFacet).filename).toBe(
+      "C:\\work\\saved.ts",
+    );
+    expect(session.editorState.facet(editorLanguageFacet).name).toBe(
+      "TypeScript",
+    );
+    expect(harness.editor.reconfigureLanguageCalls).toContain(
+      "C:\\work\\saved.ts",
+    );
+  });
+
+  it("reconfigures background document language on Save As without switching active tab", async () => {
+    const harness = createHarness();
+    const firstId = activeId(harness.manager);
+    const secondId = harness.manager.createUntitled();
+    expect(harness.manager.getActiveDocumentId()).toBe(secondId);
+
+    // Save As firstId while secondId is active
+    harness.dialogs.savePath = "C:\\work\\bg.py";
+    const callsBefore = harness.editor.reconfigureLanguageCalls.length;
+    const result = await harness.manager.saveDocumentAs(firstId);
+    expect(result.status).toBe("success");
+
+    // Active tab was not changed
+    expect(harness.manager.getActiveDocumentId()).toBe(secondId);
+    // Background session was reconfigured in state directly
+    const session = harness.manager.getSession(firstId)!;
+    expect(session.path).toBe("C:\\work\\bg.py");
+    expect(session.editorState.facet(editorLanguageFacet).filename).toBe(
+      "C:\\work\\bg.py",
+    );
+    expect(session.editorState.facet(editorLanguageFacet).name).toBe("Python");
+    // Active editor handle was not called for the background tab
+    expect(harness.editor.reconfigureLanguageCalls.length).toBe(callsBefore);
+  });
+
+  it("keeps language and path unchanged when Save As fails", async () => {
+    const harness = createHarness();
+    const id = activeId(harness.manager);
+    harness.editor.type("draft code");
+    harness.dialogs.savePath = "C:\\work\\fail.py";
+    harness.files.writeError = { code: "io_write", message: "disk full" };
+
+    const result = await harness.manager.saveDocumentAs(id);
+    expect(result.status).toBe("failed");
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.path).toBeNull();
+    expect(session.editorState.facet(editorLanguageFacet).filename).toBeNull();
+    expect(session.editorState.facet(editorLanguageFacet).name).toBeNull();
+    expect(session.dirty).toBe(true);
+    expect(session.savedBaseline.toString()).toBe("");
+  });
+
+  it("preserves language metadata across external disk reload", async () => {
+    const harness = createHarness();
+    const filePath = "C:\\work\\code.ts";
+    harness.files.addFile(filePath, "const original = 1;");
+    const opened = await harness.manager.openPath(filePath);
+    const id = opened.status === "opened" ? opened.documentId : "";
+
+    // Modify file externally and force reload
+    harness.files.updateFile(filePath, "const reloaded = 2; // longer content");
+    const reloadResult = await harness.manager.reloadDocumentFromDisk(id);
+    expect(reloadResult.status).toBe("success");
+
+    const session = harness.manager.getSession(id)!;
+    expect(session.editorState.doc.toString()).toBe(
+      "const reloaded = 2; // longer content",
+    );
+    expect(session.editorState.facet(editorLanguageFacet).filename).toBe(
+      filePath,
+    );
+    expect(session.editorState.facet(editorLanguageFacet).name).toBe(
+      "TypeScript",
+    );
+    expect(session.savedBaseline.toString()).toBe(
+      "const reloaded = 2; // longer content",
+    );
+    expect(session.dirty).toBe(false);
   });
 });

@@ -1,6 +1,7 @@
 import { EditorSelection, type EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { isolateHistory, redo, undo } from "@codemirror/commands";
+import { reconfigureEditorLanguage } from "./editorLanguage";
 import { searchMotionAnnotation } from "./editorMotion";
 import { cancelColumnSelection } from "./columnSelection";
 import {
@@ -120,6 +121,14 @@ export interface EditorHandle {
   expandSelection(): void;
   /** Shrinks the selection to the previous snapshot before the last expand. */
   shrinkSelection(): void;
+
+  /**
+   * Reconfigures syntax highlighting language for the current document view.
+   *
+   * Dispatches `reconfigureEditorLanguage(filename)` against the attached view without
+   * replacing the state, clearing smart selection, or modifying selection, scroll, or history.
+   */
+  reconfigureLanguage(filename: string | null): void;
 
   /** Registers the single receiver of state updates. */
   setStateUpdateListener(listener: StateUpdateListener | null): void;
@@ -302,6 +311,13 @@ class EditorHandleImpl implements EditorHandle {
     if (this.view) {
       shrinkSmartSelection(this.view);
     }
+  }
+
+  reconfigureLanguage(filename: string | null): void {
+    const view = this.requireView();
+    view.dispatch({
+      effects: reconfigureEditorLanguage(filename),
+    });
   }
 
   simplifySelection(): boolean {

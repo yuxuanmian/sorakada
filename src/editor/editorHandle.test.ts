@@ -5,6 +5,7 @@ import type { EditorView } from "@codemirror/view";
 
 import { createEditorState } from "./editorConfig";
 import { createEditorHandle, type EditorHandle } from "./editorHandle";
+import { editorLanguageFacet } from "./editorLanguage";
 import { smartSelectionHistoryField } from "./smartSelection";
 
 interface TestBridge {
@@ -371,5 +372,53 @@ describe("EditorHandle search & bridge contracts", () => {
     const reloaded = getState();
     handle.reloadDocumentState("doc-a", reloaded);
     expect(getState().field(smartSelectionHistoryField)).toEqual([]);
+  });
+
+  describe("EditorHandle language reconfiguration (014)", () => {
+    it("reconfigures language via dispatch effect without altering doc, selection, undo or smart selection history", () => {
+      const { handle, getState, dispatchEdit, dispatchSelection } =
+        createTestBridge("const a = 1;");
+
+      // Make an edit so undoDepth > 0
+      dispatchEdit(12, 12, "\nconst b = 2;");
+      expect(undoDepth(getState())).toBe(1);
+
+      // Expand smart selection so history field is non-empty
+      dispatchSelection(6, 6);
+      handle.expandSelection();
+      expect(
+        getState().field(smartSelectionHistoryField).length,
+      ).toBeGreaterThan(0);
+
+      const selectionBefore = getState().selection;
+      const docBefore = getState().doc.toString();
+      const historyBefore = getState().field(smartSelectionHistoryField);
+
+      // Reconfigure language to Python
+      handle.reconfigureLanguage("script.py");
+
+      const stateAfter = getState();
+      expect(stateAfter.facet(editorLanguageFacet).filename).toBe("script.py");
+      expect(stateAfter.facet(editorLanguageFacet).name).toBe("Python");
+      // Text, selection, undo history, and smart selection history remain unchanged
+      expect(stateAfter.doc.toString()).toBe(docBefore);
+      expect(stateAfter.selection.main.from).toBe(selectionBefore.main.from);
+      expect(stateAfter.selection.main.to).toBe(selectionBefore.main.to);
+      expect(undoDepth(stateAfter)).toBe(1);
+      expect(stateAfter.field(smartSelectionHistoryField)).toEqual(
+        historyBefore,
+      );
+    });
+
+    it("resets language to plain text when reconfigured with null", () => {
+      const { handle, getState } = createTestBridge("print('hello')");
+      handle.reconfigureLanguage("script.py");
+      expect(getState().facet(editorLanguageFacet).name).toBe("Python");
+
+      handle.reconfigureLanguage(null);
+      expect(getState().facet(editorLanguageFacet).filename).toBeNull();
+      expect(getState().facet(editorLanguageFacet).name).toBeNull();
+      expect(getState().doc.toString()).toBe("print('hello')");
+    });
   });
 });

@@ -237,11 +237,18 @@ const FORBIDDEN_PLATFORM_TERMS: readonly string[] = [
   "DWMWA_",
 ];
 
-/** Dependencies the 001..007 baseline already declares (T004, T133, FR-064). */
+/**
+ * Dependencies the 001..007 baseline already declares (T004, T133, FR-064),
+ * extended in 014 with official syntax highlighting packages (@codemirror/language,
+ * @codemirror/language-data, @codemirror/theme-one-dark).
+ */
 const BASELINE_DEPENDENCIES: readonly string[] = [
   "@base-ui/react",
   "@codemirror/commands",
+  "@codemirror/language",
+  "@codemirror/language-data",
   "@codemirror/state",
+  "@codemirror/theme-one-dark",
   "@codemirror/view",
   "@tanstack/react-virtual",
   "@tauri-apps/api",
@@ -284,7 +291,7 @@ describe("008 stays inside its presentation scope (T011, T133, T151)", () => {
     }
   });
 
-  it("declares exactly the 007 runtime dependency set", () => {
+  it("declares exactly the 007 runtime dependency set plus 014 syntax highlighting extensions", () => {
     const manifest = JSON.parse(packageJsonSource) as PackageJson;
     expect(Object.keys(manifest.dependencies ?? {}).sort()).toEqual(
       [...BASELINE_DEPENDENCIES].sort(),
@@ -1378,7 +1385,7 @@ describe("the Editor consumes the application appearance tokens (T035..T050)", (
     );
   });
 
-  it("adds no language, highlighter or semantic-gutter concept", () => {
+  it("keeps deferred guide and semantic-gutter concepts out of the editor surface", () => {
     const editorOwned = `${editorConfigSource}\n${editorCss}`.toLowerCase();
     for (const term of [
       "indent-guide",
@@ -1387,10 +1394,6 @@ describe("the Editor consumes the application appearance tokens (T035..T050)", (
       "ruler",
       "breakpoint",
       "diagnostic",
-      "syntaxhighlight",
-      "highlightstyle",
-      "@codemirror/language",
-      "lezer",
     ]) {
       expect(editorOwned, term).not.toContain(term);
     }

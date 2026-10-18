@@ -331,6 +331,8 @@ class MinimalEditor implements EditorHandle {
   expandSelection(): void {}
   shrinkSelection(): void {}
 
+  reconfigureLanguage(_filename: string | null): void {}
+
   setStateUpdateListener(listener: StateUpdateListener | null): void {
     this.listener = listener;
   }

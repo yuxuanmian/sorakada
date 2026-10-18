@@ -24,6 +24,7 @@
 import type { EditorState, Text } from "@codemirror/state";
 
 import { createEditorState, createExternalReloadState } from "../../editor/editorConfig";
+import { reconfigureEditorLanguage } from "../../editor/editorLanguage";
 import type { EditorHandle } from "../../editor/editorHandle";
 import type { FileDialogService } from "../../services/fileDialogs";
 import type { OperationErrorContext } from "../../services/errorContext";
@@ -887,6 +888,7 @@ export class DocumentManager {
       session.editorState,
       content.text,
       this.editor.extensions,
+      session.path,
     );
     session.editorState = nextState;
     session.savedBaseline = nextState.doc;
@@ -1187,7 +1189,7 @@ export class DocumentManager {
     }
 
     // Only now may a session exist.
-    const state = createEditorState(opened.text, this.editor.extensions);
+    const state = createEditorState(opened.text, this.editor.extensions, path);
     const session: DocumentSession = {
       id: createDocumentId(),
       path,
@@ -2907,6 +2909,18 @@ export class DocumentManager {
     // in-flight validation or reload for the old path stale (FR-039).
     session.bindingGeneration += 1;
 
+    const isActiveAndReady =
+      session.id === this.activeDocumentId && this.editor.isReady();
+
+    if (isActiveAndReady) {
+      this.editor.reconfigureLanguage(path);
+      session.editorState = this.editor.getState();
+    } else {
+      session.editorState = session.editorState.update({
+        effects: reconfigureEditorLanguage(path),
+      }).state;
+    }
+
     if (previousPath === null || previousIdentity === null) {
       // An Untitled document that just became bound (Save As on a new document):
       // this is its *first* watch interest, so it is a binding and not a
@@ -3460,7 +3474,7 @@ export class DocumentManager {
 
   /** Appends a clean untitled session without activating it. */
   private appendUntitledSession(): DocumentSession {
-    const state = createEditorState("", this.editor.extensions);
+    const state = createEditorState("", this.editor.extensions, null);
     const session: DocumentSession = {
       id: createDocumentId(),
       path: null,
