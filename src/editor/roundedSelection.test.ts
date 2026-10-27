@@ -7,7 +7,6 @@ import {
   ConcaveCornerMarker,
   computeSelectionRadii,
   formatRadius,
-  getSelectionBreathingRoom,
   getVisualLineSegments,
   MAX_ROUNDED_RECTS_BUDGET,
   roundedSelection,
@@ -413,9 +412,9 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
     const patches = markers.filter((m): m is ConcaveCornerMarker => m instanceof ConcaveCornerMarker);
     expect(patches.map(p => ({ left: p.left, top: p.top, radius: p.width, hole: p.hole }))).toEqual([
       { left: 17, top: narrowBelow ? 31 : 28, radius: 3, hole: narrowBelow ? "left bottom" : "left top" },
-      { left: 75, top: narrowBelow ? 31 : 28, radius: 3, hole: narrowBelow ? "right bottom" : "right top" },
+      { left: narrowBelow ? 70 : 75, top: narrowBelow ? 31 : 28, radius: 3, hole: narrowBelow ? "right bottom" : "right top" },
     ]);
-    expect(bodies.map(p => p.width)).toEqual(narrowBelow ? [105, 55] : [55, 105]);
+    expect(bodies.map(p => p.width)).toEqual(narrowBelow ? [105, 50] : [55, 100]);
     expect(bodies[0].top + bodies[0].height).toBe(bodies[1].top);
     expect(bodies[0].radii.topLeft).toBe(3);
     expect(bodies[1].radii.bottomRight).toBe(3);
@@ -444,10 +443,10 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
     });
     const markers = buildVisualSelectionMarkers(view);
     const patches = markers.filter((m): m is ConcaveCornerMarker => m instanceof ConcaveCornerMarker);
-    expect(patches.map(p => p.width)).toEqual([1.5, 1.5]);
+    expect(patches.map(p => p.width)).toEqual([1.5, 1]);
     const bodies = markers.filter((m): m is RoundedRectangleMarker => m instanceof RoundedRectangleMarker);
     expect(bodies[0].radii.bottomLeft).toBe(1.5);
-    expect(bodies[1].radii.topRight).toBe(1.5);
+    expect(bodies[1].radii.topRight).toBe(0);
 
     const nearby = createMockGeometryView({
       doc: "abcdefghij\nklmnopqrst", charWidth: 1, lineHeight: 20,
@@ -475,7 +474,7 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
     expect(buildVisualSelectionMarkers(independent).some(m => m instanceof ConcaveCornerMarker)).toBe(false);
   });
 
-  it("keeps only a backwards anchor hint on the final empty line without changing selected text", () => {
+  it("never paints a final empty EOF line, regardless of selection direction or anchor", () => {
     const lines = [
       { from: 0, to: 3, top: 5, bottom: 25 },
       { from: 4, to: 4, top: 37, bottom: 57 },
@@ -486,8 +485,7 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
     });
     const selection = reverse.state.selection;
     expect(buildVisualSelectionPieces(reverse)).toEqual([
-      { left: 0, top: 5, width: 35, height: 26 },
-      { left: 0, top: 31, width: 5, height: 26 },
+      { left: 0, top: 5, width: 35, height: 20 },
     ]);
     expect(reverse.state.selection).toBe(selection);
     expect(selection.main.anchor).toBe(4);
@@ -528,7 +526,7 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
     expect(pieces).toEqual([
       { left: 0, top: 5, width: 55, height: 26 },
       { left: 0, top: 31, width: 5, height: 32 },
-      { left: 0, top: 63, width: 45, height: 26 },
+      { left: 0, top: 63, width: 40, height: 26 },
     ]);
     expect(pieces[0].top + pieces[0].height).toBe(pieces[1].top);
     expect(pieces[1].top + pieces[1].height).toBe(pieces[2].top);
@@ -552,15 +550,15 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
       ],
     });
     expect(buildVisualSelectionPieces(view)).toEqual([
-      { left: 10, top: 5, width: 35, height: 26 },
-      { left: 0, top: 31, width: 35, height: 26 },
+      { left: 10, top: 5, width: 30, height: 26 },
+      { left: 0, top: 31, width: 30, height: 26 },
     ]);
   });
 
   it("extends every bidi fragment in a row to the same seam without stacking backgrounds", () => {
     const view = createMockGeometryView({
-      doc: "ab\ncd",
-      selection: { from: 0, to: 5 },
+      doc: "ab\ncd\n",
+      selection: { from: 0, to: 6 },
       lineHeight: 32,
       lines: [
         { from: 0, to: 2, top: 5, bottom: 25 },
@@ -641,7 +639,7 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
     const pieces = buildVisualSelectionPieces(view);
     expect(pieces).toHaveLength(4);
 
-    // 1. Empty Line 1: breathing room placeholder (5px for charWidth=10)
+    // 1. Empty Line 1: its real selected newline contributes 5px.
     expect(pieces[0]).toEqual({
       left: 0,
       top: 0,
@@ -649,7 +647,7 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
       height: 20,
     });
 
-    // 2. Short Line 2: width = 50px (5 chars * 10px) + 5px breathing room = 55px, strictly hugs text
+    // 2. Short Line 2: 5 selected characters plus its selected newline.
     expect(pieces[1]).toEqual({
       left: 0,
       top: 20,
@@ -657,7 +655,7 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
       height: 20,
     });
 
-    // 3. Empty Line 3: breathing room placeholder (5px for charWidth=10)
+    // 3. Empty Line 3: the same fixed hint width.
     expect(pieces[2]).toEqual({
       left: 0,
       top: 40,
@@ -665,11 +663,11 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
       height: 20,
     });
 
-    // 4. Long Line 4: width = 170px (from pos 8 to 25 = 17 chars * 10px) + 5px breathing room = 175px
+    // 4. The partial last line contains 17 selected characters, no selected newline.
     expect(pieces[3]).toEqual({
       left: 0,
       top: 60,
-      width: 175,
+      width: 170,
       height: 20,
     });
 
@@ -716,10 +714,10 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
     const pieces = buildVisualSelectionPieces(view);
     expect(pieces).toHaveLength(2);
 
-    // Line 1 piece must have width = 80px (8 chars including all 3 spaces) + 5px breathing room = 85px
+    // All three real trailing spaces and the selected newline remain visible.
     expect(pieces[0].width).toBe(85);
-    // Line 2 piece covers pos 9..12 (3 chars = 30px) + 5px breathing room = 35px
-    expect(pieces[1].width).toBe(35);
+    // The partial last line has no selected newline and receives no extra width.
+    expect(pieces[1].width).toBe(30);
   });
 
   it("keeps underlying document text and selection range intact during visual slicing", () => {
@@ -778,19 +776,19 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
     const pieces = buildVisualSelectionPieces(view);
     expect(pieces).toHaveLength(2);
 
-    // Segment 1: from 10 to 30 -> width = 200px (20 chars * 10px) + 5px breathing room = 205px
+    // A soft-wrap boundary adds no width to these 20 selected characters.
     expect(pieces[0]).toEqual({
       left: 100,
       top: 0,
-      width: 205,
+      width: 200,
       height: 20,
     });
 
-    // Segment 2: from 30 to 45 -> width = 150px (15 chars * 10px) + 5px breathing room = 155px
+    // Segment 2 contains 15 selected characters and no newline.
     expect(pieces[1]).toEqual({
       left: 0,
       top: 20,
-      width: 155,
+      width: 150,
       height: 20,
     });
   });
@@ -809,38 +807,70 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
     expect(marker.radii.bottomLeft).toBe(0);
   });
 
-  it("scales selection end breathing room and empty line placeholder width with defaultCharacterWidth", () => {
-    // When charWidth is 16: breathingRoom = max(3, round(0.5 * 16)) = 8px
-    const doc = "\ncode";
-    const lines: MockVisualLine[] = [
-      { from: 0, to: 0, top: 0, bottom: 20 },
-      { from: 1, to: 5, top: 20, bottom: 40 },
-    ];
-    const viewLarge = createMockGeometryView({
-      doc,
-      selection: { from: 0, to: 5 },
-      lines,
-      charWidth: 16,
+  it.each([
+    { name: "empty selected newline", doc: "\nnext", from: 0, to: 1, expected: [{ left: 0, width: 5 }] },
+    { name: "one space and newline", doc: " \nnext", from: 0, to: 2, expected: [{ left: 0, width: 15 }] },
+    { name: "line end without newline", doc: "a \nnext", from: 0, to: 2, expected: [{ left: 0, width: 20 }] },
+    { name: "only a real trailing space", doc: "a \nnext", from: 1, to: 2, expected: [{ left: 10, width: 10 }] },
+    { name: "text ending at EOF", doc: "a ", from: 0, to: 2, expected: [{ left: 0, width: 20 }] },
+    { name: "partial first and last lines", doc: "ab\nc ", from: 1, to: 4,
+      expected: [{ left: 10, width: 15 }, { left: 0, width: 10 }] },
+  ])("renders only real selected content plus selected newlines: $name", ({ doc, from, to, expected }) => {
+    const source = EditorState.create({ doc });
+    const lines = Array.from({ length: source.doc.lines }, (_, index) => {
+      const line = source.doc.line(index + 1);
+      return { from: line.from, to: line.to, top: index * 20, bottom: (index + 1) * 20 };
     });
-    expect(getSelectionBreathingRoom(viewLarge)).toBe(8);
-    const piecesLarge = buildVisualSelectionPieces(viewLarge);
-    expect(piecesLarge).toHaveLength(2);
-    expect(piecesLarge[0].width).toBe(8); // Empty line placeholder = 8px
-    expect(piecesLarge[1].width).toBe(4 * 16 + 8); // 64 + 8 = 72px
-
-    // When charWidth is 6: breathingRoom = max(3, round(0.5 * 6)) = 3px
-    const viewSmall = createMockGeometryView({
-      doc,
-      selection: { from: 0, to: 5 },
-      lines,
-      charWidth: 6,
-    });
-    expect(getSelectionBreathingRoom(viewSmall)).toBe(3);
-    const piecesSmall = buildVisualSelectionPieces(viewSmall);
-    expect(piecesSmall).toHaveLength(2);
-    expect(piecesSmall[0].width).toBe(3); // Empty line placeholder = 3px
-    expect(piecesSmall[1].width).toBe(4 * 6 + 3); // 24 + 3 = 27px
+    let forward: SelectionRect[] | undefined;
+    for (const [anchor, head] of [[from, to], [to, from]]) {
+      const view = createMockGeometryView({ doc, lines, charWidth: 10, selection: EditorSelection.single(anchor, head) });
+      const selection = view.state.selection;
+      const pieces = buildVisualSelectionPieces(view);
+      expect(pieces.map(p => ({ left: p.left, width: p.width }))).toEqual(expected);
+      if (forward) expect(pieces).toEqual(forward);
+      else forward = pieces;
+      expect(view.state.selection).toBe(selection);
+      expect(selection.main.anchor).toBe(anchor);
+      expect(selection.main.head).toBe(head);
+      expect(view.state.doc.toString()).toBe(doc);
+      expect(view.state.sliceDoc(selection.main.from, selection.main.to)).toBe(doc.slice(from, to));
+    }
   });
+
+  it("adds newline width only to the last visual segment of a wrapped logical line", () => {
+    const options = {
+      doc: "abcd\ne", lineWrapping: true,
+      lines: [{ from: 0, to: 4, top: 0, bottom: 40 }, { from: 5, to: 6, top: 40, bottom: 60 }],
+      wrapBoundaries: { 0: 2, 2: 4, 5: 6 },
+      segments: [
+        { from: 0, to: 2, top: 0, bottom: 20 },
+        { from: 2, to: 4, top: 20, bottom: 40 },
+        { from: 5, to: 6, top: 40, bottom: 60 },
+      ],
+    };
+    for (const selection of [EditorSelection.single(0, 6), EditorSelection.single(6, 0)]) {
+      expect(buildVisualSelectionPieces(createMockGeometryView({ ...options, selection })).map(p => p.width))
+        .toEqual([20, 25, 10]);
+    }
+  });
+
+  it.each([{ text: "a", charWidth: 6 }, { text: "中", charWidth: 24 }])(
+    "uses a 5px newline-only marker after $text without selecting extra characters", ({ text, charWidth }) => {
+      const view = createMockGeometryView({
+        doc: `${text}\nnext`, charWidth, selection: { from: 1, to: 2 },
+        lines: [
+          { from: 0, to: 1, top: 0, bottom: 20 },
+          { from: 2, to: 6, top: 20, bottom: 40 },
+        ],
+      });
+      const selection = view.state.selection;
+      expect(buildVisualSelectionPieces(view)).toEqual([
+        { left: charWidth, top: 0, width: 5, height: 20 },
+      ]);
+      expect(view.state.selection).toBe(selection);
+      expect(view.state.sliceDoc(selection.main.from, selection.main.to)).toBe("\n");
+    },
+  );
 
   it("uses assoc = 1 at wrap boundary without slicing UTF-16 surrogate pairs (emoji) and breaks safely if geometry stalls", () => {
     // Text: "abc \uD83D\uDE80 def" where \uD83D\uDE80 is a 2-unit emoji at [4, 6]
@@ -1014,7 +1044,7 @@ describe("roundedSelection - Visual Line Slicing & Middle Slab Elimination (Spec
       ...view, visibleRanges: [{ from: 5000, to: 5150 }],
     });
     expect(pieces.map(({ top, width }) => ({ top, width }))).toEqual([
-      { top: 0, width: 505 }, { top: 20, width: 505 }, { top: 40, width: 505 },
+      { top: 0, width: 500 }, { top: 20, width: 500 }, { top: 40, width: 500 },
     ]);
   });
 });

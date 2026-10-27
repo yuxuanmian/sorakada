@@ -17,7 +17,7 @@ import {
  * Implements 3px rounded corners for CodeMirror selection backgrounds.
  * Renders visual-line-by-visual-line selection backgrounds that hug actual text,
  * avoiding full-width middle slabs and right-side empty space fills on short lines.
- * Empty lines and selected newlines use the same breathing width as text ends.
+ * Only actually selected newline characters add a fixed 5 CSS px marker.
  *
  * Key constraints satisfied:
  * - 3px outer convex and inner concave corners (clamped at short steps)
@@ -25,7 +25,7 @@ import {
  * - Shared adjacent edges between rectangles stay flat (0px radius)
  * - Non-contiguous selections remain completely independent (all 4 corners rounded)
  * - Selection rectangles clip to each visible visual line's actual text extent
- * - Actual typed trailing spaces are fully covered; empty-line hints scale with text
+ * - Actual typed trailing spaces are fully covered; soft wraps add no width
  * - Zero modifications to selection semantics, cursors, motion, or search highlights
  * - Zero new dependencies, no Canvas/SVG overlays, no unbounded loops
  */
@@ -47,6 +47,9 @@ export interface CornerRadii {
 /** Standard radius in pixels for island selection corners (Spec 013 §5, A13). */
 export const DEFAULT_CORNER_RADIUS = 3;
 
+/** Visible width of a selected real newline, independent of font metrics. */
+export const SELECTED_NEWLINE_WIDTH = 5;
+
 /**
  * Maximum vertical distance between two rectangles to be considered touching/adjacent.
  * Bridges subpixel line heights and high-DPI scaling offsets (up to 1.5px).
@@ -66,21 +69,6 @@ export const ALIGN_X_TOLERANCE = 2.5;
  * the computation conservatively falls back to a flat (0px) seamless path.
  */
 export const MAX_ROUNDED_RECTS_BUDGET = 500;
-
-/**
- * Computes breathing room in pixels for selection ends and empty-line placeholders.
- * Defaults to ~0.5 * defaultCharacterWidth (Spec 013 §5, A13), clamped to minimum 3px.
- */
-export function getSelectionBreathingRoom(
-  view: EditorView | VisualSelectionTargetView,
-): number {
-  const charWidth = (view as { defaultCharacterWidth?: number })
-    .defaultCharacterWidth;
-  if (typeof charWidth === "number" && charWidth > 0) {
-    return Math.max(3, Math.round(0.5 * charWidth));
-  }
-  return 4;
-}
 
 /**
  * Computes corner radii for each rectangle in a selection based on local adjacency (Spec 013 §5, A13).
@@ -418,7 +406,6 @@ export interface VisualSelectionTargetView {
   visibleRanges?: readonly { from: number; to: number }[];
   viewportLineBlocks?: readonly { from: number; to: number }[];
   lineWrapping?: boolean;
-  defaultCharacterWidth?: number;
   moveToLineBoundary?: (
     range: SelectionRange,
     forward: boolean,
@@ -476,11 +463,10 @@ function piecesForSubRange(
   return [];
 }
 
-function pieceForEmptyLine(
+function pieceForSelectedNewline(
   view: EditorView | VisualSelectionTargetView,
   className: string,
   pos: number,
-  width: number,
 ): SelectionRect | null {
   try {
     const markers = RectangleMarker.forRange(
@@ -492,7 +478,7 @@ function pieceForEmptyLine(
       return {
         left: markers[0].left,
         top: markers[0].top,
-        width,
+        width: SELECTED_NEWLINE_WIDTH,
         height: markers[0].height,
       };
     }
@@ -506,7 +492,7 @@ function pieceForEmptyLine(
     return {
       left: coords.left,
       top: coords.top,
-      width,
+      width: SELECTED_NEWLINE_WIDTH,
       height: coords.bottom - coords.top,
     };
   }
@@ -518,7 +504,6 @@ interface SelectionLineGroup {
   from: number;
   to: number;
   pieces: SelectionRect[];
-  isEmptyLine?: boolean;
 }
 
 interface PreviousSelectionLine {
@@ -622,7 +607,6 @@ function buildVisualSelectionGeometry(
     }
   }
 
-  const breathingRoom = getSelectionBreathingRoom(view);
   const rects: SelectionRect[] = [];
   const drawnRanges = view.visibleRanges ?? [{ from: vpFrom, to: vpTo }];
   let previousGroups = new Map<SelectionRange, PreviousSelectionLine>();
@@ -658,80 +642,39 @@ function buildVisualSelectionGeometry(
 
       for (const range of view.state.selection.ranges) {
         if (range.empty) continue;
-        // The final empty line has no newline to select. Preserve only a
-        // backwards drag's real anchor there, not arbitrary exclusive ends.
-        const trailingAnchor = visFrom === visTo && visTo === view.state.doc.length &&
-          range.anchor === visTo && range.head < range.anchor;
-        if (range.to < visFrom || range.from > visTo) {
-          if (
-            !(visFrom === visTo && range.from <= visFrom && range.to > visTo)
-          ) {
-            continue;
-          }
-        }
+        if (range.to <= visFrom || range.from > visTo) continue;
 
         const subFrom = Math.max(range.from, visFrom);
         const subTo = Math.min(range.to, visTo);
+        // A soft-wrap boundary is not a character. The exclusive range end
+        // must pass a real logical-line terminator to earn its visible width.
+        const selectedNewline = range.from <= visTo && range.to > visTo &&
+          visTo < view.state.doc.length && view.state.doc.lineAt(visTo).to === visTo;
 
         if (subFrom < subTo) {
           const subRange = EditorSelection.range(subFrom, subTo);
           const rawPieces = piecesForSubRange(view, className, subRange);
           if (rawPieces.length > 0) {
+            if (selectedNewline) {
+              // Extend the visual end once, not every bidi fragment. No extra
+              // text padding is added on any other row or exclusive endpoint.
+              let endPiece = rawPieces[0];
+              for (const piece of rawPieces) {
+                if (piece.left + piece.width > endPiece.left + endPiece.width) endPiece = piece;
+              }
+              endPiece.width += SELECTED_NEWLINE_WIDTH;
+            }
             lineGroups.push({ range, from: subFrom, to: subTo, pieces: rawPieces });
           }
-        } else if (
-          (visFrom === visTo && range.from <= visFrom && range.to > visTo) ||
-          (subFrom === visTo && range.from === visTo && range.to > visTo) ||
-          trailingAnchor
-        ) {
-          const piece = pieceForEmptyLine(view, className, visTo, breathingRoom);
+        } else if (selectedNewline) {
+          const piece = pieceForSelectedNewline(view, className, visTo);
           if (piece) {
-            lineGroups.push({ range, from: subFrom, to: subTo, pieces: [piece], isEmptyLine: true });
+            lineGroups.push({ range, from: subFrom, to: subTo, pieces: [piece] });
           }
         }
       }
 
-      // Apply breathing room to each range's visual rightmost piece
       const allLinePieces = lineGroups.flatMap((g) => g.pieces);
-
-      for (const group of lineGroups) {
-        if (group.isEmptyLine) {
-          // Empty-line placeholders already have their width set to breathingRoom
-          continue;
-        }
-
-        // Find rightmost piece in this group on the current visual line
-        let rightmostIdx = 0;
-        let maxRight = group.pieces[0].left + group.pieces[0].width;
-        for (let k = 1; k < group.pieces.length; k++) {
-          const r = group.pieces[k].left + group.pieces[k].width;
-          if (r > maxRight) {
-            maxRight = r;
-            rightmostIdx = k;
-          }
-        }
-
-        const targetPiece = group.pieces[rightmostIdx];
-        const currentRight = targetPiece.left + targetPiece.width;
-
-        // Check distance to other pieces starting to the right on this visual line
-        let minGap = Infinity;
-        for (const other of allLinePieces) {
-          if (other === targetPiece) continue;
-          if (other.left >= currentRight) {
-            const gap = other.left - currentRight;
-            if (gap < minGap) minGap = gap;
-          }
-        }
-
-        let pad = breathingRoom;
-        if (minGap < Infinity) {
-          // Clamp pad so we do not close the gap or merge adjacent independent selections
-          pad = Math.min(breathingRoom, Math.max(0, minGap - ALIGN_X_TOLERANCE - 0.5));
-        }
-
-        targetPiece.width += pad;
-      }
 
       const currentGroups = new Map<SelectionRange, PreviousSelectionLine>();
       for (const group of lineGroups) {
@@ -918,7 +861,7 @@ const roundedSelectionTheme = EditorView.baseTheme({
 /**
  * Returns an extension enabling 3px island rounded corners on selection rectangles.
  * Renders visual-line-by-visual-line selection backgrounds that hug actual text,
- * avoiding full-width middle slabs, with text-scaled breathing room and empty-line hints.
+ * avoiding full-width middle slabs, with 5px markers only for selected real newlines.
  */
 export function roundedSelection(): Extension {
   return [roundedSelectionLayer, roundedSelectionTheme];

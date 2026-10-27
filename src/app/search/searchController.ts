@@ -53,7 +53,7 @@ export class SearchController {
     let query = this.state.query;
     let didPrefill = false;
 
-    if ((wasClosed || mode === "find") && this.editor.isReady()) {
+    if (this.editor.isReady()) {
       const range = this.editor.getCurrentMatchRange();
       const isSearchSelection =
         !wasClosed &&

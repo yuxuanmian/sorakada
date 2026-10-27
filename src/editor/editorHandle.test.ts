@@ -13,6 +13,7 @@ interface TestBridge {
   getState: () => EditorState;
   dispatchEdit: (from: number, to: number, insert: string) => void;
   dispatchSelection: (anchor: number, head?: number) => void;
+  dispatchedEffects: any[];
   view: {
     state: EditorState;
     dispatch: (tr: {
@@ -34,6 +35,7 @@ function createTestBridge(initialDoc = "", readOnly = false): TestBridge {
     extensions.push(EditorState.readOnly.of(true));
   }
   let state = createEditorState(initialDoc, extensions);
+  const dispatchedEffects: any[] = [];
 
   const view = {
     get state() {
@@ -47,6 +49,13 @@ function createTestBridge(initialDoc = "", readOnly = false): TestBridge {
       userEvent?: string;
       state?: EditorState;
     }) => {
+      if (tr.effects) {
+        if (Array.isArray(tr.effects)) {
+          dispatchedEffects.push(...tr.effects);
+        } else {
+          dispatchedEffects.push(tr.effects);
+        }
+      }
       state = tr.state ?? state.update(tr as Parameters<EditorState["update"]>[0]).state;
     },
     focus: () => {},
@@ -75,6 +84,7 @@ function createTestBridge(initialDoc = "", readOnly = false): TestBridge {
         selection: EditorSelection.single(anchor, head),
       }).state;
     },
+    dispatchedEffects,
     view,
   };
 }
@@ -419,6 +429,69 @@ describe("EditorHandle search & bridge contracts", () => {
       expect(getState().facet(editorLanguageFacet).filename).toBeNull();
       expect(getState().facet(editorLanguageFacet).name).toBeNull();
       expect(getState().doc.toString()).toBe("print('hello')");
+    });
+  });
+
+  describe("Search navigation scrollIntoView effect range and centering (2026-10-27)", () => {
+    it("dispatches full range with x: center and y: center on selectNearestMatch", () => {
+      const { handle, dispatchedEffects } = createTestBridge("hello world hello");
+      handle.setSearch("world", true, false);
+      handle.selectNearestMatch();
+      const scrollEffect = dispatchedEffects.find(
+        (e: any) => e.value && e.value.range && e.value.x === "center" && e.value.y === "center",
+      );
+      expect(scrollEffect).toBeDefined();
+      expect(scrollEffect.value.range.from).toBe(6);
+      expect(scrollEffect.value.range.to).toBe(11);
+      expect(scrollEffect.value.x).toBe("center");
+      expect(scrollEffect.value.y).toBe("center");
+    });
+
+    it("dispatches full range with x: center and y: center on findNext", () => {
+      const { handle, dispatchedEffects } = createTestBridge("apple banana apple");
+      handle.setSearch("banana", true, false);
+      handle.findNext();
+      const scrollEffect = dispatchedEffects.find(
+        (e: any) => e.value && e.value.range && e.value.x === "center" && e.value.y === "center",
+      );
+      expect(scrollEffect).toBeDefined();
+      expect(scrollEffect.value.range.from).toBe(6);
+      expect(scrollEffect.value.range.to).toBe(12);
+      expect(scrollEffect.value.x).toBe("center");
+      expect(scrollEffect.value.y).toBe("center");
+    });
+
+    it("dispatches full range with x: center and y: center on findPrevious", () => {
+      const { handle, dispatchedEffects, dispatchSelection } = createTestBridge("apple banana apple");
+      handle.setSearch("apple", true, false);
+      // Place selection at the start of the second match (13..18)
+      dispatchSelection(13, 13);
+      handle.findPrevious();
+      const scrollEffect = dispatchedEffects.find(
+        (e: any) => e.value && e.value.range && e.value.x === "center" && e.value.y === "center",
+      );
+      expect(scrollEffect).toBeDefined();
+      expect(scrollEffect.value.range.from).toBe(0);
+      expect(scrollEffect.value.range.to).toBe(5);
+      expect(scrollEffect.value.x).toBe("center");
+      expect(scrollEffect.value.y).toBe("center");
+    });
+
+    it("dispatches full range with x: center and y: center on replaceNext", () => {
+      const { handle, dispatchedEffects, dispatchSelection } = createTestBridge("cat and cat and cat");
+      handle.setSearch("cat", true, false, "dog");
+      // Select the first match first
+      dispatchSelection(0, 3);
+      handle.replaceNext("cat", "dog", true, false);
+      const scrollEffect = dispatchedEffects.find(
+        (e: any) => e.value && e.value.range && e.value.x === "center" && e.value.y === "center",
+      );
+      expect(scrollEffect).toBeDefined();
+      // First match "cat" at 0..3 is replaced with "dog", advancing to second "cat" at 8..11
+      expect(scrollEffect.value.range.from).toBe(8);
+      expect(scrollEffect.value.range.to).toBe(11);
+      expect(scrollEffect.value.x).toBe("center");
+      expect(scrollEffect.value.y).toBe("center");
     });
   });
 });

@@ -31,8 +31,8 @@ export interface SearchReplaceBarProps {
  */
 export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
   const { t } = useTranslation();
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  const replaceInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLTextAreaElement>(null);
+  const replaceInputRef = useRef<HTMLTextAreaElement>(null);
 
   const [queryDraft, setQueryDraft] = useState(state.query);
   const isQueryComposingRef = useRef(false);
@@ -78,7 +78,7 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
     return null;
   }
 
-  const handleQueryChange = (e: ChangeEvent<HTMLInputElement>): void => {
+  const handleQueryChange = (e: ChangeEvent<HTMLTextAreaElement>): void => {
     const nextVal = e.target.value;
     setQueryDraft(nextVal);
     if (!isQueryComposingRef.current) {
@@ -91,7 +91,7 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
   };
 
   const handleQueryCompositionEnd = (
-    e: CompositionEvent<HTMLInputElement>,
+    e: CompositionEvent<HTMLTextAreaElement>,
   ): void => {
     isQueryComposingRef.current = false;
     const finalVal = e.currentTarget.value;
@@ -99,7 +99,7 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
     controller.setQuery(finalVal);
   };
 
-  const handleSearchKeyDown = (e: KeyboardEvent<HTMLInputElement>): void => {
+  const handleSearchKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (isImeKeyboardEvent(e, isQueryComposingRef.current)) {
       // During IME composition, stop propagation so window listeners (like EscapeManager)
       // do not see the key event, but do NOT preventDefault so the IME can natively process Enter/Escape.
@@ -132,7 +132,7 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
     }
   };
 
-  const handleReplacementChange = (e: ChangeEvent<HTMLInputElement>): void => {
+  const handleReplacementChange = (e: ChangeEvent<HTMLTextAreaElement>): void => {
     const nextVal = e.target.value;
     setReplacementDraft(nextVal);
     if (!isReplacementComposingRef.current) {
@@ -145,7 +145,7 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
   };
 
   const handleReplacementCompositionEnd = (
-    e: CompositionEvent<HTMLInputElement>,
+    e: CompositionEvent<HTMLTextAreaElement>,
   ): void => {
     isReplacementComposingRef.current = false;
     const finalVal = e.currentTarget.value;
@@ -153,7 +153,7 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
     controller.setReplacement(finalVal);
   };
 
-  const handleReplaceKeyDown = (e: KeyboardEvent<HTMLInputElement>): void => {
+  const handleReplaceKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (isImeKeyboardEvent(e, isReplacementComposingRef.current)) {
       e.stopPropagation();
       return;
@@ -210,10 +210,10 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
             state.error ? "search-replace-bar__input-wrapper--error" : ""
           }`}
         >
-          <input
+          <textarea
             ref={searchInputRef}
             className="search-replace-bar__input"
-            type="text"
+            rows={1}
             value={isQueryComposingRef.current ? queryDraft : state.query}
             onChange={handleQueryChange}
             onCompositionStart={handleQueryCompositionStart}
@@ -302,10 +302,10 @@ export function SearchReplaceBar({ controller, state }: SearchReplaceBarProps) {
           <span className="search-replace-bar__icon" aria-hidden="true" />
 
           <div className="search-replace-bar__input-wrapper">
-            <input
+            <textarea
               ref={replaceInputRef}
               className="search-replace-bar__input"
-              type="text"
+              rows={1}
               value={
                 isReplacementComposingRef.current
                   ? replacementDraft

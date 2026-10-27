@@ -156,21 +156,32 @@ describe("normalizeSelectionForPrefill", () => {
     );
   });
 
-  it("rejects empty or whitespace-only text", () => {
+  it("rejects empty text but accepts whitespace-only text", () => {
     expect(normalizeSelectionForPrefill("")).toBeNull();
-    expect(normalizeSelectionForPrefill("   ")).toBeNull();
+    expect(normalizeSelectionForPrefill("   ")).toBe("   ");
+    expect(normalizeSelectionForPrefill("\t\t")).toBe("\t\t");
   });
 
-  it("rejects multi-line text", () => {
-    expect(normalizeSelectionForPrefill("hello\nworld")).toBeNull();
-    expect(normalizeSelectionForPrefill("hello\r\nworld")).toBeNull();
+  it("accepts multi-line text with newlines", () => {
+    expect(normalizeSelectionForPrefill("hello\nworld")).toBe("hello\nworld");
+    expect(normalizeSelectionForPrefill("hello\r\nworld")).toBe("hello\r\nworld");
+    expect(normalizeSelectionForPrefill("\n")).toBe("\n");
+    expect(normalizeSelectionForPrefill("\r\n\r\n")).toBe("\r\n\r\n");
   });
 
-  it("rejects text longer than 200 characters", () => {
+  it("accepts text longer than 200 characters without truncation", () => {
     const longText = "a".repeat(201);
-    expect(normalizeSelectionForPrefill(longText)).toBeNull();
+    expect(normalizeSelectionForPrefill(longText)).toBe(longText);
     const exactly200 = "a".repeat(200);
     expect(normalizeSelectionForPrefill(exactly200)).toBe(exactly200);
+    const multilineLong = "line\n".repeat(100);
+    expect(normalizeSelectionForPrefill(multilineLong)).toBe(multilineLong);
+  });
+
+  it("escapes regex special characters in multiline selections while preserving newlines", () => {
+    expect(normalizeSelectionForPrefill("item.foo[0]*\nbar(1)?", true)).toBe(
+      "item\\.foo\\[0\\]\\*\nbar\\(1\\)\\?",
+    );
   });
 });
 
@@ -242,6 +253,7 @@ describe("SearchController", () => {
     const controller = new SearchController(editor as unknown as EditorHandle);
 
     controller.open("find");
+    editor.currentMatchRange = { from: 10, to: 20 };
     controller.setQuery("alpha");
     controller.setReplacement("beta");
 
@@ -254,6 +266,108 @@ describe("SearchController", () => {
     expect(controller.getState().mode).toBe("replace");
     expect(controller.getState().query).toBe("alpha");
     expect(controller.getState().replacement).toBe("beta");
+  });
+
+  it("pre-fills multiline query when selection contains newlines and opens in find mode", () => {
+    const editor = new MockEditorHandle();
+    editor.selectedText = "function test() {\n  return 42;\n}";
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    controller.open("find");
+
+    expect(controller.getState().mode).toBe("find");
+    expect(controller.getState().query).toBe("function test() {\n  return 42;\n}");
+    expect(editor.lastSearchQuery).toBe("function test() {\n  return 42;\n}");
+  });
+
+  it("pre-fills multiline query when selection contains newlines and opens in replace mode", () => {
+    const editor = new MockEditorHandle();
+    editor.selectedText = "firstLine\nsecondLine";
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    controller.open("replace");
+
+    expect(controller.getState().mode).toBe("replace");
+    expect(controller.getState().query).toBe("firstLine\nsecondLine");
+    expect(editor.lastSearchQuery).toBe("firstLine\nsecondLine");
+  });
+
+  it("prefills a new manual multiline selection when Replace is invoked from Find mode", () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+    controller.open("find");
+    editor.currentMatchRange = { from: 0, to: 4 };
+    controller.setQuery("item");
+
+    editor.currentMatchRange = { from: 20, to: 45 };
+    editor.cursorHead = 45;
+    editor.selectedText = "const a = 1;\nconst b = 2;";
+    controller.onEditorStateUpdate(false);
+    const focusBefore = controller.getState().focusRequestId;
+    controller.open("replace");
+
+    expect(controller.getState()).toMatchObject({
+      mode: "replace",
+      query: "const a = 1;\nconst b = 2;",
+      focusRequestId: focusBefore + 1,
+    });
+    expect(editor.lastSearchQuery).toBe("const a = 1;\nconst b = 2;");
+    controller.close();
+  });
+
+  it("prefills a new manual multiline selection on repeated Replace (Ctrl+R) when already open", () => {
+    const editor = new MockEditorHandle();
+    const controller = new SearchController(editor as unknown as EditorHandle);
+    controller.open("replace");
+    editor.currentMatchRange = { from: 0, to: 4 };
+    controller.setQuery("item");
+    controller.setReplacement("rep");
+
+    editor.currentMatchRange = { from: 30, to: 55 };
+    editor.cursorHead = 55;
+    editor.selectedText = "alpha\nbeta\ngamma";
+    controller.onEditorStateUpdate(false);
+    const focusBefore = controller.getState().focusRequestId;
+    controller.open("replace");
+
+    expect(controller.getState()).toMatchObject({
+      mode: "replace",
+      query: "alpha\nbeta\ngamma",
+      replacement: "rep",
+      focusRequestId: focusBefore + 1,
+    });
+    expect(editor.lastSearchQuery).toBe("alpha\nbeta\ngamma");
+    controller.close();
+  });
+
+  it("escapes special regex characters in multiline selection while keeping newlines in regex mode", () => {
+    const editor = new MockEditorHandle();
+    editor.selectedText = "foo.bar[0]*\nnext.line(1)+";
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    controller.open("find");
+    controller.toggleRegex();
+    controller.close();
+
+    controller.open("find");
+    expect(controller.getState().query).toBe("foo\\.bar\\[0\\]\\*\nnext\\.line\\(1\\)\\+");
+    expect(editor.lastSearchQuery).toBe("foo\\.bar\\[0\\]\\*\nnext\\.line\\(1\\)\\+");
+  });
+
+  it("accepts selections with pure newlines and pure whitespace", () => {
+    const editor = new MockEditorHandle();
+    editor.selectedText = "\n\n";
+    const controller = new SearchController(editor as unknown as EditorHandle);
+
+    controller.open("find");
+    expect(controller.getState().query).toBe("\n\n");
+    expect(editor.lastSearchQuery).toBe("\n\n");
+
+    editor.currentMatchRange = { from: 10, to: 13 };
+    editor.selectedText = "   ";
+    controller.onEditorStateUpdate(false);
+    controller.open("find");
+    expect(controller.getState().query).toBe("   ");
   });
 
   it.each([false, true])("prefills a new manual selection on repeated Find (regex=%s)", (isRegex) => {

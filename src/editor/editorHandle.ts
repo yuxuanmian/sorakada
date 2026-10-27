@@ -445,7 +445,10 @@ class EditorHandleImpl implements EditorHandle {
     if (target) {
       view.dispatch({
         selection: { anchor: target.match.from, head: target.match.to },
-        effects: EditorView.scrollIntoView(target.match.from, { y: "center" }),
+        effects: EditorView.scrollIntoView(
+          EditorSelection.range(target.match.from, target.match.to),
+          { y: "center", x: "center" },
+        ),
         annotations: searchMotionAnnotation.of(true),
         userEvent: "select.search",
       });
@@ -482,7 +485,10 @@ class EditorHandleImpl implements EditorHandle {
     if (found) {
       view.dispatch({
         selection: { anchor: found.match.from, head: found.match.to },
-        effects: EditorView.scrollIntoView(found.match.from, { y: "center" }),
+        effects: EditorView.scrollIntoView(
+          EditorSelection.range(found.match.from, found.match.to),
+          { y: "center", x: "center" },
+        ),
         annotations: searchMotionAnnotation.of(true),
         userEvent: "select.search",
       });
@@ -511,7 +517,10 @@ class EditorHandleImpl implements EditorHandle {
     if (found) {
       view.dispatch({
         selection: { anchor: found.match.from, head: found.match.to },
-        effects: EditorView.scrollIntoView(found.match.from, { y: "center" }),
+        effects: EditorView.scrollIntoView(
+          EditorSelection.range(found.match.from, found.match.to),
+          { y: "center", x: "center" },
+        ),
         annotations: searchMotionAnnotation.of(true),
         userEvent: "select.search",
       });
@@ -587,7 +596,10 @@ class EditorHandleImpl implements EditorHandle {
         insert: insertText,
       },
       selection: { anchor: nextAnchor, head: nextHead },
-      effects: EditorView.scrollIntoView(nextAnchor, { y: "center" }),
+      effects: EditorView.scrollIntoView(
+        EditorSelection.range(nextAnchor, nextHead),
+        { y: "center", x: "center" },
+      ),
       annotations: [isolateHistory.of("full"), searchMotionAnnotation.of(true)],
       userEvent: "input.replace",
     });

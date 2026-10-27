@@ -9,6 +9,7 @@ import {
   isAltShiftGesture,
   isColumnSelectionGesture,
 } from "./columnSelection";
+import { dragSelectionReset } from "./dragSelection";
 
 export { cancelColumnSelection, isColumnSelectionGesture, isAltShiftGesture };
 
@@ -148,5 +149,6 @@ export function multiCursorMouse(): Extension {
     emptyLineMouseSelectionStyle(),
     multiCursorKeymap,
     columnSelectionLifecyclePlugin,
+    dragSelectionReset(),
   ];
 }

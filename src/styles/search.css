@@ -79,8 +79,17 @@
   outline: none;
   font-family: var(--font-editor);
   font-size: var(--font-size-ui);
+  line-height: 20px;
   color: var(--color-text);
   box-sizing: border-box;
+  resize: none;
+  white-space: pre;
+  overflow: hidden;
+  scrollbar-width: none;
+}
+
+.search-replace-bar__input::-webkit-scrollbar {
+  display: none;
 }
 
 .search-replace-bar__input::placeholder {
