@@ -27,8 +27,10 @@ import { Editor } from "../editor/Editor";
 import { createEditorHandle } from "../editor/editorHandle";
 import { setEditorMotionEnabled } from "../editor/editorMotion";
 import { nativeFileDialogService } from "../services/fileDialogs";
+import { tauriExternalOpenService } from "../services/externalOpen";
 import { tauriFileService } from "../services/fileService";
 import { tauriFilesystemWatcher } from "../services/filesystemWatcher";
+import { appOperationActivity } from "../services/operationActivity";
 import { nativeWorkspaceDialogService } from "../services/workspaceDialogs";
 import { tauriWorkspaceFileService } from "../services/workspaceFileService";
 import type { OperationErrorContext } from "../services/errorContext";
@@ -46,6 +48,8 @@ import type {
 import { InternalFsOperationGuard } from "./document/internalFsOperationGuard";
 import { OpenedDocumentWatchCoordinator } from "./document/openedDocumentWatchCoordinator";
 import { processDroppedPaths } from "./dragdrop/fileDropController";
+import { createExternalOpenBlocking } from "./externalOpen/externalOpenBlocking";
+import { ExternalOpenConsumer } from "./externalOpen/externalOpenConsumer";
 import { Explorer } from "./explorer/Explorer";
 import { ExplorerActions } from "./explorer/explorerActions";
 import { ExplorerController } from "./explorer/explorerController";
@@ -166,6 +170,22 @@ export function App() {
         onError: reportError,
       }),
   );
+  const [externalOpenBlocking] = useState(() =>
+    createExternalOpenBlocking({
+      dialogs: dialogManager,
+      activity: appOperationActivity,
+      exit: exitCoordinator,
+    }),
+  );
+  const [externalOpenConsumer] = useState(
+    () =>
+      new ExternalOpenConsumer({
+        service: tauriExternalOpenService,
+        documents: manager,
+        isBlocked: externalOpenBlocking.isBlocked,
+        onError: reportError,
+      }),
+  );
 
   const isDialogActive = useSyncExternalStore(
     dialogManager.subscribe,
@@ -178,17 +198,19 @@ export function App() {
   const isModalActive = isDialogActive || isExiting;
 
   const isInteractionBlocked = useCallback((): boolean => {
-    return dialogManager.isActive() || exitCoordinator.isExiting();
+    return (
+      dialogManager.isActive() ||
+      exitCoordinator.isExiting() ||
+      exitCoordinator.isExitCommitted()
+    );
   }, [exitCoordinator]);
 
   useEffect(() => {
-    registry.setExecutionGuard(
-      () => !dialogManager.isActive() && !exitCoordinator.isExiting(),
-    );
+    registry.setExecutionGuard(() => !isInteractionBlocked());
     return () => {
       registry.setExecutionGuard(null);
     };
-  }, [registry, exitCoordinator]);
+  }, [isInteractionBlocked, registry]);
   const [watcher] = useState(
     () =>
       new OpenedDocumentWatchCoordinator({
@@ -359,7 +381,7 @@ export function App() {
    */
   const selectTab = useCallback(
     (id: DocumentId): void => {
-      if (dialogManager.isActive() || exitCoordinator.isExiting()) {
+      if (isInteractionBlocked()) {
         return;
       }
       if (isFixtureDocumentId(id)) {
@@ -370,12 +392,12 @@ export function App() {
       }
       manager.selectDocument(id);
     },
-    [manager],
+    [isInteractionBlocked, manager],
   );
 
   const closeTab = useCallback(
     (id: DocumentId): void => {
-      if (dialogManager.isActive() || exitCoordinator.isExiting()) {
+      if (isInteractionBlocked()) {
         return;
       }
       if (isFixtureDocumentId(id)) {
@@ -384,9 +406,11 @@ export function App() {
         );
         return;
       }
-      void manager.closeDocument(id);
+      void appOperationActivity
+        .run(() => manager.closeDocument(id))
+        .catch(reportError);
     },
-    [manager],
+    [isInteractionBlocked, manager],
   );
 
   // The UI owners publish through their own subscribe API; components never touch
@@ -523,7 +547,7 @@ export function App() {
       }),
       registry.register("file.open", {
         execute: async () => {
-          await manager.openFromDialog();
+          await appOperationActivity.run(() => manager.openFromDialog());
         },
       }),
       registry.register("file.save", {
@@ -539,7 +563,9 @@ export function App() {
         execute: async () => {
           const id = manager.getActiveDocumentId();
           if (id !== null) {
-            await manager.saveDocumentAs(id);
+            await appOperationActivity.run(() =>
+              manager.saveDocumentAs(id),
+            );
           }
         },
         isEnabled: hasActiveDocument,
@@ -548,7 +574,9 @@ export function App() {
         execute: async () => {
           const id = manager.getActiveDocumentId();
           if (id !== null) {
-            await manager.closeDocument(id);
+            await appOperationActivity.run(() =>
+              manager.closeDocument(id),
+            );
           }
         },
         isEnabled: hasActiveDocument,
@@ -601,7 +629,9 @@ export function App() {
       }),
       registry.register("workspace.openFolder", {
         execute: async () => {
-          const result = await workContext.openFromDialog();
+          const result = await appOperationActivity.run(() =>
+            workContext.openFromDialog(),
+          );
           if (result.status === "opened" || result.status === "unchanged") {
             // An equivalent root is a no-op inside the controller, so the
             // user's expansion and selection survive a duplicate request.
@@ -635,7 +665,8 @@ export function App() {
         isEnabled: () => actions.isRenameAvailable(),
       }),
       registry.register("explorer.delete", {
-        execute: () => actions.delete(),
+        execute: () =>
+          appOperationActivity.run(() => actions.delete()),
         isEnabled: () => actions.isDeleteAvailable(),
       }),
       registry.register("explorer.refresh", {
@@ -851,6 +882,7 @@ export function App() {
     let disposeWindow: (() => void) | null = null;
     let disposeDragDrop: (() => void) | null = null;
     let disposeFocus: (() => void) | null = null;
+    let unsubscribeExternalBlocking: (() => void) | null = null;
 
     const installNativeSurfaces = async (): Promise<void> => {
       if (!isTauriRuntime()) {
@@ -921,6 +953,16 @@ export function App() {
       disposeWindow = stopWindowLifecycle;
       disposeDragDrop = unlistenDragDrop;
       disposeFocus = unlistenFocus;
+
+      if (appWindow.label === "main") {
+        // State subscriptions exist before the first authoritative peek. This
+        // starts without waiting for CodeMirror, so cold-start files can create
+        // the first editor view through the ordinary open pipeline.
+        unsubscribeExternalBlocking = externalOpenBlocking.subscribe(() => {
+          externalOpenConsumer.notifyCanProcess();
+        });
+        void externalOpenConsumer.start();
+      }
     };
 
     // A native surface that cannot be installed is reported through the existing
@@ -935,6 +977,8 @@ export function App() {
       window.removeEventListener("keydown", onEscapeKeyDown, true);
       unregisterEditorEscape();
       editorHandle.setStateUpdateListener(null);
+      externalOpenConsumer.stop();
+      unsubscribeExternalBlocking?.();
       unsubscribeDocuments();
       unsubscribeExplorer();
       unsubscribeWorkspace();
@@ -961,6 +1005,8 @@ export function App() {
     editorHandle,
     escapeManager,
     exitCoordinator,
+    externalOpenBlocking,
+    externalOpenConsumer,
     isInteractionBlocked,
     manager,
     preferencesStore,

@@ -9,9 +9,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 }));
 
 import {
+  createNativeWorkspaceDialogService,
   deleteConfirmationText,
   nativeWorkspaceDialogService,
 } from "./workspaceDialogs";
+import { OperationActivityCounter } from "./operationActivity";
 import { dialogManager } from "../ui/dialog/dialogManager";
 import { notificationManager } from "../ui/notification/notificationManager";
 
@@ -67,6 +69,24 @@ describe("nativeWorkspaceDialogService.pickWorkspaceFolder", () => {
   it("returns null when dismissed", async () => {
     openMock.mockResolvedValue(null);
     await expect(nativeWorkspaceDialogService.pickWorkspaceFolder()).resolves.toBeNull();
+  });
+
+  it("holds operation activity until the folder picker settles", async () => {
+    let resolvePicker: (value: string | null) => void = () => {};
+    openMock.mockReturnValue(
+      new Promise<string | null>((resolve) => {
+        resolvePicker = resolve;
+      }),
+    );
+    const activity = new OperationActivityCounter();
+    const service = createNativeWorkspaceDialogService(activity);
+
+    const picking = service.pickWorkspaceFolder();
+    expect(activity.isActive()).toBe(true);
+
+    resolvePicker(null);
+    await expect(picking).resolves.toBeNull();
+    expect(activity.isActive()).toBe(false);
   });
 });
 

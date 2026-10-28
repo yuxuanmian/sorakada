@@ -78,7 +78,7 @@ describe("Tab gestures reach the document manager only through the fixture guard
     const closeTab = sliceBetween(
       app,
       "const closeTab = useCallback(",
-      "[manager],\n  );",
+      "\n\n  // The UI owners",
     );
     const guard = closeTab.indexOf("isFixtureDocumentId(id)");
     const manager = closeTab.indexOf("manager.closeDocument(");

@@ -39,13 +39,59 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "txt",
+          "text",
+          "log",
+          "md",
+          "markdown",
+          "json",
+          "jsonc",
+          "xml",
+          "yaml",
+          "yml",
+          "ini",
+          "cfg",
+          "conf",
+          "properties",
+          "toml",
+          "csv",
+          "c",
+          "h",
+          "cpp",
+          "hpp",
+          "java",
+          "kt",
+          "rs",
+          "go",
+          "py",
+          "js",
+          "jsx",
+          "ts",
+          "tsx",
+          "html",
+          "css",
+          "scss",
+          "sql",
+          "sh",
+          "bat",
+          "cmd",
+          "ps1"
+        ],
+        "name": "Sorakada.Text.1",
+        "description": "Sorakada text, code, and configuration file"
+      }
+    ],
     "windows": {
       "nsis": {
         "installMode": "currentUser",
         "languages": [
           "SimpChinese"
         ],
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerHooks": "nsis/file-associations.nsh"
       }
     }
   }
