@@ -248,3 +248,56 @@ describe("searchEngine transaction & cursor contracts", () => {
     expect(pluginInstance.decorations.size).toBe(0);
   });
 });
+describe("multiline search and replace pipeline", () => {
+  it("finds multiline literal matches across newlines", () => {
+    const doc = "alpha\nbeta\ngamma\nalpha\nbeta";
+    const query = "alpha\nbeta";
+    const matches = findAllMatches(doc, query, true, false);
+    expect(matches.map(m => [m.from, m.to])).toEqual([
+      [0, 10],
+      [17, 27],
+    ]);
+  });
+
+  it("finds multiline matches containing punctuation literally", () => {
+    const doc = "function run() {\n  return a[0] + 1;\n}";
+    const query = "run() {\n  return a[0]";
+    const matches = findAllMatches(doc, query, true, false);
+    expect(matches.length).toBe(1);
+    expect(doc.slice(matches[0].from, matches[0].to)).toBe(query);
+  });
+
+  it("finds multiline regex matches matching across line boundaries", () => {
+    const doc = "section 1:\n  data A\nsection 2:\n  data B";
+    const query = "section \\d+:\\n\\s+data [A-Z]";
+    const matches = findAllMatches(doc, query, true, true);
+    expect(matches.length).toBe(2);
+    expect(doc.slice(matches[0].from, matches[0].to)).toBe("section 1:\n  data A");
+    expect(doc.slice(matches[1].from, matches[1].to)).toBe("section 2:\n  data B");
+  });
+
+  it("handles multiline replacement templates with and without capture groups", () => {
+    const literalReplaced = computeReplacement("lineA\nlineB", ["match"], false);
+    expect(literalReplaced).toBe("lineA\nlineB");
+
+    const regexReplaced = computeReplacement("line1:\n$1\nline2:\n$2", ["match", "val1", "val2"], true);
+    expect(regexReplaced).toBe("line1:\nval1\nline2:\nval2");
+  });
+
+  it("aligns CodeMirror SearchCursor and SearchQuery with searchEngine multiline results", () => {
+    const docText = "start\nitem 1\nitem 2\nend";
+    const state = createEditorState(docText);
+    const query = "item 1\nitem 2";
+
+    const cmMatches = findAllMatches(docText, query, true, false);
+    expect(cmMatches.length).toBe(1);
+    expect(cmMatches[0].from).toBe(6);
+    expect(cmMatches[0].to).toBe(19);
+
+    const cursor = new SearchCursor(state.doc, query, 0, state.doc.length);
+    const next = cursor.next();
+    expect(next.done).toBe(false);
+    expect(next.value.from).toBe(6);
+    expect(next.value.to).toBe(19);
+  });
+});

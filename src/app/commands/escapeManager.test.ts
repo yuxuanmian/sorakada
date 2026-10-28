@@ -118,4 +118,127 @@ describe("EscapeManager hierarchical dismissal", () => {
     expect(escEvent.stopPropagation).toHaveBeenCalled();
     expect(toolClosed).toBe(true);
   });
+
+  it("dismisses through the full hierarchy: Modal -> Popup -> Tool -> MultiSelection -> MainSelection -> Cursor", () => {
+    const manager = createEscapeManager();
+    const dismissed: string[] = [];
+
+    let modalOpen = true;
+    let menuPopupOpen = true;
+    let searchOpen = true;
+    let selectionRanges = 3;
+    let hasSelectedText = true;
+    let editorHasFocus = true;
+
+    // Priority 40: Modal
+    const unregisterModal = manager.register(ESCAPE_PRIORITY.MODAL, () => {
+      if (modalOpen) {
+        modalOpen = false;
+        dismissed.push("modal");
+        unregisterModal();
+        return true;
+      }
+      return false;
+    });
+
+    // Priority 30: Popup (Menu/Context Menu/Popover)
+    const unregisterPopup = manager.register(ESCAPE_PRIORITY.POPUP, () => {
+      if (menuPopupOpen) {
+        menuPopupOpen = false;
+        dismissed.push("popup");
+        unregisterPopup();
+        return true;
+      }
+      return false;
+    });
+
+    // Priority 20: Search bar
+    const unregisterSearch = manager.register(ESCAPE_PRIORITY.TOOL, () => {
+      if (searchOpen) {
+        searchOpen = false;
+        dismissed.push("search");
+        unregisterSearch();
+        return true;
+      }
+      return false;
+    });
+
+    // Priority 0: Editor selection simplification
+    manager.register(ESCAPE_PRIORITY.EDITOR, () => {
+      if (!editorHasFocus) {
+        return false;
+      }
+      if (selectionRanges > 1) {
+        selectionRanges = 1;
+        dismissed.push("collapse-to-main");
+        return true;
+      }
+      if (hasSelectedText) {
+        hasSelectedText = false;
+        dismissed.push("collapse-to-cursor");
+        return true;
+      }
+      return false;
+    });
+
+    // Step 1: Escape closes modal (priority 40), leaving popup/tool/editor untouched
+    expect(manager.dispatch()).toBe(true);
+    expect(dismissed).toEqual(["modal"]);
+
+    // Step 2: Escape closes menu/popup (priority 30), leaving search/editor untouched
+    expect(manager.dispatch()).toBe(true);
+    expect(dismissed).toEqual(["modal", "popup"]);
+
+    // Step 3: Escape closes search bar (priority 20), leaving editor untouched
+    expect(manager.dispatch()).toBe(true);
+    expect(dismissed).toEqual(["modal", "popup", "search"]);
+
+    // Step 4: When editor lacks focus, editor escape does not consume (e.g. Explorer inline input active)
+    editorHasFocus = false;
+    expect(manager.dispatch()).toBe(false);
+    expect(dismissed).toEqual(["modal", "popup", "search"]);
+
+    // Step 5: When editor has focus, collapses multiple selections to main
+    editorHasFocus = true;
+    expect(manager.dispatch()).toBe(true);
+    expect(dismissed).toEqual(["modal", "popup", "search", "collapse-to-main"]);
+
+    // Step 6: Escape collapses main selection to cursor
+    expect(manager.dispatch()).toBe(true);
+    expect(dismissed).toEqual(["modal", "popup", "search", "collapse-to-main", "collapse-to-cursor"]);
+
+    // Step 7: Escape on empty cursor returns false
+    expect(manager.dispatch()).toBe(false);
+    expect(dismissed).toEqual(["modal", "popup", "search", "collapse-to-main", "collapse-to-cursor"]);
+  });
+
+  it("dismisses nested submenus before parent menu when registered dynamically", () => {
+    const manager = createEscapeManager();
+    const closed: string[] = [];
+
+    // Parent menu opens
+    const unregisterParent = manager.register(ESCAPE_PRIORITY.POPUP, () => {
+      closed.push("parent-menu");
+      unregisterParent();
+      return true;
+    });
+
+    // Submenu opens afterwards
+    const unregisterSubmenu = manager.register(ESCAPE_PRIORITY.POPUP, () => {
+      closed.push("sub-menu");
+      unregisterSubmenu();
+      return true;
+    });
+
+    // 1st Esc: closes submenu
+    expect(manager.dispatch()).toBe(true);
+    expect(closed).toEqual(["sub-menu"]);
+
+    // 2nd Esc: closes parent menu
+    expect(manager.dispatch()).toBe(true);
+    expect(closed).toEqual(["sub-menu", "parent-menu"]);
+
+    // 3rd Esc: nothing left to close
+    expect(manager.dispatch()).toBe(false);
+  });
 });

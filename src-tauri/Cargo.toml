@@ -20,6 +20,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "=2.4.5"
 serde = { version = "1", features = ["derive"] }
 # Structural filesystem operations for the Workspace Explorer (003). `trash`
 # moves an entry to the OS recycle/trash facility and has no permanent-delete

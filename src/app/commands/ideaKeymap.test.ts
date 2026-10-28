@@ -39,11 +39,13 @@ describe("IDEA M1 keymap profile", () => {
       "file.open": "Ctrl+O",
       "file.save": "Ctrl+S",
       "file.saveAs": "Ctrl+Shift+S",
-      "file.close": "Ctrl+W",
+      "file.close": "Ctrl+F4",
       "editor.undo": "Ctrl+Z",
       "editor.redo": "Ctrl+Shift+Z",
       "editor.find": "Ctrl+F",
       "editor.replace": "Ctrl+R",
+      "editor.expandSelection": "Ctrl+W",
+      "editor.shrinkSelection": "Ctrl+Shift+W",
     });
   });
 
@@ -52,9 +54,11 @@ describe("IDEA M1 keymap profile", () => {
     // accelerator: F2/Delete are Explorer-local triggers, and Open/Close Folder
     // and View > Explorer are reachable from the native menu.
     expect(Object.keys(IDEA_M1_KEYMAP).sort()).toEqual([
+      "editor.expandSelection",
       "editor.find",
       "editor.redo",
       "editor.replace",
+      "editor.shrinkSelection",
       "editor.undo",
       "file.close",
       "file.new",
@@ -75,11 +79,13 @@ describe("IDEA M1 keymap profile", () => {
     expect(acceleratorFor("file.open")).toBe("Ctrl+O");
     expect(acceleratorFor("file.save")).toBe("Ctrl+S");
     expect(acceleratorFor("file.saveAs")).toBe("Ctrl+Shift+S");
-    expect(acceleratorFor("file.close")).toBe("Ctrl+W");
+    expect(acceleratorFor("file.close")).toBe("Ctrl+F4");
     expect(acceleratorFor("editor.undo")).toBe("Ctrl+Z");
     expect(acceleratorFor("editor.redo")).toBe("Ctrl+Shift+Z");
     expect(acceleratorFor("editor.find")).toBe("Ctrl+F");
     expect(acceleratorFor("editor.replace")).toBe("Ctrl+R");
+    expect(acceleratorFor("editor.expandSelection")).toBe("Ctrl+W");
+    expect(acceleratorFor("editor.shrinkSelection")).toBe("Ctrl+Shift+W");
   });
 
   it("never binds one accelerator to two commands", () => {
@@ -122,6 +128,8 @@ describe("CommandId catalogue", () => {
       "editor.redo",
       "editor.find",
       "editor.replace",
+      "editor.expandSelection",
+      "editor.shrinkSelection",
       "workspace.openFolder",
       "workspace.closeFolder",
       "explorer.newFile",
@@ -133,6 +141,7 @@ describe("CommandId catalogue", () => {
       "explorer.collapseAll",
       "view.toggleExplorer",
       "view.resetSidebarWidth",
+      "view.toggleEditorMotion",
       "view.densityCompact",
       "view.densityDefault",
       "view.densityComfortable",
@@ -241,6 +250,12 @@ describe("commandForKeyboardEvent", () => {
       commandForKeyboardEvent(event("S", { ctrlKey: true, shiftKey: true })),
     ).toBe("file.saveAs");
     expect(commandForKeyboardEvent(event("w", { ctrlKey: true }))).toBe(
+      "editor.expandSelection",
+    );
+    expect(
+      commandForKeyboardEvent(event("W", { ctrlKey: true, shiftKey: true })),
+    ).toBe("editor.shrinkSelection");
+    expect(commandForKeyboardEvent(event("F4", { ctrlKey: true }))).toBe(
       "file.close",
     );
     expect(commandForKeyboardEvent(event("z", { ctrlKey: true }))).toBe("editor.undo");
@@ -249,14 +264,23 @@ describe("commandForKeyboardEvent", () => {
     ).toBe("editor.redo");
   });
 
-  it("closes the current Tab on Ctrl+W instead of exiting the application", () => {
-    expect(commandForKeyboardEvent(event("w", { ctrlKey: true }))).toBe(
-      "file.close",
-    );
-    expect(commandForKeyboardEvent(event("W", { ctrlKey: true }))).toBe(
+  it("closes the current Tab on Ctrl+F4 instead of exiting the application", () => {
+    expect(commandForKeyboardEvent(event("F4", { ctrlKey: true }))).toBe(
       "file.close",
     );
     expect(acceleratorFor("app.exit")).toBeUndefined();
+  });
+
+  it("expands selection on Ctrl+W and shrinks on Ctrl+Shift+W", () => {
+    expect(commandForKeyboardEvent(event("w", { ctrlKey: true }))).toBe(
+      "editor.expandSelection",
+    );
+    expect(commandForKeyboardEvent(event("W", { ctrlKey: true }))).toBe(
+      "editor.expandSelection",
+    );
+    expect(
+      commandForKeyboardEvent(event("W", { ctrlKey: true, shiftKey: true })),
+    ).toBe("editor.shrinkSelection");
   });
 
   it("does not intercept unbound keys or plain typing", () => {

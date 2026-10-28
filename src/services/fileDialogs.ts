@@ -3,6 +3,10 @@ import { t } from "../i18n";
 import type { OperationErrorContext } from "./errorContext";
 import { dialogManager, type DialogValidity } from "../ui/dialog/dialogManager";
 import { notificationManager } from "../ui/notification/notificationManager";
+import {
+  appOperationActivity,
+  type OperationActivity,
+} from "./operationActivity";
 
 export type UnsavedChoice = "save" | "dontSave" | "cancel";
 export type ExternalConflictChoice = "overwrite" | "cancel";
@@ -56,30 +60,99 @@ const filters = () => [
 ];
 const cancel = { value: "cancel", label: () => t("dialogs.cancel") };
 
-/** Native pickers and application-owned decisions share the old stable result contract. */
-export const nativeFileDialogService: FileDialogService = {
-  async pickOpenPath() {
-    const selected = await open({ title: t("dialogs.openFile"), multiple: false, directory: false, filters: filters() });
-    return typeof selected === "string" ? selected : null;
-  },
-  async pickSavePath(currentPath) {
-    return (await save({ title: t("dialogs.saveAs"), filters: filters(), ...(currentPath === null ? {} : { defaultPath: currentPath }) })) ?? null;
-  },
-  async showError(text, context) { notificationManager.report(text, context); },
-  clearError(context) { notificationManager.resolve(context); },
-  async confirmUnsavedChanges(name, validity) {
-    return await dialogManager.request({ title: () => t("dialogs.title"), message: () => t("dialogs.unsaved", { name }), validity, cancelValue: "cancel",
-      buttons: [{ value: "save", label: () => t("dialogs.save") }, { value: "dontSave", label: () => t("dialogs.dontSave"), dangerous: true }, cancel],
-    }) as UnsavedChoice;
-  },
-  async confirmExternalOverwrite(name, validity) {
-    return await dialogManager.request({ title: () => t("dialogs.title"), message: () => t("dialogs.external", { name }), validity, cancelValue: "cancel",
-      buttons: [{ value: "overwrite", label: () => t("dialogs.overwrite"), dangerous: true }, cancel],
-    }) as ExternalConflictChoice;
-  },
-  async confirmDiscardForReload(name, validity) {
-    return (await dialogManager.request({ title: () => t("dialogs.title"), message: () => t("dialogs.reload", { name }), validity, cancelValue: "cancel",
-      buttons: [{ value: "discard", label: () => t("dialogs.discard"), dangerous: true }, cancel],
-    })) === "discard";
-  },
-};
+/** Creates the native adapter with an injectable operation-activity fallback. */
+export function createNativeFileDialogService(
+  activity: Pick<OperationActivity, "run"> = appOperationActivity,
+): FileDialogService {
+  return {
+    async pickOpenPath() {
+      return activity.run(async () => {
+        const selected = await open({
+          title: t("dialogs.openFile"),
+          multiple: false,
+          directory: false,
+          filters: filters(),
+        });
+        return typeof selected === "string" ? selected : null;
+      });
+    },
+    async pickSavePath(currentPath) {
+      return activity.run(async () => {
+        return (
+          (await save({
+            title: t("dialogs.saveAs"),
+            filters: filters(),
+            ...(currentPath === null ? {} : { defaultPath: currentPath }),
+          })) ?? null
+        );
+      });
+    },
+    async showError(text, context) {
+      notificationManager.report(text, context);
+    },
+    clearError(context) {
+      notificationManager.resolve(context);
+    },
+    async confirmUnsavedChanges(name, validity) {
+      return activity.run(
+        () =>
+          dialogManager.request({
+            title: () => t("dialogs.title"),
+            message: () => t("dialogs.unsaved", { name }),
+            validity,
+            cancelValue: "cancel",
+            buttons: [
+              { value: "save", label: () => t("dialogs.save") },
+              {
+                value: "dontSave",
+                label: () => t("dialogs.dontSave"),
+                dangerous: true,
+              },
+              cancel,
+            ],
+          }),
+      ) as Promise<UnsavedChoice>;
+    },
+    async confirmExternalOverwrite(name, validity) {
+      return activity.run(
+        () =>
+          dialogManager.request({
+            title: () => t("dialogs.title"),
+            message: () => t("dialogs.external", { name }),
+            validity,
+            cancelValue: "cancel",
+            buttons: [
+              {
+                value: "overwrite",
+                label: () => t("dialogs.overwrite"),
+                dangerous: true,
+              },
+              cancel,
+            ],
+          }),
+      ) as Promise<ExternalConflictChoice>;
+    },
+    async confirmDiscardForReload(name, validity) {
+      return (
+        (await activity.run(() =>
+          dialogManager.request({
+            title: () => t("dialogs.title"),
+            message: () => t("dialogs.reload", { name }),
+            validity,
+            cancelValue: "cancel",
+            buttons: [
+              {
+                value: "discard",
+                label: () => t("dialogs.discard"),
+                dangerous: true,
+              },
+              cancel,
+            ],
+          }),
+        )) === "discard"
+      );
+    },
+  };
+}
+
+export const nativeFileDialogService = createNativeFileDialogService();

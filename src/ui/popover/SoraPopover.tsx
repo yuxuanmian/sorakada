@@ -11,10 +11,14 @@
  * shell, and an outside press still dismisses it.
  */
 
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Popover } from "@base-ui/react/popover";
 
-import { useOverlayContainer } from "../overlay/OverlayRoot";
+import {
+  useOverlayContainer,
+  useOverlayEscapeManager,
+} from "../overlay/OverlayRoot";
+import { ESCAPE_PRIORITY } from "../../app/commands/escapeManager";
 import "../ui.css";
 
 export type SoraPopoverSide = "bottom" | "top" | "left" | "right";
@@ -57,6 +61,32 @@ export function SoraPopover({
   className,
 }: SoraPopoverProps) {
   const container = useOverlayContainer();
+  const escapeManager = useOverlayEscapeManager();
+  const actionsRef = useRef<Popover.Root.Actions | null>(null);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+
+  const isControlled = open !== undefined;
+  const isOpen = isControlled ? Boolean(open) : uncontrolledOpen;
+
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      if (!isControlled) {
+        setUncontrolledOpen(next);
+      }
+      onOpenChange?.(next);
+    },
+    [isControlled, onOpenChange],
+  );
+
+  useEffect(() => {
+    if (!isOpen || !escapeManager) {
+      return;
+    }
+    return escapeManager.register(ESCAPE_PRIORITY.POPUP, () => {
+      actionsRef.current?.close();
+      return true;
+    });
+  }, [isOpen, escapeManager]);
 
   const triggerClasses =
     triggerClassName === undefined
@@ -70,9 +100,8 @@ export function SoraPopover({
   return (
     <Popover.Root
       open={open}
-      onOpenChange={(next) => {
-        onOpenChange?.(next);
-      }}
+      onOpenChange={handleOpenChange}
+      actionsRef={actionsRef}
       modal={false}
     >
       <Popover.Trigger className={triggerClasses} aria-label={triggerLabel}>

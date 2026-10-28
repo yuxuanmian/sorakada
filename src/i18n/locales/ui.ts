@@ -20,10 +20,13 @@ export const zhUi = {
       edit: {
         undo: "撤销",
         redo: "重做",
+        expandSelection: "扩大选区",
+        shrinkSelection: "缩小选区",
       },
       view: {
         explorer: "资源管理器",
         resetSidebarWidth: "重置侧边栏宽度",
+        toggleEditorMotion: "平滑光标与滚动",
       },
     },
     submenus: {
@@ -208,10 +211,13 @@ export const enUi = {
       edit: {
         undo: "Undo",
         redo: "Redo",
+        expandSelection: "Expand Selection",
+        shrinkSelection: "Shrink Selection",
       },
       view: {
         explorer: "Explorer",
         resetSidebarWidth: "Reset Sidebar Width",
+        toggleEditorMotion: "Smooth Caret and Scrolling",
       },
     },
     submenus: {

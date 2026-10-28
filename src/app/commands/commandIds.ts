@@ -22,6 +22,9 @@ export const COMMAND_IDS = [
   // 009: In-file search and replace.
   "editor.find",
   "editor.replace",
+  // 013: Smart selection expansion and shrinkage.
+  "editor.expandSelection",
+  "editor.shrinkSelection",
   // 003: Workspace lifecycle.
   "workspace.openFolder",
   "workspace.closeFolder",
@@ -41,6 +44,8 @@ export const COMMAND_IDS = [
   "view.toggleExplorer",
   // 007: density and Sidebar layout preferences (FR-088).
   "view.resetSidebarWidth",
+  // 012: smooth caret and viewport motion toggle.
+  "view.toggleEditorMotion",
   "view.densityCompact",
   "view.densityDefault",
   "view.densityComfortable",

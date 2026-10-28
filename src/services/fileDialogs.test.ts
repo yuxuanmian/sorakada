@@ -10,7 +10,11 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: saveMock,
 }));
 
-import { nativeFileDialogService } from "./fileDialogs";
+import {
+  createNativeFileDialogService,
+  nativeFileDialogService,
+} from "./fileDialogs";
+import { OperationActivityCounter } from "./operationActivity";
 import { dialogManager } from "../ui/dialog/dialogManager";
 import { notificationManager } from "../ui/notification/notificationManager";
 
@@ -52,6 +56,24 @@ describe("nativeFileDialogService - native pickers", () => {
     await expect(nativeFileDialogService.pickSavePath(null)).resolves.toBeNull();
     const opts = saveMock.mock.calls[0][0] as Record<string, unknown>;
     expect("defaultPath" in opts).toBe(false);
+  });
+
+  it("holds operation activity until the native picker settles", async () => {
+    let resolvePicker: (value: string | null) => void = () => {};
+    openMock.mockReturnValue(
+      new Promise<string | null>((resolve) => {
+        resolvePicker = resolve;
+      }),
+    );
+    const activity = new OperationActivityCounter();
+    const service = createNativeFileDialogService(activity);
+
+    const picking = service.pickOpenPath();
+    expect(activity.isActive()).toBe(true);
+
+    resolvePicker("C:\\work\\late.txt");
+    await expect(picking).resolves.toBe("C:\\work\\late.txt");
+    expect(activity.isActive()).toBe(false);
   });
 });
 

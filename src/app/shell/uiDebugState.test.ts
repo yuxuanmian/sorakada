@@ -71,6 +71,7 @@ describe("UiDebugOptions store", () => {
       "density",
       "sidebarVisible",
       "sidebarWidth",
+      "editorMotion",
     ]);
   });
 

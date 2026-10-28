@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { EditorState } from "@codemirror/state";
 
-import type { EditorHandle } from "../../editor/editorHandle";
+import type { EditorHandle, StateUpdateListener } from "../../editor/editorHandle";
+import { reconfigureEditorLanguage } from "../../editor/editorLanguage";
 import type {
   FileCommandError,
   FileService,
@@ -16,7 +17,7 @@ import type { ResolveWorkspaceRelationResult } from "../../services/workspaceFil
 import { DiskValidator } from "../document/diskValidation";
 import { DocumentManager } from "../document/documentManager";
 import { InternalFsOperationGuard } from "../document/internalFsOperationGuard";
-import { NEW_DOCUMENT_FORMAT } from "../document/documentSession";
+import { NEW_DOCUMENT_FORMAT, type DocumentId } from "../document/documentSession";
 import { WorkContextManager } from "./workContextManager";
 import {
   derivePathRelation,
@@ -287,6 +288,9 @@ const WORK_B = "C:\\work\\beta";
 function createDocumentHarness() {
   let unsavedPromptCount = 0;
   let savePath: string | null = null;
+  let activeState: EditorState | null = null;
+  let boundDocId: DocumentId | null = null;
+  let listener: StateUpdateListener | null = null;
 
   const editor = {
     extensions: [],
@@ -294,15 +298,32 @@ function createDocumentHarness() {
     attach: () => {},
     detach: () => {},
     getState: () => {
-      throw new Error("not used");
+      if (activeState === null) {
+        throw new Error("No state bound to fake editor");
+      }
+      return activeState;
     },
-    setState: () => {},
+    setState: (id: DocumentId, state: EditorState) => {
+      boundDocId = id;
+      activeState = state;
+      listener?.(id, state, false);
+    },
+    reconfigureLanguage: (filename: string | null) => {
+      if (activeState !== null && boundDocId !== null) {
+        activeState = activeState.update({
+          effects: reconfigureEditorLanguage(filename),
+        }).state;
+        listener?.(boundDocId, activeState, false);
+      }
+    },
     captureViewState: () => ({ scrollTop: 0, scrollLeft: 0 }),
     restoreViewState: () => {},
     focus: () => {},
     undo: () => {},
     redo: () => {},
-    setStateUpdateListener: () => {},
+    setStateUpdateListener: (l: StateUpdateListener | null) => {
+      listener = l;
+    },
   } as unknown as EditorHandle;
 
   const fileService = {
@@ -341,6 +362,18 @@ function createDocumentHarness() {
     diskValidator: new DiskValidator({ fileService }),
     internalFsOperations: new InternalFsOperationGuard(),
   });
+
+  editor.setStateUpdateListener((documentId, state, docChanged) => {
+    manager.handleEditorStateUpdate(documentId, state, docChanged);
+  });
+
+  const originalHandleUpdate = manager.handleEditorStateUpdate.bind(manager);
+  manager.handleEditorStateUpdate = (id, state, docChanged) => {
+    if (id === boundDocId) {
+      activeState = state;
+    }
+    originalHandleUpdate(id, state, docChanged);
+  };
 
   return {
     manager,
@@ -945,7 +978,7 @@ describe("Workspace relation derivation (T100)", () => {
 
     const session = documents.manager.getSession(id)!;
     expect(session.id).toBe(id);
-    expect(session.editorState).toBe(stateBefore);
+    expect(session.editorState.doc.toString()).toBe(stateBefore.doc.toString());
     expect(documents.manager.listSessions()).toHaveLength(1);
   });
 
@@ -988,8 +1021,8 @@ describe("Workspace relation derivation (T100)", () => {
     expect(affected).toEqual([id]);
     const session = documents.manager.getSession(id)!;
     expect(session.path).toBe(`${WORK_A}\\lib\\a.ts`);
-    // The document's identity, editor state and dirty flag are preserved.
-    expect(session.editorState).toBe(stateBefore);
+    // Language reconfiguration preserves the document text and dirty flag.
+    expect(session.editorState.doc).toBe(stateBefore.doc);
     expect(session.dirty).toBe(true);
 
     await expect(

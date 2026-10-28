@@ -19,6 +19,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import type { EscapeManager } from "../../app/commands/escapeManager";
 
 import "../ui.css";
 
@@ -27,6 +28,7 @@ export const OVERLAY_ROOT_CLASS = "sora-overlay-root";
 
 interface OverlayRootContextValue {
   container: HTMLElement | null;
+  escapeManager: EscapeManager | null;
 }
 
 /**
@@ -35,6 +37,7 @@ interface OverlayRootContextValue {
  */
 const OverlayRootContext = createContext<OverlayRootContextValue>({
   container: null,
+  escapeManager: null,
 });
 
 export interface OverlayRootProps {
@@ -42,6 +45,8 @@ export interface OverlayRootProps {
   children?: ReactNode;
   /** Extra class names for the portal element. */
   className?: string;
+  /** Optional shared EscapeManager for hierarchical Escape dismissal. */
+  escapeManager?: EscapeManager | null;
 }
 
 /**
@@ -51,12 +56,16 @@ export interface OverlayRootProps {
  * its own subtree, which is what keeps a full-viewport portal from swallowing
  * clicks meant for the shell underneath it.
  */
-export function OverlayRoot({ children, className }: OverlayRootProps) {
+export function OverlayRoot({
+  children,
+  className,
+  escapeManager = null,
+}: OverlayRootProps) {
   const [container, setContainer] = useState<HTMLElement | null>(null);
 
   const value = useMemo<OverlayRootContextValue>(
-    () => ({ container }),
-    [container],
+    () => ({ container, escapeManager: escapeManager ?? null }),
+    [container, escapeManager],
   );
 
   return (
@@ -80,4 +89,9 @@ export function OverlayRoot({ children, className }: OverlayRootProps) {
 /** The portal target popups should render into, or `null` for the default one. */
 export function useOverlayContainer(): HTMLElement | null {
   return useContext(OverlayRootContext).container;
+}
+
+/** The shared EscapeManager published by OverlayRoot, or `null` if unconfigured. */
+export function useOverlayEscapeManager(): EscapeManager | null {
+  return useContext(OverlayRootContext).escapeManager;
 }

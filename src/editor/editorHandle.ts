@@ -1,6 +1,14 @@
-import type { EditorState, Extension } from "@codemirror/state";
+import { EditorSelection, type EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { isolateHistory, redo, undo } from "@codemirror/commands";
+import { reconfigureEditorLanguage } from "./editorLanguage";
+import { searchMotionAnnotation } from "./editorMotion";
+import { cancelColumnSelection } from "./columnSelection";
+import {
+  clearSmartSelectionHistory,
+  expandSmartSelection,
+  shrinkSmartSelection,
+} from "./smartSelection";
 import {
   SearchQuery,
   setSearchQuery,
@@ -100,10 +108,27 @@ export interface EditorHandle {
 
   /** Moves keyboard focus into the editor. */
   focus(): void;
+  /** Whether the editor currently has keyboard focus. */
+  hasFocus(): boolean;
   /** Runs CodeMirror's own undo command against the active view. */
   undo(): void;
   /** Runs CodeMirror's own redo command against the active view. */
   redo(): void;
+  /** Simplifies selection: multi-selection -> main range -> single cursor -> false. */
+  simplifySelection(): boolean;
+
+  /** Expands the selection to the next semantic structural unit. */
+  expandSelection(): void;
+  /** Shrinks the selection to the previous snapshot before the last expand. */
+  shrinkSelection(): void;
+
+  /**
+   * Reconfigures syntax highlighting language for the current document view.
+   *
+   * Dispatches `reconfigureEditorLanguage(filename)` against the attached view without
+   * replacing the state, clearing smart selection, or modifying selection, scroll, or history.
+   */
+  reconfigureLanguage(filename: string | null): void;
 
   /** Registers the single receiver of state updates. */
   setStateUpdateListener(listener: StateUpdateListener | null): void;
@@ -194,11 +219,13 @@ class EditorHandleImpl implements EditorHandle {
   });
 
   attach(view: EditorView, documentId: DocumentId): void {
+    cancelColumnSelection();
     this.view = view;
     this.boundDocumentId = documentId;
   }
 
   detach(view: EditorView): void {
+    cancelColumnSelection();
     if (this.view === view) {
       this.view = null;
       this.boundDocumentId = null;
@@ -214,23 +241,31 @@ class EditorHandleImpl implements EditorHandle {
   }
 
   setState(documentId: DocumentId, state: EditorState): void {
+    cancelColumnSelection();
     const view = this.requireView();
     // Identity first: the update this call produces must already belong to the
     // target document.
     this.boundDocumentId = documentId;
-    view.setState(state);
+    const cleanedState = state.update({
+      effects: clearSmartSelectionHistory.of(),
+    }).state;
+    view.setState(cleanedState);
   }
 
   reloadDocumentState(documentId: DocumentId, state: EditorState): void {
+    cancelColumnSelection();
     const view = this.requireView();
     // Same ordering rule as `setState`: the (change-free) update the swap
     // produces must already be attributed to the reloaded document.
     this.boundDocumentId = documentId;
-    view.setState(state);
+    const cleanedState = state.update({
+      effects: clearSmartSelectionHistory.of(),
+    }).state;
+    view.setState(cleanedState);
     // FR-019: keep the clamped primary head visible. `setState` does not scroll,
     // and the previous scroll offset may describe a line that no longer exists.
     view.dispatch({
-      effects: EditorView.scrollIntoView(state.selection.main.head, {
+      effects: EditorView.scrollIntoView(cleanedState.selection.main.head, {
         y: "center",
       }),
     });
@@ -254,12 +289,59 @@ class EditorHandleImpl implements EditorHandle {
     this.requireView().focus();
   }
 
+  hasFocus(): boolean {
+    return this.view !== null && this.view.hasFocus;
+  }
+
   undo(): void {
     undo(this.requireView());
   }
 
   redo(): void {
     redo(this.requireView());
+  }
+
+  expandSelection(): void {
+    if (this.view) {
+      expandSmartSelection(this.view);
+    }
+  }
+
+  shrinkSelection(): void {
+    if (this.view) {
+      shrinkSmartSelection(this.view);
+    }
+  }
+
+  reconfigureLanguage(filename: string | null): void {
+    const view = this.requireView();
+    view.dispatch({
+      effects: reconfigureEditorLanguage(filename),
+    });
+  }
+
+  simplifySelection(): boolean {
+    if (this.view === null) {
+      return false;
+    }
+    const sel = this.view.state.selection;
+    if (sel.ranges.length > 1) {
+      this.view.dispatch({
+        selection: EditorSelection.create([sel.main]),
+        scrollIntoView: true,
+        userEvent: "select",
+      });
+      return true;
+    }
+    if (!sel.main.empty) {
+      this.view.dispatch({
+        selection: EditorSelection.cursor(sel.main.head),
+        scrollIntoView: true,
+        userEvent: "select",
+      });
+      return true;
+    }
+    return false;
   }
 
   setStateUpdateListener(listener: StateUpdateListener | null): void {
@@ -363,7 +445,11 @@ class EditorHandleImpl implements EditorHandle {
     if (target) {
       view.dispatch({
         selection: { anchor: target.match.from, head: target.match.to },
-        effects: EditorView.scrollIntoView(target.match.from, { y: "center" }),
+        effects: EditorView.scrollIntoView(
+          EditorSelection.range(target.match.from, target.match.to),
+          { y: "center", x: "center" },
+        ),
+        annotations: searchMotionAnnotation.of(true),
         userEvent: "select.search",
       });
     }
@@ -399,7 +485,11 @@ class EditorHandleImpl implements EditorHandle {
     if (found) {
       view.dispatch({
         selection: { anchor: found.match.from, head: found.match.to },
-        effects: EditorView.scrollIntoView(found.match.from, { y: "center" }),
+        effects: EditorView.scrollIntoView(
+          EditorSelection.range(found.match.from, found.match.to),
+          { y: "center", x: "center" },
+        ),
+        annotations: searchMotionAnnotation.of(true),
         userEvent: "select.search",
       });
     }
@@ -427,7 +517,11 @@ class EditorHandleImpl implements EditorHandle {
     if (found) {
       view.dispatch({
         selection: { anchor: found.match.from, head: found.match.to },
-        effects: EditorView.scrollIntoView(found.match.from, { y: "center" }),
+        effects: EditorView.scrollIntoView(
+          EditorSelection.range(found.match.from, found.match.to),
+          { y: "center", x: "center" },
+        ),
+        annotations: searchMotionAnnotation.of(true),
         userEvent: "select.search",
       });
     }
@@ -502,8 +596,11 @@ class EditorHandleImpl implements EditorHandle {
         insert: insertText,
       },
       selection: { anchor: nextAnchor, head: nextHead },
-      effects: EditorView.scrollIntoView(nextAnchor, { y: "center" }),
-      annotations: isolateHistory.of("full"),
+      effects: EditorView.scrollIntoView(
+        EditorSelection.range(nextAnchor, nextHead),
+        { y: "center", x: "center" },
+      ),
+      annotations: [isolateHistory.of("full"), searchMotionAnnotation.of(true)],
       userEvent: "input.replace",
     });
   }

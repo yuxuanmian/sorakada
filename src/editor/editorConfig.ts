@@ -1,4 +1,7 @@
 import { basicSetup } from "codemirror";
+import { indentLess, indentMore } from "@codemirror/commands";
+import { indentUnit } from "@codemirror/language";
+import { editorLanguage, editorLanguageFacet } from "./editorLanguage";
 import { getSearchQuery, search } from "@codemirror/search";
 import {
   Compartment,
@@ -11,11 +14,17 @@ import {
   Decoration,
   type DecorationSet,
   EditorView,
+  keymap,
   ViewPlugin,
   type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
 import { getCachedMatches } from "../app/search/searchEngine";
+import { multiCursorClipboard } from "./multiCursorClipboard";
+import { editorMotion } from "./editorMotion";
+import { multiCursorMouse } from "./multiCursorMouse";
+import { smartSelection } from "./smartSelection";
+import { roundedSelection } from "./roundedSelection";
 
 /**
  * Editor appearance.
@@ -308,6 +317,21 @@ export const searchDecorationPlugin = ViewPlugin.fromClass(
   },
 );
 
+function insertIndentOrIndentSelection(view: EditorView): boolean {
+  const { state, dispatch } = view;
+  if (state.readOnly) {
+    return false;
+  }
+  if (state.selection.ranges.some((range) => !range.empty)) {
+    return indentMore(view);
+  }
+  dispatch(state.update(state.replaceSelection(state.facet(indentUnit)), {
+    userEvent: "input",
+    scrollIntoView: true,
+  }));
+  return true;
+}
+
 /**
  * Creates the state for a document showing `doc` (empty by default).
  *
@@ -330,14 +354,28 @@ export const searchDecorationPlugin = ViewPlugin.fromClass(
 export function createEditorState(
   doc = "",
   runtimeExtensions: Extension = [],
+  filename: string | null = null,
 ): EditorState {
   return EditorState.create({
     doc,
     extensions: [
       basicSetup,
+      keymap.of([{
+        key: "Tab",
+        run: insertIndentOrIndentSelection,
+        shift: indentLess,
+        // Keep focus at command boundaries; native Tab focus mode bypasses keymaps.
+        preventDefault: true,
+      }]),
+      editorLanguage(filename),
+      smartSelection(),
+      roundedSelection(),
       search({ top: true }),
       searchDecorationPlugin,
       appearanceBoundary(),
+      multiCursorMouse(),
+      multiCursorClipboard(),
+      editorMotion(),
       runtimeExtensions,
     ],
   });
@@ -370,8 +408,9 @@ export function createExternalReloadState(
   current: EditorState,
   text: string,
   runtimeExtensions: Extension = [],
+  filename: string | null = current.facet(editorLanguageFacet).filename ?? null,
 ): EditorState {
-  const replacement = createEditorState(text, runtimeExtensions);
+  const replacement = createEditorState(text, runtimeExtensions, filename);
   const length = replacement.doc.length;
   const clamp = (position: number): number =>
     Math.max(0, Math.min(position, length));

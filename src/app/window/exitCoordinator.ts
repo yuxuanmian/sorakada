@@ -10,6 +10,7 @@ export interface ExitCoordinatorDeps {
 
 export class ExitCoordinator {
   private inFlight: Promise<boolean> | null = null;
+  private exitCommitted = false;
   private listeners = new Set<() => void>();
 
   constructor(private readonly deps: ExitCoordinatorDeps) {}
@@ -32,6 +33,9 @@ export class ExitCoordinator {
   requestExit(): Promise<boolean> {
     if (this.inFlight !== null) {
       return this.inFlight;
+    }
+    if (this.exitCommitted) {
+      return Promise.resolve(true);
     }
 
     if (this.deps.isModalActive?.()) {
@@ -65,10 +69,12 @@ export class ExitCoordinator {
         }
 
         if (approved) {
+          this.setExitCommitted(true);
           if (this.deps.destroyWindow) {
             try {
               await this.deps.destroyWindow();
             } catch (error) {
+              this.setExitCommitted(false);
               this.deps.onError?.(error, {
                 operation: "window",
                 code: "destroy_failed",
@@ -93,6 +99,19 @@ export class ExitCoordinator {
 
   isExiting(): boolean {
     return this.inFlight !== null;
+  }
+
+  /** True once close approval is final and the app must stop external intake work. */
+  isExitCommitted(): boolean {
+    return this.exitCommitted;
+  }
+
+  private setExitCommitted(value: boolean): void {
+    if (this.exitCommitted === value) {
+      return;
+    }
+    this.exitCommitted = value;
+    this.notify();
   }
 
   private notify(): void {

@@ -27,6 +27,8 @@ export interface CompactAppMenuProps {
   developer: boolean;
   /** Dispatches a command through the shared registry. */
   onCommand(id: CommandId): void;
+  /** Whether editor motion is enabled (012 Caret Enhancement). */
+  editorMotion?: boolean;
 }
 
 /** Renders the TopBar's App Menu trigger and popup. */
@@ -34,6 +36,7 @@ export function CompactAppMenu({
   isEnabled,
   developer,
   onCommand,
+  editorMotion,
 }: CompactAppMenuProps) {
   const { t } = useTranslation();
   /**
@@ -53,7 +56,7 @@ export function CompactAppMenu({
 
   // Rebuilt on every render, so enabled state and accelerator text are always the
   // current registry/keymap answer rather than a cached menu snapshot.
-  const model = buildAppMenuModel({ isEnabled, developer, t });
+  const model = buildAppMenuModel({ isEnabled, developer, t, editorMotion });
 
   return (
     <SoraMenu

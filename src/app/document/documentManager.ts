@@ -24,9 +24,11 @@
 import type { EditorState, Text } from "@codemirror/state";
 
 import { createEditorState, createExternalReloadState } from "../../editor/editorConfig";
+import { reconfigureEditorLanguage } from "../../editor/editorLanguage";
 import type { EditorHandle } from "../../editor/editorHandle";
 import type { FileDialogService } from "../../services/fileDialogs";
 import type { OperationErrorContext } from "../../services/errorContext";
+import { appOperationActivity } from "../../services/operationActivity";
 import type { DialogValidity } from "../../ui/dialog/dialogManager";
 import { localizedDocumentName } from "../../i18n/documentName";
 import {
@@ -887,6 +889,7 @@ export class DocumentManager {
       session.editorState,
       content.text,
       this.editor.extensions,
+      session.path,
     );
     session.editorState = nextState;
     session.savedBaseline = nextState.doc;
@@ -1187,7 +1190,7 @@ export class DocumentManager {
     }
 
     // Only now may a session exist.
-    const state = createEditorState(opened.text, this.editor.extensions);
+    const state = createEditorState(opened.text, this.editor.extensions, path);
     const session: DocumentSession = {
       id: createDocumentId(),
       path,
@@ -1249,7 +1252,12 @@ export class DocumentManager {
       return { status: "success" };
     }
     if (session.path === null) {
-      return this.saveDocumentAs(id, intentGen);
+      // Save on an untitled document is Save As. Keep the modal-operation scope
+      // through the chosen destination and subsequent write; bound-file saves
+      // remain ordinary I/O and deliberately do not block external intake.
+      return appOperationActivity.run(() =>
+        this.saveDocumentAs(id, intentGen),
+      );
     }
 
     // A pending Rename/Delete may be about to move this document's own path, so
@@ -1387,82 +1395,85 @@ export class DocumentManager {
       return this.writeBoundDocument(id, "save", intentGen);
     }
 
-    this.markExternalState(binding, "modified");
+    return appOperationActivity.run(async () => {
+      this.markExternalState(binding, "modified");
 
-    const { validity, signature } = this.createSessionValidity(session);
-    const choice = await this.dialogs.confirmExternalOverwrite(
-      localizedDocumentName(session),
-      validity,
-    );
-    if (choice !== "overwrite") {
-      return { status: "cancelled" };
-    }
-
-    const liveAfterPrompt = this.sessions.get(id);
-    if (
-      liveAfterPrompt === undefined ||
-      !liveAfterPrompt.dirty ||
-      !this.isBindingCurrent(binding) ||
-      !isSessionSignatureValid(liveAfterPrompt, signature)
-    ) {
-      return { status: "cancelled" };
-    }
-
-    const recheck = await this.diskValidator.validate({
-      binding: {
-        ...binding,
-        identity: validation.identity,
-      },
-      trigger: "forced-overwrite",
-      isCurrent: () => {
-        const live = this.sessions.get(id);
-        return (
-          this.isBindingCurrent(binding) &&
-          live !== undefined &&
-          isSessionSignatureValid(live, signature)
-        );
-      },
-    });
-
-    if (recheck.outcome === "stale") {
-      return { status: "cancelled" };
-    }
-    if (recheck.outcome === "missing") {
-      this.markExternalState(binding, "missing");
-      return { status: "cancelled" };
-    }
-    if (recheck.outcome === "unverifiable") {
-      await this.dialogs.showError(recheck.error.message, {
-        operation: "save",
-        documentId: id,
-        path: session.path ?? undefined,
-        code: recheck.error.code,
-        generation: intentGen,
-        critical: true,
-      });
-      return { status: "cancelled" };
-    }
-    if (recheck.outcome === "changed") {
-      const matchesConfirmed =
-        recheck.content.text === validation.content.text &&
-        recheck.content.format.bom === validation.content.format.bom &&
-        recheck.content.format.preferredLineEnding === validation.content.format.preferredLineEnding;
-      if (!matchesConfirmed) {
-        this.markExternalState(binding, "modified");
+      const { validity, signature } = this.createSessionValidity(session);
+      const choice = await this.dialogs.confirmExternalOverwrite(
+        localizedDocumentName(session),
+        validity,
+      );
+      if (choice !== "overwrite") {
         return { status: "cancelled" };
       }
-    }
 
-    const liveBeforeWrite = this.sessions.get(id);
-    if (
-      liveBeforeWrite === undefined ||
-      !this.isBindingCurrent(binding) ||
-      !isSessionSignatureValid(liveBeforeWrite, signature)
-    ) {
-      return { status: "cancelled" };
-    }
+      const liveAfterPrompt = this.sessions.get(id);
+      if (
+        liveAfterPrompt === undefined ||
+        !liveAfterPrompt.dirty ||
+        !this.isBindingCurrent(binding) ||
+        !isSessionSignatureValid(liveAfterPrompt, signature)
+      ) {
+        return { status: "cancelled" };
+      }
 
-    return this.writeBoundDocument(id, "save", intentGen);
+      const recheck = await this.diskValidator.validate({
+        binding: {
+          ...binding,
+          identity: validation.identity,
+        },
+        trigger: "forced-overwrite",
+        isCurrent: () => {
+          const live = this.sessions.get(id);
+          return (
+            this.isBindingCurrent(binding) &&
+            live !== undefined &&
+            isSessionSignatureValid(live, signature)
+          );
+        },
+      });
+
+      if (recheck.outcome === "stale") {
+        return { status: "cancelled" };
+      }
+      if (recheck.outcome === "missing") {
+        this.markExternalState(binding, "missing");
+        return { status: "cancelled" };
+      }
+      if (recheck.outcome === "unverifiable") {
+        await this.dialogs.showError(recheck.error.message, {
+          operation: "save",
+          documentId: id,
+          path: session.path ?? undefined,
+          code: recheck.error.code,
+          generation: intentGen,
+          critical: true,
+        });
+        return { status: "cancelled" };
+      }
+      if (recheck.outcome === "changed") {
+        const matchesConfirmed =
+          recheck.content.text === validation.content.text &&
+          recheck.content.format.bom === validation.content.format.bom &&
+          recheck.content.format.preferredLineEnding ===
+            validation.content.format.preferredLineEnding;
+        if (!matchesConfirmed) {
+          this.markExternalState(binding, "modified");
+          return { status: "cancelled" };
+        }
+      }
+
+      const liveBeforeWrite = this.sessions.get(id);
+      if (
+        liveBeforeWrite === undefined ||
+        !this.isBindingCurrent(binding) ||
+        !isSessionSignatureValid(liveBeforeWrite, signature)
+      ) {
+        return { status: "cancelled" };
+      }
+
+      return this.writeBoundDocument(id, "save", intentGen);
+    });
   }
 
   /**
@@ -2907,6 +2918,18 @@ export class DocumentManager {
     // in-flight validation or reload for the old path stale (FR-039).
     session.bindingGeneration += 1;
 
+    const isActiveAndReady =
+      session.id === this.activeDocumentId && this.editor.isReady();
+
+    if (isActiveAndReady) {
+      this.editor.reconfigureLanguage(path);
+      session.editorState = this.editor.getState();
+    } else {
+      session.editorState = session.editorState.update({
+        effects: reconfigureEditorLanguage(path),
+      }).state;
+    }
+
     if (previousPath === null || previousIdentity === null) {
       // An Untitled document that just became bound (Save As on a new document):
       // this is its *first* watch interest, so it is a binding and not a
@@ -3460,7 +3483,7 @@ export class DocumentManager {
 
   /** Appends a clean untitled session without activating it. */
   private appendUntitledSession(): DocumentSession {
-    const state = createEditorState("", this.editor.extensions);
+    const state = createEditorState("", this.editor.extensions, null);
     const session: DocumentSession = {
       id: createDocumentId(),
       path: null,

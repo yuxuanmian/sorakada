@@ -15,15 +15,28 @@ export default defineConfig({
         // CodeMirror and the React runtime are both large and change
         // independently of the application code, so each gets its own chunk.
         manualChunks(id: string) {
-          if (!id.includes("node_modules")) {
+          const normalizedId = id.replace(/\\/g, "/");
+          if (!normalizedId.includes("node_modules")) {
+            return undefined;
+          }
+          // Language packages and specific language parsers must remain dynamically
+          // split so they are loaded on-demand rather than bundled into the core runtime.
+          if (
+            normalizedId.includes("@codemirror/lang-") ||
+            normalizedId.includes("@codemirror/legacy-modes") ||
+            (normalizedId.includes("@lezer/") &&
+              !normalizedId.includes("@lezer/common") &&
+              !normalizedId.includes("@lezer/highlight") &&
+              !normalizedId.includes("@lezer/lr"))
+          ) {
             return undefined;
           }
           if (
-            id.includes("codemirror") ||
-            id.includes("@lezer") ||
-            id.includes("style-mod") ||
-            id.includes("w3c-keyname") ||
-            id.includes("crelt")
+            normalizedId.includes("codemirror") ||
+            normalizedId.includes("@lezer") ||
+            normalizedId.includes("style-mod") ||
+            normalizedId.includes("w3c-keyname") ||
+            normalizedId.includes("crelt")
           ) {
             return "codemirror";
           }

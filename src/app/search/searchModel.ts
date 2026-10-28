@@ -46,23 +46,16 @@ export const INITIAL_SEARCH_STATE: SearchState = {
 /**
  * Normalizes a candidate selection string for search query prefilling.
  *
- * Requirements (from 009 plan & 010 spec):
- * - Single-line only (no \r or \n).
- * - Max length of 200 characters.
- * - Non-empty after trimming.
- * - In regex mode, escapes special regex characters to search literally.
+ * Requirements (updated 2026-10-18):
+ * - Accepts all non-empty selections, including multiline (\r, \n) and whitespace.
+ * - No character length cap.
+ * - In regex mode, escapes special regex characters to search literally while preserving newlines.
  */
 export function normalizeSelectionForPrefill(
   text: string,
   isRegex = false,
 ): string | null {
-  if (text.length === 0 || text.length > 200) {
-    return null;
-  }
-  if (text.includes("\n") || text.includes("\r")) {
-    return null;
-  }
-  if (text.trim().length === 0) {
+  if (text.length === 0) {
     return null;
   }
   if (isRegex) {

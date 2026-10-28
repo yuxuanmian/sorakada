@@ -111,6 +111,8 @@ export const APP_MENU_SECTIONS: readonly AppMenuSectionSpec[] = [
   section("edit", "ui.menu.sections.edit", [
     entry("editor.undo", "ui.menu.items.edit.undo"),
     entry("editor.redo", "ui.menu.items.edit.redo"),
+    entry("editor.expandSelection", "ui.menu.items.edit.expandSelection"),
+    entry("editor.shrinkSelection", "ui.menu.items.edit.shrinkSelection"),
   ]),
   section(
     "view",
@@ -118,6 +120,7 @@ export const APP_MENU_SECTIONS: readonly AppMenuSectionSpec[] = [
     [
       entry("view.toggleExplorer", "ui.menu.items.view.explorer"),
       entry("view.resetSidebarWidth", "ui.menu.items.view.resetSidebarWidth"),
+      entry("view.toggleEditorMotion", "ui.menu.items.view.toggleEditorMotion"),
     ],
     [
       submenu("density", "ui.menu.submenus.density.label", [
@@ -161,6 +164,8 @@ export interface BuildAppMenuOptions {
    * Optional translate function; defaults to calling `t` from `src/i18n` at build time.
    */
   t?: AppTranslator;
+  /** Whether editor motion is enabled (012 Caret Enhancement). */
+  editorMotion?: boolean;
 }
 
 /**
@@ -178,10 +183,17 @@ export function buildAppMenuModel(
 
   const toItem = (entryItem: AppMenuEntry): SoraMenuItem => {
     const accelerator = acceleratorFor(entryItem.commandId);
+    const icon =
+      entryItem.commandId === "view.toggleEditorMotion"
+        ? options.editorMotion !== false
+          ? "✓"
+          : undefined
+        : undefined;
     return {
       id: entryItem.commandId,
       label: translate(entryItem.labelKey),
       commandId: entryItem.commandId,
+      ...(icon === undefined ? {} : { icon }),
       ...(accelerator === undefined ? {} : { accelerator }),
     };
   };

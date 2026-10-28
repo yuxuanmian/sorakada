@@ -75,6 +75,8 @@ describe("App Menu group composition", () => {
       "app.exit",
       "editor.undo",
       "editor.redo",
+      "editor.expandSelection",
+      "editor.shrinkSelection",
     ] satisfies CommandId[]) {
       expect(ids).toContain(commandId);
     }
@@ -86,6 +88,7 @@ describe("App Menu group composition", () => {
     expect(view?.items.map((item) => item.commandId)).toEqual([
       "view.toggleExplorer",
       "view.resetSidebarWidth",
+      "view.toggleEditorMotion",
     ]);
 
     const density = view?.submenus?.find((submenu) => submenu.id === "density");
@@ -116,7 +119,9 @@ describe("App Menu accelerators come from the keymap profile", () => {
 
     expect(byCommand.get("file.new")).toBe(acceleratorFor("file.new"));
     expect(byCommand.get("file.save")).toBe("Ctrl+S");
-    expect(byCommand.get("file.close")).toBe("Ctrl+W");
+    expect(byCommand.get("file.close")).toBe("Ctrl+F4");
+    expect(byCommand.get("editor.expandSelection")).toBe("Ctrl+W");
+    expect(byCommand.get("editor.shrinkSelection")).toBe("Ctrl+Shift+W");
   });
 
   it("advertises nothing for a command the profile does not bind", () => {
@@ -224,5 +229,35 @@ describe("catalogue shape", () => {
     expect(allMenuItems(second).every((item) => item.disabled === true)).toBe(
       true,
     );
+  });
+});
+
+describe("editor motion menu toggle icon", () => {
+  it("shows checkmark when editorMotion is true or default", () => {
+    const defaultModel = buildAppMenuModel({ isEnabled: everythingEnabled });
+    const defaultItem = allMenuItems(defaultModel).find(
+      (item) => item.commandId === "view.toggleEditorMotion",
+    );
+    expect(defaultItem?.icon).toBe("✓");
+
+    const enabledModel = buildAppMenuModel({
+      isEnabled: everythingEnabled,
+      editorMotion: true,
+    });
+    const enabledItem = allMenuItems(enabledModel).find(
+      (item) => item.commandId === "view.toggleEditorMotion",
+    );
+    expect(enabledItem?.icon).toBe("✓");
+  });
+
+  it("omits checkmark when editorMotion is false", () => {
+    const disabledModel = buildAppMenuModel({
+      isEnabled: everythingEnabled,
+      editorMotion: false,
+    });
+    const disabledItem = allMenuItems(disabledModel).find(
+      (item) => item.commandId === "view.toggleEditorMotion",
+    );
+    expect(disabledItem?.icon).toBeUndefined();
   });
 });

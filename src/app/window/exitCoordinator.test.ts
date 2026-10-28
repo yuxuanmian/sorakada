@@ -13,6 +13,10 @@ describe("ExitCoordinator", () => {
     const result = await coordinator.requestExit();
     expect(result).toBe(true);
     expect(destroy).toHaveBeenCalledTimes(1);
+    expect(coordinator.isExitCommitted()).toBe(true);
+
+    await expect(coordinator.requestExit()).resolves.toBe(true);
+    expect(destroy).toHaveBeenCalledTimes(1);
   });
 
   it("joins in-flight exit request without creating a second prepareCloseAll chain", async () => {
@@ -37,6 +41,7 @@ describe("ExitCoordinator", () => {
     expect(res2).toBe(true);
     expect(destroy).toHaveBeenCalledTimes(1);
     expect(coordinator.isExiting()).toBe(false);
+    expect(coordinator.isExitCommitted()).toBe(true);
   });
 
   it("safely ignores exit request when modal dialog is active", async () => {
@@ -68,6 +73,7 @@ describe("ExitCoordinator", () => {
     expect(result).toBe(false);
     expect(destroy).not.toHaveBeenCalled();
     expect(coordinator.isExiting()).toBe(false);
+    expect(coordinator.isExitCommitted()).toBe(false);
 
     const result2 = await coordinator.requestExit();
     expect(result2).toBe(false);
@@ -90,6 +96,7 @@ describe("ExitCoordinator", () => {
     const result = await coordinator.requestExit();
     expect(result).toBe(false);
     expect(coordinator.isExiting()).toBe(false);
+    expect(coordinator.isExitCommitted()).toBe(false);
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({ operation: "window", code: "destroy_failed" }),
@@ -99,6 +106,7 @@ describe("ExitCoordinator", () => {
     const result2 = await coordinator.requestExit();
     expect(result2).toBe(true);
     expect(destroy).toHaveBeenCalledTimes(2);
+    expect(coordinator.isExitCommitted()).toBe(true);
   });
 
   it("handles synchronous throw in prepareCloseAll, reports error with window context, and allows clean retry", async () => {
@@ -127,6 +135,7 @@ describe("ExitCoordinator", () => {
     const result1 = await coordinator.requestExit();
     expect(result1).toBe(false);
     expect(coordinator.isExiting()).toBe(false);
+    expect(coordinator.isExitCommitted()).toBe(false);
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({ operation: "window", code: "exit_guard_failed" }),
@@ -137,6 +146,7 @@ describe("ExitCoordinator", () => {
     expect(result2).toBe(true);
     expect(prepare).toHaveBeenCalledTimes(2);
     expect(destroy).toHaveBeenCalledTimes(1);
+    expect(coordinator.isExitCommitted()).toBe(true);
   });
 
   it("joins in-flight exit promise even when modal is currently active for this exit", async () => {
@@ -196,6 +206,7 @@ describe("ExitCoordinator", () => {
     const result1 = await coordinator.requestExit();
     expect(result1).toBe(false);
     expect(coordinator.isExiting()).toBe(false);
+    expect(coordinator.isExitCommitted()).toBe(false);
     expect(destroy).not.toHaveBeenCalled();
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),
@@ -211,5 +222,6 @@ describe("ExitCoordinator", () => {
     expect(result2).toBe(true);
     expect(destroy).toHaveBeenCalledTimes(1);
     expect(coordinator.isExiting()).toBe(false);
+    expect(coordinator.isExitCommitted()).toBe(true);
   });
 });

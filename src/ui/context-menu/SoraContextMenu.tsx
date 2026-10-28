@@ -13,10 +13,14 @@
  * and the item model stay Sorakada-owned.
  */
 
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ContextMenu } from "@base-ui/react/context-menu";
 
-import { useOverlayContainer } from "../overlay/OverlayRoot";
+import {
+  useOverlayContainer,
+  useOverlayEscapeManager,
+} from "../overlay/OverlayRoot";
+import { ESCAPE_PRIORITY } from "../../app/commands/escapeManager";
 import "../ui.css";
 import { SoraMenuSections } from "../menu/menuParts";
 import type { SoraMenuItem, SoraMenuModel } from "../menu/menuModel";
@@ -74,6 +78,32 @@ export function SoraContextMenu({
   preventNativeMenu = true,
 }: SoraContextMenuProps) {
   const container = useOverlayContainer();
+  const escapeManager = useOverlayEscapeManager();
+  const actionsRef = useRef<ContextMenu.Root.Actions | null>(null);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+
+  const isControlled = open !== undefined;
+  const isOpen = isControlled ? Boolean(open) : uncontrolledOpen;
+
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      if (!isControlled) {
+        setUncontrolledOpen(next);
+      }
+      onOpenChange?.(next);
+    },
+    [isControlled, onOpenChange],
+  );
+
+  useEffect(() => {
+    if (!isOpen || !escapeManager) {
+      return;
+    }
+    return escapeManager.register(ESCAPE_PRIORITY.POPUP, () => {
+      actionsRef.current?.close();
+      return true;
+    });
+  }, [isOpen, escapeManager]);
 
   const triggerClasses =
     className === undefined
@@ -83,9 +113,8 @@ export function SoraContextMenu({
   return (
     <ContextMenu.Root
       open={open}
-      onOpenChange={(next) => {
-        onOpenChange?.(next);
-      }}
+      onOpenChange={handleOpenChange}
+      actionsRef={actionsRef}
     >
       <ContextMenu.Trigger
         className={triggerClasses}

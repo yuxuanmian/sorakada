@@ -3,6 +3,10 @@ import { t } from "../i18n";
 import type { OperationErrorContext } from "./errorContext";
 import { dialogManager, type DialogValidity } from "../ui/dialog/dialogManager";
 import { notificationManager } from "../ui/notification/notificationManager";
+import {
+  appOperationActivity,
+  type OperationActivity,
+} from "./operationActivity";
 
 export interface DeleteConfirmationRequest {
   displayName: string;
@@ -20,16 +24,49 @@ export function deleteConfirmationText(request: DeleteConfirmationRequest): stri
   if (request.affectedDirtyNames.length) return `${base} ${t("dialogs.dirtyChildren", { names: request.affectedDirtyNames.join(", ") })}`;
   return request.dirty ? `${base} ${t("dialogs.dirtyTarget")}` : base;
 }
-export const nativeWorkspaceDialogService: WorkspaceDialogService = {
-  async pickWorkspaceFolder() {
-    const selected = await open({ title: t("dialogs.openFolder"), multiple: false, directory: true });
-    return typeof selected === "string" ? selected : null;
-  },
-  async showError(text, context) { notificationManager.report(text, context); },
-  clearError(context) { notificationManager.resolve(context); },
-  async confirmDelete(request, validity) {
-    return (await dialogManager.request({ title: () => t("dialogs.title"), message: () => deleteConfirmationText(request), validity, cancelValue: "cancel",
-      buttons: [{ value: "delete", label: () => t("dialogs.delete"), dangerous: true }, { value: "cancel", label: () => t("dialogs.cancel") }],
-    })) === "delete";
-  },
-};
+/** Creates the Workspace dialog adapter with the same activity fallback. */
+export function createNativeWorkspaceDialogService(
+  activity: Pick<OperationActivity, "run"> = appOperationActivity,
+): WorkspaceDialogService {
+  return {
+    async pickWorkspaceFolder() {
+      return activity.run(async () => {
+        const selected = await open({
+          title: t("dialogs.openFolder"),
+          multiple: false,
+          directory: true,
+        });
+        return typeof selected === "string" ? selected : null;
+      });
+    },
+    async showError(text, context) {
+      notificationManager.report(text, context);
+    },
+    clearError(context) {
+      notificationManager.resolve(context);
+    },
+    async confirmDelete(request, validity) {
+      return (
+        (await activity.run(() =>
+          dialogManager.request({
+            title: () => t("dialogs.title"),
+            message: () => deleteConfirmationText(request),
+            validity,
+            cancelValue: "cancel",
+            buttons: [
+              {
+                value: "delete",
+                label: () => t("dialogs.delete"),
+                dangerous: true,
+              },
+              { value: "cancel", label: () => t("dialogs.cancel") },
+            ],
+          }),
+        )) === "delete"
+      );
+    },
+  };
+}
+
+export const nativeWorkspaceDialogService =
+  createNativeWorkspaceDialogService();

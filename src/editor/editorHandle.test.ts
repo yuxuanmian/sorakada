@@ -5,12 +5,15 @@ import type { EditorView } from "@codemirror/view";
 
 import { createEditorState } from "./editorConfig";
 import { createEditorHandle, type EditorHandle } from "./editorHandle";
+import { editorLanguageFacet } from "./editorLanguage";
+import { smartSelectionHistoryField } from "./smartSelection";
 
 interface TestBridge {
   handle: EditorHandle;
   getState: () => EditorState;
   dispatchEdit: (from: number, to: number, insert: string) => void;
   dispatchSelection: (anchor: number, head?: number) => void;
+  dispatchedEffects: any[];
   view: {
     state: EditorState;
     dispatch: (tr: {
@@ -22,6 +25,7 @@ interface TestBridge {
       state?: EditorState;
     }) => void;
     focus: () => void;
+    setState: (newState: EditorState) => void;
   };
 }
 
@@ -31,6 +35,7 @@ function createTestBridge(initialDoc = "", readOnly = false): TestBridge {
     extensions.push(EditorState.readOnly.of(true));
   }
   let state = createEditorState(initialDoc, extensions);
+  const dispatchedEffects: any[] = [];
 
   const view = {
     get state() {
@@ -44,9 +49,22 @@ function createTestBridge(initialDoc = "", readOnly = false): TestBridge {
       userEvent?: string;
       state?: EditorState;
     }) => {
+      if (tr.effects) {
+        if (Array.isArray(tr.effects)) {
+          dispatchedEffects.push(...tr.effects);
+        } else {
+          dispatchedEffects.push(tr.effects);
+        }
+      }
       state = tr.state ?? state.update(tr as Parameters<EditorState["update"]>[0]).state;
     },
     focus: () => {},
+    get hasFocus() {
+      return true;
+    },
+    setState: (newState: EditorState) => {
+      state = newState;
+    },
   };
 
   const handle = createEditorHandle();
@@ -66,6 +84,7 @@ function createTestBridge(initialDoc = "", readOnly = false): TestBridge {
         selection: EditorSelection.single(anchor, head),
       }).state;
     },
+    dispatchedEffects,
     view,
   };
 }
@@ -284,5 +303,195 @@ describe("EditorHandle search & bridge contracts", () => {
 
     handle.replaceAll("protected", "modified", false, false);
     expect(getState().doc.toString()).toBe("protected document");
+  });
+  it("simplifies selection hierarchically on Escape", () => {
+    const { handle, getState, view } = createTestBridge("first second third");
+
+    // 1. Set multiple selections, with main selection having text (6..12: "second")
+    view.dispatch({
+      selection: EditorSelection.create([
+        EditorSelection.range(0, 5), // "first"
+        EditorSelection.range(6, 12), // "second" (main)
+        EditorSelection.range(13, 18), // "third"
+      ], 1),
+    });
+    expect(getState().selection.ranges.length).toBe(3);
+
+    // Step 1: Escape collapses multiple selections to the main selection range (preserving text!)
+    const step1 = handle.simplifySelection();
+    expect(step1).toBe(true);
+    expect(getState().selection.ranges.length).toBe(1);
+    expect(getState().selection.main.from).toBe(6);
+    expect(getState().selection.main.to).toBe(12);
+    expect(getState().selection.main.empty).toBe(false);
+
+    // Step 2: Next Escape collapses the non-empty main selection to a cursor
+    const step2 = handle.simplifySelection();
+    expect(step2).toBe(true);
+    expect(getState().selection.ranges.length).toBe(1);
+    expect(getState().selection.main.empty).toBe(true);
+    expect(getState().selection.main.head).toBe(12);
+
+    // Step 3: Next Escape on already empty cursor returns false (not consumed)
+    const step3 = handle.simplifySelection();
+    expect(step3).toBe(false);
+  });
+
+  it("expands and shrinks smart selection through EditorHandle (Spec 013 §2)", () => {
+    const { handle, getState, dispatchSelection } = createTestBridge("hello world");
+    // Place cursor inside "hello"
+    dispatchSelection(2, 2);
+    expect(getState().selection.main.from).toBe(2);
+    expect(getState().selection.main.to).toBe(2);
+
+    handle.expandSelection();
+    // Expands to word "hello" (0..5)
+    expect(getState().selection.main.from).toBe(0);
+    expect(getState().selection.main.to).toBe(5);
+
+    handle.shrinkSelection();
+    // Shrinks back to original cursor at 2
+    expect(getState().selection.main.from).toBe(2);
+    expect(getState().selection.main.to).toBe(2);
+  });
+
+  it("clears smart selection expansion history on setState and reloadDocumentState (Spec 013 §2)", () => {
+    const { handle, getState, dispatchSelection } = createTestBridge("hello world");
+    dispatchSelection(2, 2);
+    handle.expandSelection();
+    expect(getState().field(smartSelectionHistoryField).length).toBeGreaterThan(0);
+
+    // State A has expansion history
+    const stateA = getState();
+
+    // Switch to document B
+    const stateB = createEditorState("second document");
+    handle.setState("doc-b", stateB);
+    expect(getState().field(smartSelectionHistoryField)).toEqual([]);
+
+    // Switch back to document A: setState applies clearSmartSelectionHistory
+    handle.setState("doc-a", stateA);
+    expect(getState().field(smartSelectionHistoryField)).toEqual([]);
+
+    // Expand in document A again
+    dispatchSelection(1, 1);
+    handle.expandSelection();
+    expect(getState().field(smartSelectionHistoryField).length).toBeGreaterThan(0);
+
+    // Reloading document A also invalidates expansion history
+    const reloaded = getState();
+    handle.reloadDocumentState("doc-a", reloaded);
+    expect(getState().field(smartSelectionHistoryField)).toEqual([]);
+  });
+
+  describe("EditorHandle language reconfiguration (014)", () => {
+    it("reconfigures language via dispatch effect without altering doc, selection, undo or smart selection history", () => {
+      const { handle, getState, dispatchEdit, dispatchSelection } =
+        createTestBridge("const a = 1;");
+
+      // Make an edit so undoDepth > 0
+      dispatchEdit(12, 12, "\nconst b = 2;");
+      expect(undoDepth(getState())).toBe(1);
+
+      // Expand smart selection so history field is non-empty
+      dispatchSelection(6, 6);
+      handle.expandSelection();
+      expect(
+        getState().field(smartSelectionHistoryField).length,
+      ).toBeGreaterThan(0);
+
+      const selectionBefore = getState().selection;
+      const docBefore = getState().doc.toString();
+      const historyBefore = getState().field(smartSelectionHistoryField);
+
+      // Reconfigure language to Python
+      handle.reconfigureLanguage("script.py");
+
+      const stateAfter = getState();
+      expect(stateAfter.facet(editorLanguageFacet).filename).toBe("script.py");
+      expect(stateAfter.facet(editorLanguageFacet).name).toBe("Python");
+      // Text, selection, undo history, and smart selection history remain unchanged
+      expect(stateAfter.doc.toString()).toBe(docBefore);
+      expect(stateAfter.selection.main.from).toBe(selectionBefore.main.from);
+      expect(stateAfter.selection.main.to).toBe(selectionBefore.main.to);
+      expect(undoDepth(stateAfter)).toBe(1);
+      expect(stateAfter.field(smartSelectionHistoryField)).toEqual(
+        historyBefore,
+      );
+    });
+
+    it("resets language to plain text when reconfigured with null", () => {
+      const { handle, getState } = createTestBridge("print('hello')");
+      handle.reconfigureLanguage("script.py");
+      expect(getState().facet(editorLanguageFacet).name).toBe("Python");
+
+      handle.reconfigureLanguage(null);
+      expect(getState().facet(editorLanguageFacet).filename).toBeNull();
+      expect(getState().facet(editorLanguageFacet).name).toBeNull();
+      expect(getState().doc.toString()).toBe("print('hello')");
+    });
+  });
+
+  describe("Search navigation scrollIntoView effect range and centering (2026-10-27)", () => {
+    it("dispatches full range with x: center and y: center on selectNearestMatch", () => {
+      const { handle, dispatchedEffects } = createTestBridge("hello world hello");
+      handle.setSearch("world", true, false);
+      handle.selectNearestMatch();
+      const scrollEffect = dispatchedEffects.find(
+        (e: any) => e.value && e.value.range && e.value.x === "center" && e.value.y === "center",
+      );
+      expect(scrollEffect).toBeDefined();
+      expect(scrollEffect.value.range.from).toBe(6);
+      expect(scrollEffect.value.range.to).toBe(11);
+      expect(scrollEffect.value.x).toBe("center");
+      expect(scrollEffect.value.y).toBe("center");
+    });
+
+    it("dispatches full range with x: center and y: center on findNext", () => {
+      const { handle, dispatchedEffects } = createTestBridge("apple banana apple");
+      handle.setSearch("banana", true, false);
+      handle.findNext();
+      const scrollEffect = dispatchedEffects.find(
+        (e: any) => e.value && e.value.range && e.value.x === "center" && e.value.y === "center",
+      );
+      expect(scrollEffect).toBeDefined();
+      expect(scrollEffect.value.range.from).toBe(6);
+      expect(scrollEffect.value.range.to).toBe(12);
+      expect(scrollEffect.value.x).toBe("center");
+      expect(scrollEffect.value.y).toBe("center");
+    });
+
+    it("dispatches full range with x: center and y: center on findPrevious", () => {
+      const { handle, dispatchedEffects, dispatchSelection } = createTestBridge("apple banana apple");
+      handle.setSearch("apple", true, false);
+      // Place selection at the start of the second match (13..18)
+      dispatchSelection(13, 13);
+      handle.findPrevious();
+      const scrollEffect = dispatchedEffects.find(
+        (e: any) => e.value && e.value.range && e.value.x === "center" && e.value.y === "center",
+      );
+      expect(scrollEffect).toBeDefined();
+      expect(scrollEffect.value.range.from).toBe(0);
+      expect(scrollEffect.value.range.to).toBe(5);
+      expect(scrollEffect.value.x).toBe("center");
+      expect(scrollEffect.value.y).toBe("center");
+    });
+
+    it("dispatches full range with x: center and y: center on replaceNext", () => {
+      const { handle, dispatchedEffects, dispatchSelection } = createTestBridge("cat and cat and cat");
+      handle.setSearch("cat", true, false, "dog");
+      // Select the first match first
+      dispatchSelection(0, 3);
+      handle.replaceNext("cat", "dog", true, false);
+      const scrollEffect = dispatchedEffects.find(
+        (e: any) => e.value && e.value.range && e.value.x === "center" && e.value.y === "center",
+      );
+      expect(scrollEffect).toBeDefined();
+      // First match "cat" at 0..3 is replaced with "dog", advancing to second "cat" at 8..11
+      expect(scrollEffect.value.range.from).toBe(8);
+      expect(scrollEffect.value.range.to).toBe(11);
+      expect(scrollEffect.value.x).toBe("center");
+      expect(scrollEffect.value.y).toBe("center");
+    });
   });
 });

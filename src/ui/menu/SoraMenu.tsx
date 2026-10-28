@@ -7,10 +7,14 @@
  * availability authority and this wrapper owns presentation only.
  */
 
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Menu } from "@base-ui/react/menu";
 
-import { useOverlayContainer } from "../overlay/OverlayRoot";
+import {
+  useOverlayContainer,
+  useOverlayEscapeManager,
+} from "../overlay/OverlayRoot";
+import { ESCAPE_PRIORITY } from "../../app/commands/escapeManager";
 import "../ui.css";
 import { SoraMenuSections } from "./menuParts";
 import type { SoraMenuItem, SoraMenuModel } from "./menuModel";
@@ -61,6 +65,32 @@ export function SoraMenu({
   modal = false,
 }: SoraMenuProps) {
   const container = useOverlayContainer();
+  const escapeManager = useOverlayEscapeManager();
+  const actionsRef = useRef<Menu.Root.Actions | null>(null);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+
+  const isControlled = open !== undefined;
+  const isOpen = isControlled ? Boolean(open) : uncontrolledOpen;
+
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      if (!isControlled) {
+        setUncontrolledOpen(next);
+      }
+      onOpenChange?.(next);
+    },
+    [isControlled, onOpenChange],
+  );
+
+  useEffect(() => {
+    if (!isOpen || !escapeManager) {
+      return;
+    }
+    return escapeManager.register(ESCAPE_PRIORITY.POPUP, () => {
+      actionsRef.current?.close();
+      return true;
+    });
+  }, [isOpen, escapeManager]);
 
   const triggerClasses =
     triggerClassName === undefined
@@ -70,9 +100,8 @@ export function SoraMenu({
   return (
     <Menu.Root
       open={open}
-      onOpenChange={(next) => {
-        onOpenChange?.(next);
-      }}
+      onOpenChange={handleOpenChange}
+      actionsRef={actionsRef}
       modal={modal}
     >
       <Menu.Trigger className={triggerClasses} aria-label={triggerLabel}>

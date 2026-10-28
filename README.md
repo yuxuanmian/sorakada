@@ -114,11 +114,13 @@ npm run tauri dev
 ## Build
 
 ```bash
-npm run tauri build
+npm run package
 ```
 
-Artifacts are written to `src-tauri/target/release/` (executable) and
-`src-tauri/target/release/bundle/` (installers).
+The Windows NSIS installer is exported to `release/` at the repository root,
+for example `release/Sorakada_0.1.0-alpha.1_x64-setup.exe`. The command builds
+the app and then copies installers for the configured version to this folder.
+Rust compilation output remains under `src-tauri/target/`.
 
 ## Checks
 

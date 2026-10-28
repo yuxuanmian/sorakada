@@ -31,7 +31,7 @@ describe("parseUiPreferences", () => {
     expect(parseUiPreferences("")).toEqual(DEFAULT_UI_PREFERENCES);
   });
 
-  it("accepts a valid payload", () => {
+  it("accepts a valid payload and conservatively defaults missing editorMotion to true", () => {
     expect(
       parseUiPreferences(
         JSON.stringify({
@@ -46,6 +46,25 @@ describe("parseUiPreferences", () => {
       density: "comfortable",
       sidebarVisible: false,
       sidebarWidth: 800,
+      editorMotion: true,
+    });
+
+    expect(
+      parseUiPreferences(
+        JSON.stringify({
+          version: UI_PREFERENCES_VERSION,
+          density: "compact",
+          sidebarVisible: true,
+          sidebarWidth: 300,
+          editorMotion: false,
+        }),
+      ),
+    ).toEqual({
+      version: 1,
+      density: "compact",
+      sidebarVisible: true,
+      sidebarWidth: 300,
+      editorMotion: false,
     });
   });
 
@@ -67,6 +86,7 @@ describe("parseUiPreferences", () => {
           density: "compact",
           sidebarVisible: false,
           sidebarWidth: 500,
+          editorMotion: false,
         }),
       ),
     ).toEqual(DEFAULT_UI_PREFERENCES);
@@ -80,6 +100,7 @@ describe("parseUiPreferences", () => {
           density: "gigantic",
           sidebarVisible: "yes",
           sidebarWidth: "wide",
+          editorMotion: "nope",
         }),
       ),
     ).toEqual(DEFAULT_UI_PREFERENCES);
@@ -126,6 +147,7 @@ describe("parseUiPreferences", () => {
       density: "compact",
       sidebarVisible: false,
       sidebarWidth: 512,
+      editorMotion: false,
     };
     expect(parseUiPreferences(serializeUiPreferences(preferences))).toEqual(
       preferences,
@@ -138,6 +160,7 @@ describe("parseUiPreferences", () => {
     ) as Record<string, unknown>;
     expect(Object.keys(payload).sort()).toEqual([
       "density",
+      "editorMotion",
       "sidebarVisible",
       "sidebarWidth",
       "version",
@@ -193,6 +216,7 @@ describe("UiPreferencesStore", () => {
         density: "compact",
         sidebarVisible: false,
         sidebarWidth: 400,
+        editorMotion: false,
       }),
     );
     const store = createUiPreferencesStore({ storage });
@@ -201,6 +225,7 @@ describe("UiPreferencesStore", () => {
       density: "compact",
       sidebarVisible: false,
       sidebarWidth: 400,
+      editorMotion: false,
     });
   });
 
@@ -213,14 +238,16 @@ describe("UiPreferencesStore", () => {
     store.setDensity("comfortable");
     store.setSidebarVisible(false);
     store.setSidebarWidth(720);
+    store.setEditorMotion(false);
 
-    expect(listener).toHaveBeenCalledTimes(3);
+    expect(listener).toHaveBeenCalledTimes(4);
     const snapshot = store.getSnapshot();
     expect(snapshot).toEqual({
       version: 1,
       density: "comfortable",
       sidebarVisible: false,
       sidebarWidth: 720,
+      editorMotion: false,
     });
     expect(parseUiPreferences(storage.read())).toEqual(snapshot);
   });
@@ -233,6 +260,7 @@ describe("UiPreferencesStore", () => {
     store.subscribe(listener);
 
     store.setDensity(store.getSnapshot().density);
+    store.setEditorMotion(store.getSnapshot().editorMotion);
     expect(listener).not.toHaveBeenCalled();
   });
 
